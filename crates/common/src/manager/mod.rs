@@ -17,6 +17,7 @@ use utils::HttpLimitResponse;
 
 pub mod application;
 pub mod backup;
+pub mod blob_moves; // inbuxa: blob-store-change spec, a blob store that moved
 pub mod boot;
 pub mod compliance_roles; // inbuxa: personal-data catalog, the compliance roles
 pub mod console;

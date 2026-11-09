@@ -734,6 +734,21 @@ impl<'de> Visitor<'de> for CallVisitor {
                     return Err(de::Error::invalid_length(1, &self));
                 }
             },
+            // inbuxa: a change of blob store
+            (MethodFunction::Get, MethodObject::BlobStoreChange) => match seq.next_element() {
+                Ok(Some(value)) => RequestMethod::Get(GetRequestMethod::BlobStoreChange(value)),
+                Err(err) => RequestMethod::invalid(err),
+                Ok(None) => {
+                    return Err(de::Error::invalid_length(1, &self));
+                }
+            },
+            (MethodFunction::Set, MethodObject::BlobStoreChange) => match seq.next_element() {
+                Ok(Some(value)) => RequestMethod::Set(SetRequestMethod::BlobStoreChange(value)),
+                Err(err) => RequestMethod::invalid(err),
+                Ok(None) => {
+                    return Err(de::Error::invalid_length(1, &self));
+                }
+            },
             // inbuxa: inbuxa Relay
             (MethodFunction::Get, MethodObject::Relay) => match seq.next_element() {
                 Ok(Some(value)) => RequestMethod::Get(GetRequestMethod::Relay(value)),

@@ -39,6 +39,9 @@ pub struct LinkedBlob {
     pub hash: BlobHash,
     pub committed: bool,
     pub holders: Vec<BlobHolder>,
+    /// inbuxa: blob-store-change spec, BM-5: a link that hasn't expired
+    /// and names nothing: an upload, a cached app bundle, a journal entry.
+    pub temporary: bool,
 }
 
 impl Store {
@@ -46,6 +49,21 @@ impl Store {
     /// hash) that something holds a link to. Uploads nothing holds yet and
     /// expired links are left out: they're the purge's to clear.
     pub async fn linked_blobs(&self, slice: u8) -> trc::Result<Vec<LinkedBlob>> {
+        let mut blobs = self.indexed_blobs(slice).await?;
+        blobs.retain(|b| !b.holders.is_empty());
+        Ok(blobs)
+    }
+
+    /// inbuxa: blob-store-change spec, BM-5: every blob in one slice of the
+    /// blob index that something holds, a plain link that hasn't expired
+    /// included. Expired links are left out.
+    pub async fn blobs_to_copy(&self, slice: u8) -> trc::Result<Vec<LinkedBlob>> {
+        let mut blobs = self.indexed_blobs(slice).await?;
+        blobs.retain(|b| !b.holders.is_empty() || b.temporary);
+        Ok(blobs)
+    }
+
+    async fn indexed_blobs(&self, slice: u8) -> trc::Result<Vec<LinkedBlob>> {
         const TEMP_LINK: usize = BLOB_HASH_LEN + U32_LEN + U64_LEN;
         const DOC_LINK: usize = BLOB_HASH_LEN + U32_LEN + 1 + U32_LEN;
         const ID_LINK: usize = BLOB_HASH_LEN + U64_LEN;
@@ -86,6 +104,7 @@ impl Store {
                         hash,
                         committed: false,
                         holders: Vec::new(),
+                        temporary: false,
                     });
                 }
                 let blob = blobs.last_mut().unwrap();
@@ -108,6 +127,8 @@ impl Store {
                                 account_id: key.deserialize_be_u32(BLOB_HASH_LEN)?,
                                 item: ObjectId::deserialize(value)?,
                             });
+                        } else if until > now {
+                            blob.temporary = true;
                         }
                     }
                     _ => {
@@ -124,7 +145,6 @@ impl Store {
         .await
         .caused_by(trc::location!())?;
 
-        blobs.retain(|b| !b.holders.is_empty());
         Ok(blobs)
     }
 }
@@ -157,6 +177,8 @@ impl BlobStore {
                 Ok(false)
             }
             BlobStore::Store(_) => self.raw_get(key).await.map(|b| b.is_some()),
+            // inbuxa: blob-store-change spec, BM-3
+            BlobStore::Moving(store) => store.blob_present(key).await,
         }
     }
 }

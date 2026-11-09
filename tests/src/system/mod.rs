@@ -15,6 +15,7 @@ pub mod audit; // inbuxa: the audit log
 pub mod authentication;
 pub mod authorization;
 pub mod auto_reload; // inbuxa: registry writes apply at once
+pub mod blob_store_change; // inbuxa: a change of blob store
 pub mod branding;
 pub mod compliance; // inbuxa: the compliance roles
 pub mod crypto;

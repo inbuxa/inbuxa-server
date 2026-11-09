@@ -20,6 +20,7 @@
 
 pub mod ai;
 pub mod audit;
+pub mod blob_move; // inbuxa: changing the blob store (not a rebuild)
 pub mod branding;
 pub mod deliverability; // inbuxa: the deliverability check (not a rebuild)
 pub mod hold;

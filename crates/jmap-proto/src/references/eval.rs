@@ -97,6 +97,9 @@ impl Response<'_> {
                         GetResponseMethod::StoreSnapshot(response) => {
                             response.eval_jptr(path, &mut results)
                         }
+                        GetResponseMethod::BlobStoreChange(response) => {
+                            response.eval_jptr(path, &mut results)
+                        }
                         GetResponseMethod::Relay(response) => {
                             response.eval_jptr(path, &mut results)
                         }

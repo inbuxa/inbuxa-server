@@ -434,6 +434,7 @@ impl IntermediateChangesResponse {
             | MethodObject::Migration
             | MethodObject::StoreCheck
             | MethodObject::StoreSnapshot
+            | MethodObject::BlobStoreChange
             | MethodObject::Relay
             | MethodObject::RelayMessage
             | MethodObject::SecurityAcceptance

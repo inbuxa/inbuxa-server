@@ -122,6 +122,8 @@ impl JmapAuthorization for AccessToken {
                 GetRequestMethod::StoreCheck(_) => Permission::SysStoreCheck,
                 // inbuxa: store-snapshot spec, SN-8
                 GetRequestMethod::StoreSnapshot(_) => Permission::SysStoreSnapshot,
+                // inbuxa: blob-store-change spec, BM-9
+                GetRequestMethod::BlobStoreChange(_) => Permission::SysBlobStoreChange,
                 // inbuxa: inbuxa Relay
                 GetRequestMethod::Relay(_) => Permission::SysRelayGet,
                 GetRequestMethod::RelayMessage(_) => Permission::SysRelayQueueGet,
@@ -342,6 +344,14 @@ impl JmapAuthorization for AccessToken {
                         Permission::SysStoreSnapshot,
                         Permission::SysStoreSnapshot,
                         Permission::SysStoreSnapshot,
+                    ),
+                    // inbuxa: blob-store-change spec, BM-9
+                    SetRequestMethod::BlobStoreChange(s) => validate_set(
+                        s,
+                        self,
+                        Permission::SysBlobStoreChange,
+                        Permission::SysBlobStoreChange,
+                        Permission::SysBlobStoreChange,
                     ),
                     // inbuxa: inbuxa Relay; a new join token is an update
                     SetRequestMethod::Relay(s) => validate_set(
@@ -618,6 +628,7 @@ impl JmapAuthorization for AccessToken {
                 | MethodObject::Migration
                 | MethodObject::StoreCheck
                 | MethodObject::StoreSnapshot
+                | MethodObject::BlobStoreChange
                 | MethodObject::Relay
                 | MethodObject::RelayMessage
                 | MethodObject::SecurityAcceptance

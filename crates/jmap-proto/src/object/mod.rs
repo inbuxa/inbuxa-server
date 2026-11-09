@@ -26,6 +26,7 @@ pub mod identity;
 pub mod inbuxa_account_lock; // inbuxa: account lock with delegation
 pub mod inbuxa_ai_limits; // inbuxa: AI spam classification
 pub mod inbuxa_audit; // inbuxa: the audit log
+pub mod inbuxa_blob_store_change; // inbuxa: a change of blob store
 pub mod inbuxa_data_inventory; // inbuxa: personal-data catalog
 pub mod inbuxa_deleted_account; // inbuxa: undelete
 pub mod inbuxa_deliverability_report; // inbuxa: the deliverability check

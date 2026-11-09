@@ -50,10 +50,15 @@ impl Storage {
             bp.data_store.share_marks(&memory);
         }
 
+        // inbuxa: blob-store-change spec, BM-2, BM-3: a blob store that
+        // moved keeps reading what it left behind
+        let blob = BlobStore::build(bp).await.unwrap_or_default();
+        let blob = crate::manager::blob_moves::at_start(bp, blob).await;
+
         Storage {
             registry: bp.registry.clone(),
             data: bp.data_store.clone(),
-            blob: BlobStore::build(bp).await.unwrap_or_default(),
+            blob,
             search,
             coordinator,
             memory,

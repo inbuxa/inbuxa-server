@@ -299,6 +299,9 @@ impl RequestHandler for Server {
                                     SetResponseMethod::StoreSnapshot(set_response) => {
                                         set_response.update_created_ids(&mut response);
                                     }
+                                    SetResponseMethod::BlobStoreChange(set_response) => {
+                                        set_response.update_created_ids(&mut response);
+                                    }
                                     SetResponseMethod::Relay(set_response) => {
                                         set_response.update_created_ids(&mut response);
                                     }
@@ -589,6 +592,13 @@ impl RequestHandler for Server {
                 GetRequestMethod::StoreSnapshot(mut req) => {
                     resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
                     crate::inbuxa::store_snapshot::get(self, access_token, *req)
+                        .await?
+                        .into()
+                }
+                // inbuxa: a change of blob store
+                GetRequestMethod::BlobStoreChange(mut req) => {
+                    resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
+                    crate::inbuxa::blob_store_change::get(self, access_token, *req)
                         .await?
                         .into()
                 }
@@ -1213,6 +1223,28 @@ impl RequestHandler for Server {
                         None,
                         *req,
                         |req| Box::pin(crate::inbuxa::store_snapshot::set(self, access_token, req)),
+                    )
+                    .await?
+                    .into()
+                }
+                // inbuxa: blob-store-change spec, BM-9: copying, stopping and dismissing are audited
+                SetRequestMethod::BlobStoreChange(mut req) => {
+                    resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
+                    crate::inbuxa::audit::recorded(
+                        self,
+                        access_token,
+                        session,
+                        &method_name.obj.to_string(),
+                        None,
+                        None,
+                        *req,
+                        |req| {
+                            Box::pin(crate::inbuxa::blob_store_change::set(
+                                self,
+                                access_token,
+                                req,
+                            ))
+                        },
                     )
                     .await?
                     .into()

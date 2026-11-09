@@ -15,6 +15,12 @@ const LZ4_MARKER: u8 = MAGIC_MARKER | 0x01;
 //const ZSTD_MARKER: u8 = MAGIC_MARKER | 0x02;
 const NONE_MARKER: u8 = 0x00;
 
+/// What a stored blob decodes to: its content, or an empty value as is.
+enum Decoded {
+    Content(Vec<u8>),
+    Bare(Vec<u8>),
+}
+
 impl BlobStore {
     pub async fn get_blob(&self, key: &[u8], range: Range<usize>) -> trc::Result<Option<Vec<u8>>> {
         let start_time = Instant::now();
@@ -27,11 +33,42 @@ impl BlobStore {
             Size = result.as_ref().map_or(0, |data| data.len()),
         );
 
-        let Some(mut data) = result else {
+        let Some(data) = result else {
             return Ok(None);
         };
 
-        let mut data = match data.last().copied() {
+        let mut data = match Self::decode_stored(key, data)? {
+            Decoded::Content(data) => data,
+            Decoded::Bare(data) => return Ok(Some(data)),
+        };
+
+        if range.start == 0 {
+            if range.end > data.len() {
+                Ok(Some(data))
+            } else {
+                data.truncate(range.end);
+                Ok(Some(data))
+            }
+        } else {
+            Ok(Some(
+                data.get(range.start..range.end)
+                    .unwrap_or_default()
+                    .to_vec(),
+            ))
+        }
+    }
+
+    /// inbuxa: a blob's content from what the backend keeps, as
+    /// [`BlobStore::get_blob`] reads it (blob-store-change spec, BM-5: a copy
+    /// checks a blob's hash before writing it as it was stored).
+    pub fn content_of_stored(key: &[u8], data: Vec<u8>) -> trc::Result<Vec<u8>> {
+        Self::decode_stored(key, data).map(|decoded| match decoded {
+            Decoded::Content(data) | Decoded::Bare(data) => data,
+        })
+    }
+
+    fn decode_stored(key: &[u8], mut data: Vec<u8>) -> trc::Result<Decoded> {
+        let data = match data.last().copied() {
             Some(LZ4_MARKER) => {
                 lz4_flex::decompress_size_prepended(data.get(..data.len() - 1).unwrap_or_default())
                     .map_err(|err| {
@@ -53,24 +90,10 @@ impl BlobStore {
                 data
             }
             None => {
-                return Ok(Some(data));
+                return Ok(Decoded::Bare(data));
             }
         };
-
-        if range.start == 0 {
-            if range.end > data.len() {
-                Ok(Some(data))
-            } else {
-                data.truncate(range.end);
-                Ok(Some(data))
-            }
-        } else {
-            Ok(Some(
-                data.get(range.start..range.end)
-                    .unwrap_or_default()
-                    .to_vec(),
-            ))
-        }
+        Ok(Decoded::Content(data))
     }
 
     pub async fn put_blob(
@@ -183,6 +206,8 @@ impl BlobStore {
             BlobStore::Azure(store) => store.get_blob(key, 0..usize::MAX).await,
             // inbuxa: ST-17
             BlobStore::Sharded(store) => store.get(key).await,
+            // inbuxa: BM-3
+            BlobStore::Moving(store) => store.raw_get(key).await,
         }
     }
 
@@ -212,6 +237,8 @@ impl BlobStore {
             BlobStore::Azure(store) => store.put_blob(key, data).await,
             // inbuxa: ST-18
             BlobStore::Sharded(store) => store.put(key, data).await,
+            // inbuxa: BM-3: writes go to the current store only
+            BlobStore::Moving(store) => Box::pin(store.current.raw_put(key, data)).await,
         }
     }
 
@@ -241,6 +268,8 @@ impl BlobStore {
             BlobStore::Azure(store) => store.delete_blob(key).await,
             // inbuxa: ST-18
             BlobStore::Sharded(store) => store.delete(key).await,
+            // inbuxa: BM-3: nothing is deleted from an old store
+            BlobStore::Moving(store) => Box::pin(store.current.raw_delete(key)).await,
         }
     }
 }

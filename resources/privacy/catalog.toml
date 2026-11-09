@@ -281,6 +281,17 @@ retention = "object-life"
 createdBy = ["identifier"]
 problems = ["identifier", "metadata"]
 
+[object."inbuxa:BlobStoreChange"]
+file = "inbuxa_blob_store_change.rs"
+default = "none"
+whose = ["holder", "administrator"]
+where = ["data-store"]
+scope = "server"
+retention = "object-life"
+[object."inbuxa:BlobStoreChange".properties]
+copyStartedBy = ["identifier"]
+problems = ["identifier", "metadata"]
+
 [object."inbuxa:StoreSnapshot"]
 file = "inbuxa_store_snapshot.rs"
 default = "none"
@@ -445,6 +456,19 @@ scope = "server"
 retention = "object-life"
 leaves_host = false
 written_by = ["crates/services/src/inbuxa_store_snapshot.rs"]
+
+# A change of blob store keeps the old store's settings, credentials
+# included, until it's resolved or dismissed, so the old store can be read
+# and copied from. Never returned by get (blob-store-change spec, BM-2,
+# BM-7, BM-9).
+[source."blob-store-change-settings"]
+categories = ["credential", "network"]
+whose = ["administrator"]
+where = ["data-store"]
+scope = "server"
+retention = "object-life"
+leaves_host = false
+written_by = ["crates/features/src/blob_move/mod.rs"]
 
 [source."full-text-index"]
 categories = ["content", "identifier", "contact", "metadata"]

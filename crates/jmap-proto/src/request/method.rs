@@ -74,6 +74,8 @@ pub enum MethodObject {
     StoreCheck,
     // inbuxa: a snapshot of the store
     StoreSnapshot,
+    // inbuxa: a change of blob store
+    BlobStoreChange,
     Relay,
     RelayMessage,
     // inbuxa: accepted security to-do items
@@ -135,6 +137,7 @@ impl MethodObject {
             | MethodObject::Migration
             | MethodObject::StoreCheck
             | MethodObject::StoreSnapshot
+            | MethodObject::BlobStoreChange
             | MethodObject::Relay
             | MethodObject::RelayMessage
             | MethodObject::SecurityAcceptance
@@ -355,6 +358,8 @@ impl MethodName {
             (MethodFunction::Set, MethodObject::StoreCheck) => "inbuxa:StoreCheck/set",
             (MethodFunction::Get, MethodObject::StoreSnapshot) => "inbuxa:StoreSnapshot/get",
             (MethodFunction::Set, MethodObject::StoreSnapshot) => "inbuxa:StoreSnapshot/set",
+            (MethodFunction::Get, MethodObject::BlobStoreChange) => "inbuxa:BlobStoreChange/get",
+            (MethodFunction::Set, MethodObject::BlobStoreChange) => "inbuxa:BlobStoreChange/set",
             (MethodFunction::Get, MethodObject::Relay) => "inbuxa:Relay/get",
             (MethodFunction::Set, MethodObject::Relay) => "inbuxa:Relay/set",
             (MethodFunction::Get, MethodObject::RelayMessage) => "inbuxa:RelayMessage/get",
@@ -564,6 +569,8 @@ impl MethodName {
             "inbuxa:StoreCheck/set" => (MethodObject::StoreCheck, MethodFunction::Set),
             "inbuxa:StoreSnapshot/get" => (MethodObject::StoreSnapshot, MethodFunction::Get),
             "inbuxa:StoreSnapshot/set" => (MethodObject::StoreSnapshot, MethodFunction::Set),
+            "inbuxa:BlobStoreChange/get" => (MethodObject::BlobStoreChange, MethodFunction::Get),
+            "inbuxa:BlobStoreChange/set" => (MethodObject::BlobStoreChange, MethodFunction::Set),
             "inbuxa:Relay/get" => (MethodObject::Relay, MethodFunction::Get),
             "inbuxa:Relay/set" => (MethodObject::Relay, MethodFunction::Set),
             "inbuxa:RelayMessage/get" => (MethodObject::RelayMessage, MethodFunction::Get),
@@ -668,6 +675,7 @@ impl Display for MethodObject {
             MethodObject::Migration => "inbuxa:Migration",
             MethodObject::StoreCheck => "inbuxa:StoreCheck",
             MethodObject::StoreSnapshot => "inbuxa:StoreSnapshot",
+            MethodObject::BlobStoreChange => "inbuxa:BlobStoreChange",
             MethodObject::Relay => "inbuxa:Relay",
             MethodObject::RelayMessage => "inbuxa:RelayMessage",
             MethodObject::SecurityAcceptance => "inbuxa:SecurityAcceptance",
