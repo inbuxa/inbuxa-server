@@ -511,6 +511,21 @@ async fn fork_current(server: &Server, object: &str, id: &MaybeInvalid<Id>) -> O
             }
             MaybeInvalid::Invalid(_) => None,
         },
+        // A store check: what kind, and how it stands (store-check spec, SV-9)
+        "inbuxa:StoreCheck" => match id {
+            MaybeInvalid::Value(id) => {
+                inbuxa_features::store_check::get(data, u32::try_from(id.id()).ok()?)
+                    .await
+                    .ok()?
+                    .map(|c| {
+                        serde_json::json!({
+                            "mode": c.mode.as_str(),
+                            "status": c.status.as_str(),
+                        })
+                    })
+            }
+            MaybeInvalid::Invalid(_) => None,
+        },
         // A relay as an administrator sets it: never its keys or token
         "inbuxa:Relay" => match id {
             MaybeInvalid::Value(id) => {

@@ -293,6 +293,9 @@ impl RequestHandler for Server {
                                     SetResponseMethod::Migration(set_response) => {
                                         set_response.update_created_ids(&mut response);
                                     }
+                                    SetResponseMethod::StoreCheck(set_response) => {
+                                        set_response.update_created_ids(&mut response);
+                                    }
                                     SetResponseMethod::Relay(set_response) => {
                                         set_response.update_created_ids(&mut response);
                                     }
@@ -569,6 +572,13 @@ impl RequestHandler for Server {
                 GetRequestMethod::Migration(mut req) => {
                     resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
                     crate::inbuxa::migration::get(self, access_token, *req)
+                        .await?
+                        .into()
+                }
+                // inbuxa: checking the store's blobs
+                GetRequestMethod::StoreCheck(mut req) => {
+                    resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
+                    crate::inbuxa::store_check::get(self, access_token, *req)
                         .await?
                         .into()
                 }
@@ -1161,6 +1171,22 @@ impl RequestHandler for Server {
                         reason,
                         *req,
                         |req| Box::pin(crate::inbuxa::migration::set(self, access_token, req)),
+                    )
+                    .await?
+                    .into()
+                }
+                // inbuxa: store-check spec, SV-9: starting and stopping are audited
+                SetRequestMethod::StoreCheck(mut req) => {
+                    resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
+                    crate::inbuxa::audit::recorded(
+                        self,
+                        access_token,
+                        session,
+                        &method_name.obj.to_string(),
+                        None,
+                        None,
+                        *req,
+                        |req| Box::pin(crate::inbuxa::store_check::set(self, access_token, req)),
                     )
                     .await?
                     .into()

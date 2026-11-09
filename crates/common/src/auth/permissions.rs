@@ -388,6 +388,11 @@ impl Default for DefaultPermissions {
                 Permission::SysMigrationRun => {
                     default.superuser.push(permission);
                 }
+                // inbuxa: store-check spec, SV-9: a check reads every
+                // account's data, so only the server's administrators run one
+                Permission::SysStoreCheck => {
+                    default.superuser.push(permission);
+                }
                 // inbuxa: AL-12: tenant administrators lock and delegate
                 // within their tenant
                 Permission::SysAccountLockGet

@@ -1791,6 +1791,8 @@ pub enum Permission {
     SysRelayQueueUpdate = 693,
     // inbuxa: migrations into this server
     SysMigrationRun = 694,
+    // inbuxa: checking the store's blobs
+    SysStoreCheck = 695,
     SysAccountGet = 219,
     SysAccountCreate = 220,
     SysAccountUpdate = 221,

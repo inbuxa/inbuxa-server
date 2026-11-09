@@ -38,6 +38,7 @@ pub mod relay_message; // inbuxa: a relay's queues
 pub mod scheduled_reports; // inbuxa: scheduled reports and the weekly digest
 pub mod security_acceptance;
 pub mod sharing_policy;
+pub mod store_check; // inbuxa: checking the store's blobs
 pub mod telemetry;
 pub mod tenant_protocol_policy;
 pub mod undelete;

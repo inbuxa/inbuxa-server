@@ -386,6 +386,8 @@ Not a rebuild: **scheduled reports and the weekly digest** are INBUXA's own desi
 
 Not a rebuild: **migrations into this server** are INBUXA's own design (`features/migrations.md`, approved 2026-10-30, in progress). An administrator moves a domain in from inbuxa Admin; the server keeps the answers as `inbuxa:Migration` and runs the bundled inbuxa-migrate on them as a child of one node, writing in as that administrator with a run token held in memory only (`crates/jmap/src/inbuxa/migration.rs`, `crates/features/src/migration/`, `crates/services/src/inbuxa_migrations.rs`, `crates/common/src/migration_token.rs`), and the `sysMigrationRun` permission.
 
+Not a rebuild: the **store check** is INBUXA's own design (`features/store-check.md`, inbuxa-server #322, building). An administrator starts a check of the store's blobs, quick (each one is there) or full (each one reads back intact), and gets a list of what's missing, damaged or no longer linked. One node runs it in the background, throttled, and keeps its progress: `inbuxa:StoreCheck` (`crates/jmap/src/inbuxa/store_check.rs`, `crates/features/src/store_check/`, `crates/services/src/inbuxa_store_check.rs`, `crates/store/src/write/blob_check.rs`), and the `sysStoreCheck` permission.
+
 Not a rebuild: **inbuxa-relay** is INBUXA's own design (`features/relay.md`, settled 2026-10-29, in progress). It's a small edge appliance that takes mail in on port 25 for one downstream server or cluster, and sends that downstream's outgoing mail on. The downstream dials out to it over JMAP (`urn:inbuxa:jmap:relay`), so the protected network exposes no mail port, and it is administered only from the downstream's inbuxa-admin.
 
 ## 5. The web front ends

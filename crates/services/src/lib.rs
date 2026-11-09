@@ -30,6 +30,7 @@ pub mod inbuxa_migrations; // inbuxa: migrations into this server
 pub mod inbuxa_relay_certificates; // inbuxa: inbuxa Relays' certificates
 pub mod inbuxa_relay_link; // inbuxa: links to inbuxa Relays
 pub mod inbuxa_scheduled_reports; // inbuxa: scheduled reports and the weekly digest
+pub mod inbuxa_store_check; // inbuxa: checking the store's blobs
 pub mod state_manager;
 pub mod task_manager;
 
@@ -83,6 +84,9 @@ impl SpawnServices for IpcReceivers {
 
             // inbuxa: migrations spec, MG-11: a run this node had stopped with it
             inbuxa_migrations::spawn_migrations(inner.clone());
+
+            // inbuxa: store-check spec, SV-8: a check this node ran stopped with it
+            inbuxa_store_check::spawn_store_checks(inner.clone());
 
             // inbuxa: relay spec, "The link service": every node links to every relay
             inbuxa_relay_link::spawn_relay_links(inner.clone());
