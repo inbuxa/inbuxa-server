@@ -1,6 +1,7 @@
 # Feature spec: cleaning up the old store after a blob store change
 
-Status: draft, 2026-11-10 (inbuxa-server #342). Not a rebuild (SPEC.md
+Status: approved, 2026-11-10 (inbuxa-server #342, PR #357), with the
+answers under [Settled](#settled). Not a rebuild (SPEC.md
 §4): inbuxa's own design. It extends `features/blob-store-change.md`
 (BM-1 to BM-10) and `features/blob-store-copy-ahead.md` (CA-1 to CA-9),
 which it doesn't change except where it says so.
@@ -184,29 +185,20 @@ with `different` as a kind.
   recorded on the old store refuses the cleanup. Over JMAP: stop,
   destroy while running, a tenant administrator's refusal.
 
-## Open questions
+## Settled
 
-1. **Guarding backups (OC-8).** The server can't see external backups.
-   Options: a confirmation naming the change (above); a wait of some
-   days after resolution before a cleanup can delete; or both.
-   Recommended: the confirmation alone, with the refusal and the
-   console saying plainly what it costs. A fixed wait would be wrong for
-   most administrators either way, and the preview plus a store check
-   already let them look before deleting.
-2. **How much to check in the new store (OC-4).** Reading every blob
-   back from the new store costs a read per blob, which on S3 or Azure
-   is a request and egress for every blob. Presence alone is cheaper but
-   would delete the old copy of a blob the new store holds damaged.
-   Recommended: read and check every blob; it runs once per change, and
-   it's the last copy being deleted.
-3. **Each node's place (OC-2).** Without it, a node that missed the
-   restart could still be reading the old store when its blobs go.
-   Recommended: record it, since the minute poll is already there.
-4. **A dismissed plan's target (CA-8).** What a copy ahead wrote to a
-   target whose plan was dismissed is also left for the administrator.
-   The same walk could delete it, without checking anything, since
-   nothing reads the target. Recommended: not in this spec; it's rarer,
-   and a target is usually a directory or bucket of its own.
+Approved 2026-11-10 with every recommendation:
+
+1. **Guarding backups:** the confirmation naming the change (OC-8), and
+   no wait after resolution. The refusal and the console say plainly
+   what deleting costs; the preview and a store check let the
+   administrator look first.
+2. **Checking the new store:** every blob is read back and checked
+   before its old copy is deleted (OC-4), at the cost of a read per blob,
+   which on S3 or Azure is a request and egress each.
+3. **Each node's place** is recorded with the minute poll (OC-2).
+4. **A dismissed plan's target** isn't cleaned by this spec (CA-8 is
+   unchanged).
 
 ## Not yet
 

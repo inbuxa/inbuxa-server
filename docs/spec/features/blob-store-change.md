@@ -161,4 +161,4 @@ or `fixed`, for the first thing found holding the blob.
 - Copying ahead of a change (the old store to a new one before the
   setting changes): `features/blob-store-copy-ahead.md` (approved, #341).
 - Deleting what a resolved change left in the old store:
-  `features/blob-store-cleanup.md` (draft, #342).
+  `features/blob-store-cleanup.md` (approved, #342).
