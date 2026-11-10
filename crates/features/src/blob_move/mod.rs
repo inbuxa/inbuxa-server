@@ -10,8 +10,10 @@
 //! (BM-2), and keeps the old store's settings so it can be read through
 //! (BM-3) and copied from (BM-5). A change can also be planned before the
 //! setting moves, with the new store's settings, and copied ahead
-//! (docs/spec/features/blob-store-copy-ahead.md). The copy itself runs in
-//! `services::inbuxa_blob_move`; this module keeps what a change is.
+//! (docs/spec/features/blob-store-copy-ahead.md). Once resolved, its old
+//! store's settings are kept so the blobs left there can be cleaned up
+//! (docs/spec/features/blob-store-cleanup.md). The copy and the cleanup run
+//! in `services::inbuxa_blob_move`; this module keeps what a change is.
 //!
 //! Kept in the fork's subspace (`store::SUBSPACE_INBUXA`), never in the
 //! registry. Every key starts with `W` (where blobs are), then one byte for
@@ -21,8 +23,10 @@
 //! - `c` + change id (u32): a change ([`BlobStoreChange`]), as JSON;
 //! - `p` + change id (u32) + number (u32): one problem its latest copy
 //!   found ([`Problem`]);
-//! - `r`: the id of the change being copied now (u32), so only one copy
-//!   runs at a time across the server (BM-5).
+//! - `r`: the id of the change being copied or cleaned up now (u32), so
+//!   only one runs at a time across the server (BM-5, OC-3);
+//! - `n` + node id (u64): where that node's blob store is, and when it last
+//!   said so ([`NodePlace`], OC-2).
 //!
 //! Numbers are big-endian.
 
@@ -30,7 +34,7 @@ use registry::schema::structs;
 use serde::{Deserialize as SerdeDeserialize, Serialize as SerdeSerialize, de::DeserializeOwned};
 use store::{
     Deserialize, IterateParams, SUBSPACE_INBUXA, Serialize, SerializeInfallible, Store, U32_LEN,
-    ValueKey,
+    U64_LEN, ValueKey,
     write::{AnyClass, BatchBuilder, ValueClass, assert::AssertValue},
 };
 use trc::AddContext;
@@ -40,6 +44,7 @@ const KIND_LOCATION: u8 = b'l';
 const KIND_CHANGE: u8 = b'c';
 const KIND_PROBLEM: u8 = b'p';
 const KIND_RUNNING: u8 = b'r';
+const KIND_NODE: u8 = b'n';
 const WRITE_ATTEMPTS: usize = 5;
 
 /// The changes kept; recording another forgets the oldest resolved one.
@@ -51,6 +56,8 @@ pub const DEFAULT_BLOBS_PER_SECOND: u64 = 1_000;
 pub const DEFAULT_BYTES_PER_SECOND: u64 = 20 * 1024 * 1024;
 /// BM-6: a copy whose node has been quiet this long has stopped.
 pub const STALE_AFTER: u64 = 5 * 60;
+/// OC-2: a node not heard from for this long is left out.
+pub const NODE_QUIET_AFTER: u64 = 10 * 60;
 const MAX_TEXT: usize = 2_000;
 
 /// Where the blob store is (BM-1), with the settings that open it.
@@ -106,6 +113,9 @@ pub enum ProblemKind {
     Missing,
     Damaged,
     Unreadable,
+    /// OC-4: a blob not named by its content whose copy in the new store
+    /// isn't the old one's.
+    Different,
 }
 
 impl ProblemKind {
@@ -114,6 +124,7 @@ impl ProblemKind {
             ProblemKind::Missing => "missing",
             ProblemKind::Damaged => "damaged",
             ProblemKind::Unreadable => "unreadable",
+            ProblemKind::Different => "different",
         }
     }
 }
@@ -197,6 +208,8 @@ impl Progress {
             ProblemKind::Missing => self.missing += 1,
             ProblemKind::Damaged => self.damaged += 1,
             ProblemKind::Unreadable => self.unreadable += 1,
+            // A copy compares nothing byte for byte, so never finds one
+            ProblemKind::Different => self.damaged += 1,
         }
     }
 
@@ -229,6 +242,120 @@ pub struct Copy {
     pub error: Option<String>,
 }
 
+/// OC-6: how a cleanup of the old store stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, SerdeSerialize, SerdeDeserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CleanupStatus {
+    Running,
+    /// Nothing kept: every blob the server holds is out of the old store.
+    Done,
+    /// Some blobs were kept in the old store (OC-4).
+    Incomplete,
+    Stopped,
+    Failed,
+    Interrupted,
+}
+
+impl CleanupStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            CleanupStatus::Running => "running",
+            CleanupStatus::Done => "done",
+            CleanupStatus::Incomplete => "incomplete",
+            CleanupStatus::Stopped => "stopped",
+            CleanupStatus::Failed => "failed",
+            CleanupStatus::Interrupted => "interrupted",
+        }
+    }
+}
+
+/// OC-4: how far the latest cleanup got.
+#[derive(Debug, Clone, Default, PartialEq, Eq, SerdeSerialize, SerdeDeserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct CleanupProgress {
+    /// Slices of the blob index done, of 256.
+    pub slices: u32,
+    pub blobs_checked: u64,
+    /// Deleted from the old store, or for a preview, that would be.
+    pub deleted: u64,
+    pub bytes_freed: u64,
+    /// Not in the old store.
+    pub not_there: u64,
+    pub missing: u64,
+    pub damaged: u64,
+    pub different: u64,
+    pub unreadable: u64,
+}
+
+impl CleanupProgress {
+    pub fn problems(&self) -> u64 {
+        self.missing + self.damaged + self.different + self.unreadable
+    }
+
+    pub fn count(&mut self, kind: ProblemKind) {
+        match kind {
+            ProblemKind::Missing => self.missing += 1,
+            ProblemKind::Damaged => self.damaged += 1,
+            ProblemKind::Different => self.different += 1,
+            ProblemKind::Unreadable => self.unreadable += 1,
+        }
+    }
+
+    pub fn share(&self) -> f64 {
+        self.slices.min(256) as f64 / 256.0
+    }
+}
+
+/// The latest cleanup of a resolved change's old store, or a preview of
+/// one (OC-3 to OC-6).
+#[derive(Debug, Clone, PartialEq, SerdeSerialize, SerdeDeserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Cleanup {
+    pub status: CleanupStatus,
+    /// OC-5: a preview, which deletes nothing.
+    #[serde(default)]
+    pub dry_run: bool,
+    pub started_at: u64,
+    pub started_by: String,
+    pub node_id: u64,
+    pub blobs_per_second: u64,
+    pub bytes_per_second: u64,
+    /// When its node last saved it.
+    pub heartbeat: u64,
+    #[serde(default)]
+    pub finished_at: Option<u64>,
+    #[serde(default)]
+    pub stop_requested: bool,
+    #[serde(default)]
+    pub progress: CleanupProgress,
+    #[serde(default)]
+    pub problems_kept: u64,
+    /// OC-9: snapshots on disk taken before the change.
+    #[serde(default)]
+    pub snapshots_before: u64,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+impl Cleanup {
+    /// As it reads now: one whose node went quiet has stopped with it.
+    pub fn status_at(&self, now: u64) -> CleanupStatus {
+        if self.status == CleanupStatus::Running && self.heartbeat + STALE_AFTER < now {
+            CleanupStatus::Interrupted
+        } else {
+            self.status
+        }
+    }
+}
+
+/// OC-2: where a node's blob store is, and when it last said so.
+#[derive(Debug, Clone, PartialEq, Eq, SerdeSerialize, SerdeDeserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NodePlace {
+    pub location: String,
+    pub at: u64,
+}
+
 /// An `inbuxa:BlobStoreChange`.
 #[derive(Debug, Clone, PartialEq, SerdeSerialize, SerdeDeserialize)]
 #[serde(rename_all = "camelCase")]
@@ -239,8 +366,9 @@ pub struct BlobStoreChange {
     pub changed_at: u64,
     pub node_id: u64,
     pub status: Status,
-    /// The old store's settings, to read it (BM-3) and copy from it (BM-5).
-    /// Dropped once the change is resolved; never shown (BM-9).
+    /// The old store's settings, to read it (BM-3), copy from it (BM-5) and,
+    /// once resolved, clean it up (OC-1). Dropped when a cleanup is done or
+    /// the change is dismissed; never shown (BM-9).
     #[serde(default)]
     pub old_settings: Option<structs::BlobStore>,
     #[serde(default)]
@@ -261,6 +389,9 @@ pub struct BlobStoreChange {
     pub applied_at: Option<u64>,
     #[serde(default)]
     pub applied_by: Option<String>,
+    /// OC-3 to OC-6: the latest cleanup of the old store.
+    #[serde(default)]
+    pub cleanup: Option<Cleanup>,
 }
 
 impl BlobStoreChange {
@@ -295,6 +426,53 @@ impl BlobStoreChange {
             copy.error = Some(error.trim().chars().take(MAX_TEXT).collect());
         }
     }
+
+    /// OC-6: whether its cleanup runs, as it reads now.
+    pub fn cleaning_up(&self, now: u64) -> bool {
+        self.cleanup
+            .as_ref()
+            .is_some_and(|c| c.status_at(now) == CleanupStatus::Running)
+    }
+
+    /// BM-5, OC-3: whether a copy or a cleanup of it runs, as it reads now.
+    pub fn busy(&self, now: u64) -> bool {
+        self.status_at(now) == Status::Copying || self.cleaning_up(now)
+    }
+
+    /// Marks a copy or cleanup whose node went quiet as interrupted. False
+    /// when there was none.
+    pub fn mark_interrupted(&mut self, now: u64) -> bool {
+        let mut marked = false;
+        if self.status == Status::Copying && self.status_at(now) == Status::Interrupted {
+            self.status = Status::Interrupted;
+            if let Some(copy) = &mut self.copy {
+                copy.finished_at = Some(now);
+            }
+            marked = true;
+        }
+        if let Some(cleanup) = &mut self.cleanup
+            && cleanup.status == CleanupStatus::Running
+            && cleanup.status_at(now) == CleanupStatus::Interrupted
+        {
+            cleanup.status = CleanupStatus::Interrupted;
+            cleanup.finished_at = Some(now);
+            marked = true;
+        }
+        marked
+    }
+}
+
+/// The resolved changes to forget so no more than [`MAX_CHANGES`] are kept
+/// once `adding` more are: oldest first, those with no old store kept for a
+/// cleanup before those with one, and never one whose cleanup runs (OC-11).
+fn to_forget(changes: &[BlobStoreChange], adding: usize, now: u64) -> Vec<u32> {
+    let over = (changes.len() + adding).saturating_sub(MAX_CHANGES);
+    let mut resolved = changes
+        .iter()
+        .filter(|c| c.stage == Stage::Changed && !c.status.is_unresolved() && !c.cleaning_up(now))
+        .collect::<Vec<_>>();
+    resolved.sort_by_key(|c| (c.old_settings.is_some(), c.id));
+    resolved.into_iter().take(over).map(|c| c.id).collect()
 }
 
 struct Json<T>(T);
@@ -524,6 +702,7 @@ pub async fn at_start(
                             copied_ahead: None,
                             applied_at: None,
                             applied_by: None,
+                            cleanup: None,
                         }
                     }
                 };
@@ -531,15 +710,9 @@ pub async fn at_start(
                 started = Started::Changed(change.id);
 
                 // The oldest resolved changes past MAX_CHANGES are forgotten
-                let over =
-                    (changes.len() + usize::from(plan.is_none())).saturating_sub(MAX_CHANGES);
-                for old in changes
-                    .iter()
-                    .filter(|c| c.stage == Stage::Changed && !c.status.is_unresolved())
-                    .take(over)
-                {
-                    batch.clear(class(old.id));
-                    forgotten.push(old.id);
+                for old in to_forget(&changes, usize::from(plan.is_none()), now) {
+                    batch.clear(class(old));
+                    forgotten.push(old);
                 }
             }
         }
@@ -650,6 +823,7 @@ pub async fn plan(
             copied_ahead: None,
             applied_at: None,
             applied_by: None,
+            cleanup: None,
         };
 
         let mut batch = BatchBuilder::new();
@@ -657,15 +831,10 @@ pub async fn plan(
         batch.assert_value(location_class(), AssertValue::Hash(version));
         batch.assert_value(class(id), AssertValue::None);
         batch.set(class(id), Json(&change).serialize()?);
-        let over = (changes.len() + 1).saturating_sub(MAX_CHANGES);
         let mut forgotten = Vec::new();
-        for old in changes
-            .iter()
-            .filter(|c| c.stage == Stage::Changed && !c.status.is_unresolved())
-            .take(over)
-        {
-            batch.clear(class(old.id));
-            forgotten.push(old.id);
+        for old in to_forget(&changes, 1, store::write::now()) {
+            batch.clear(class(old));
+            forgotten.push(old);
         }
         match data.write(batch.build_all()).await {
             Ok(_) => {
@@ -713,29 +882,8 @@ pub async fn start_copy(
     let mut attempt = 0;
     loop {
         attempt += 1;
-        if let Some(current) = running(data).await? {
-            match get(data, current).await? {
-                Some(c) if c.status_at(now) == Status::Copying => {
-                    return Ok(Err(Refusal::Running(current)));
-                }
-                Some(c) => {
-                    if c.status == Status::Copying {
-                        update(data, current, |c| {
-                            if c.status != Status::Copying {
-                                return false;
-                            }
-                            c.status = Status::Interrupted;
-                            if let Some(copy) = &mut c.copy {
-                                copy.finished_at = Some(now);
-                            }
-                            true
-                        })
-                        .await?;
-                    }
-                    release(data, current).await?;
-                }
-                None => release(data, current).await?,
-            }
+        if let Some(current) = busy_with(data, now).await? {
+            return Ok(Err(Refusal::Running(current)));
         }
 
         let Some(Versioned(change, version)) = data
@@ -778,6 +926,174 @@ pub async fn start_copy(
             Err(err) => return Err(err.caused_by(trc::location!())),
         }
     }
+}
+
+/// BM-5, OC-3: the change a copy or cleanup runs for now, if one runs. One
+/// whose node went quiet is marked interrupted and lets another run.
+async fn busy_with(data: &Store, now: u64) -> trc::Result<Option<u32>> {
+    let Some(current) = running(data).await? else {
+        return Ok(None);
+    };
+    match get(data, current).await? {
+        Some(c) if c.busy(now) => return Ok(Some(current)),
+        Some(_) => {
+            update(data, current, |c| c.mark_interrupted(now)).await?;
+        }
+        None => {}
+    }
+    release(data, current).await?;
+    Ok(None)
+}
+
+/// OC-3: why a cleanup can't start. The checks of the stores themselves
+/// (the old one opens, the two don't overlap) are the caller's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CleanupRefusal {
+    NotFound,
+    /// A copy or cleanup of this change runs now.
+    Running(u32),
+    /// The change isn't resolved by a copy yet.
+    NotResolved,
+    /// The blob store went back to the change's old store (BM-4).
+    Reverted,
+    /// Its old store's settings weren't kept (OC-1), or a cleanup is done.
+    NoOldStore,
+    /// The change's new store isn't the blob store now, or its old store is.
+    NotCurrent,
+    /// This planned change copies ahead to the old store.
+    PlannedThere(u32),
+    /// This node has its blob store at this other place.
+    NodeElsewhere(u64, String),
+}
+
+/// OC-3: marks a change as being cleaned up by `cleanup` and makes it the
+/// one that runs.
+pub async fn start_cleanup(
+    data: &Store,
+    id: u32,
+    cleanup: Cleanup,
+    now: u64,
+) -> trc::Result<Result<BlobStoreChange, CleanupRefusal>> {
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        if let Some(current) = busy_with(data, now).await? {
+            return Ok(Err(CleanupRefusal::Running(current)));
+        }
+        let Some(Versioned(change, version)) = data
+            .get_value::<Versioned<BlobStoreChange>>(ValueKey::from(class(id)))
+            .await
+            .caused_by(trc::location!())?
+        else {
+            return Ok(Err(CleanupRefusal::NotFound));
+        };
+        if let Some(refusal) = cleanup_refusal(data, &change, now).await? {
+            return Ok(Err(refusal));
+        }
+        let change = BlobStoreChange {
+            cleanup: Some(cleanup.clone()),
+            ..change
+        };
+        let mut batch = BatchBuilder::new();
+        batch.assert_value(class(id), AssertValue::Hash(version));
+        batch.assert_value(running_class(), AssertValue::None);
+        batch.set(class(id), Json(&change).serialize()?);
+        batch.set(running_class(), SerializeInfallible::serialize(&id));
+        match data.write(batch.build_all()).await {
+            Ok(_) => {
+                remove_problems(data, id).await?;
+                return Ok(Ok(change));
+            }
+            Err(err) if attempt < WRITE_ATTEMPTS && is_assert_failure(&err) => {}
+            Err(err) => return Err(err.caused_by(trc::location!())),
+        }
+    }
+}
+
+/// OC-3: what stops a change's old store being cleaned up, if anything.
+pub async fn cleanup_refusal(
+    data: &Store,
+    change: &BlobStoreChange,
+    now: u64,
+) -> trc::Result<Option<CleanupRefusal>> {
+    if change.stage != Stage::Changed {
+        return Ok(Some(CleanupRefusal::NotResolved));
+    }
+    match change.status {
+        Status::Copied => {}
+        Status::Reverted => return Ok(Some(CleanupRefusal::Reverted)),
+        _ => return Ok(Some(CleanupRefusal::NotResolved)),
+    }
+    if change.old_settings.is_none() {
+        return Ok(Some(CleanupRefusal::NoOldStore));
+    }
+    let here = location(data).await?;
+    if here
+        .as_ref()
+        .is_none_or(|here| here.location != change.to || here.location == change.from)
+    {
+        return Ok(Some(CleanupRefusal::NotCurrent));
+    }
+    if let Some(plan) = all(data)
+        .await?
+        .into_iter()
+        .find(|c| c.stage == Stage::Planned && c.to == change.from)
+    {
+        return Ok(Some(CleanupRefusal::PlannedThere(plan.id)));
+    }
+    if let Some((node, place)) = node_places(data)
+        .await?
+        .into_iter()
+        .find(|(_, p)| p.at + NODE_QUIET_AFTER >= now && p.location != change.to)
+    {
+        return Ok(Some(CleanupRefusal::NodeElsewhere(node, place.location)));
+    }
+    Ok(None)
+}
+
+fn node_class(node_id: u64) -> ValueClass {
+    let mut key = Vec::with_capacity(2 + U64_LEN);
+    key.extend_from_slice(&[FEATURE, KIND_NODE]);
+    key.extend_from_slice(&node_id.to_be_bytes());
+    any(key)
+}
+
+/// OC-2: notes where this node's blob store is, now.
+pub async fn note_node(data: &Store, node_id: u64, location: &str, now: u64) -> trc::Result<()> {
+    let place = NodePlace {
+        location: location.to_string(),
+        at: now,
+    };
+    let mut batch = BatchBuilder::new();
+    batch.set(node_class(node_id), Json(&place).serialize()?);
+    data.write(batch.build_all())
+        .await
+        .caused_by(trc::location!())
+        .map(|_| ())
+}
+
+/// OC-2: where each node last said its blob store is, by node id.
+pub async fn node_places(data: &Store) -> trc::Result<Vec<(u64, NodePlace)>> {
+    let mut places = Vec::new();
+    data.iterate(
+        IterateParams::new(
+            ValueKey::from(node_class(0)),
+            ValueKey::from(node_class(u64::MAX)),
+        ),
+        |key, value| {
+            let node = key
+                .get(key.len().saturating_sub(U64_LEN)..)
+                .and_then(|b| b.try_into().ok())
+                .map(u64::from_be_bytes);
+            if let (Some(node), Ok(Json(place))) = (node, Json::<NodePlace>::deserialize(value)) {
+                places.push((node, place));
+            }
+            Ok(true)
+        },
+    )
+    .await
+    .caused_by(trc::location!())?;
+    Ok(places)
 }
 
 /// Lets another copy run, if `id` is the one that runs now.
@@ -1210,6 +1526,7 @@ mod tests {
             class(1),
             problem_class(1, 0),
             running_class(),
+            node_class(7),
         ] {
             let ValueClass::Any(any) = class else {
                 unreachable!()
@@ -1262,6 +1579,7 @@ mod tests {
             copied_ahead: None,
             applied_at: None,
             applied_by: None,
+            cleanup: None,
         };
         assert_eq!(change.status_at(1_000 + STALE_AFTER), Status::Copying);
         assert_eq!(change.status_at(1_001 + STALE_AFTER), Status::Interrupted);
@@ -1283,9 +1601,196 @@ mod tests {
             copied_ahead: None,
             applied_at: None,
             applied_by: None,
+            cleanup: None,
         };
         let bytes = Json(&change).serialize().unwrap();
         let Json(back) = Json::<BlobStoreChange>::deserialize(&bytes).unwrap();
         assert_eq!(back, change);
+    }
+
+    fn a_cleanup(at: u64) -> Cleanup {
+        Cleanup {
+            status: CleanupStatus::Running,
+            dry_run: false,
+            started_at: at,
+            started_by: "admin".into(),
+            node_id: 1,
+            blobs_per_second: 0,
+            bytes_per_second: 0,
+            heartbeat: at,
+            finished_at: None,
+            stop_requested: false,
+            progress: CleanupProgress::default(),
+            problems_kept: 0,
+            snapshots_before: 0,
+            error: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_resolved_change_is_cleaned_up_once() {
+        let data = store::backend::ephemeral::EphemeralStore::open();
+        let a = fs("/srv/old");
+        let b = structs::BlobStore::Default;
+        let (here_a, here_b) = ("old".to_string(), "the data store".to_string());
+        at_start(&data, here_a.clone(), &a, 1, 10).await.unwrap();
+        assert_eq!(
+            at_start(&data, here_b.clone(), &b, 1, 20).await.unwrap(),
+            Started::Changed(1)
+        );
+
+        // OC-3: not before it's resolved
+        assert_eq!(
+            start_cleanup(&data, 1, a_cleanup(30), 30).await.unwrap(),
+            Err(CleanupRefusal::NotResolved)
+        );
+        assert_eq!(
+            start_cleanup(&data, 9, a_cleanup(30), 30).await.unwrap(),
+            Err(CleanupRefusal::NotFound)
+        );
+
+        // OC-1: resolved, with the old store's settings kept; nothing read
+        // through
+        update(&data, 1, |c| {
+            c.status = Status::Copied;
+            true
+        })
+        .await
+        .unwrap();
+        assert!(unresolved(&data).await.unwrap().is_empty());
+        assert_eq!(
+            get(&data, 1).await.unwrap().unwrap().old_settings,
+            Some(a.clone())
+        );
+
+        // OC-2, OC-3: a node still on the old store refuses it; one quiet
+        // for long enough doesn't
+        note_node(&data, 2, &here_a, 40).await.unwrap();
+        note_node(&data, 1, &here_b, 40).await.unwrap();
+        assert_eq!(
+            start_cleanup(&data, 1, a_cleanup(40), 40).await.unwrap(),
+            Err(CleanupRefusal::NodeElsewhere(2, here_a.clone()))
+        );
+        let later = 41 + NODE_QUIET_AFTER;
+        note_node(&data, 1, &here_b, later).await.unwrap();
+        assert_eq!(node_places(&data).await.unwrap().len(), 2);
+
+        // OC-3: not while a planned change copies ahead to the old store
+        plan(&data, here_a.clone(), a.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            start_cleanup(&data, 1, a_cleanup(later), later)
+                .await
+                .unwrap(),
+            Err(CleanupRefusal::PlannedThere(2))
+        );
+        remove(&data, 2).await.unwrap();
+
+        // Started: one at a time, and it can't be copied meanwhile
+        let started = start_cleanup(&data, 1, a_cleanup(later), later)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(started.cleaning_up(later));
+        assert_eq!(running(&data).await.unwrap(), Some(1));
+        assert_eq!(
+            start_cleanup(&data, 1, a_cleanup(later), later + 1)
+                .await
+                .unwrap(),
+            Err(CleanupRefusal::Running(1))
+        );
+
+        // Its node went quiet: interrupted, and it can run again
+        let quiet = later + STALE_AFTER + 1;
+        let again = start_cleanup(&data, 1, a_cleanup(quiet), quiet)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(again.cleaning_up(quiet));
+
+        // Done: the old store's settings go, and there's nothing to clean
+        update(&data, 1, |c| {
+            if let Some(cleanup) = &mut c.cleanup {
+                cleanup.status = CleanupStatus::Done;
+            }
+            c.old_settings = None;
+            true
+        })
+        .await
+        .unwrap();
+        release(&data, 1).await.unwrap();
+        assert_eq!(
+            start_cleanup(&data, 1, a_cleanup(quiet), quiet + 1)
+                .await
+                .unwrap(),
+            Err(CleanupRefusal::NoOldStore)
+        );
+    }
+
+    #[tokio::test]
+    async fn not_once_the_blob_store_is_back_in_the_old_store() {
+        let data = store::backend::ephemeral::EphemeralStore::open();
+        let a = fs("/srv/old");
+        let b = structs::BlobStore::Default;
+        at_start(&data, "old".into(), &a, 1, 10).await.unwrap();
+        at_start(&data, "the data store".into(), &b, 1, 20)
+            .await
+            .unwrap();
+        update(&data, 1, |c| {
+            c.status = Status::Copied;
+            true
+        })
+        .await
+        .unwrap();
+        // B back to A: the copied change's old store is the blob store again
+        at_start(&data, "old".into(), &a, 1, 30).await.unwrap();
+        assert_eq!(
+            start_cleanup(&data, 1, a_cleanup(40), 40).await.unwrap(),
+            Err(CleanupRefusal::NotCurrent)
+        );
+    }
+
+    #[test]
+    fn forgetting_keeps_old_stores_kept_for_a_cleanup_last() {
+        let change = |id: u32, kept: bool, cleanup: Option<Cleanup>| BlobStoreChange {
+            id,
+            from: "a".into(),
+            to: "b".into(),
+            changed_at: 1,
+            node_id: 1,
+            status: Status::Copied,
+            old_settings: kept.then(|| structs::BlobStore::Default),
+            copy: None,
+            stage: Stage::Changed,
+            target_settings: None,
+            copied_ahead: None,
+            applied_at: None,
+            applied_by: None,
+            cleanup,
+        };
+        let mut changes = vec![
+            change(1, true, None),
+            change(2, false, None),
+            change(3, true, Some(a_cleanup(100))),
+        ];
+        changes.extend((4..=MAX_CHANGES as u32).map(|id| change(id, false, None)));
+        // One more to add: the oldest without a kept store goes first
+        assert_eq!(to_forget(&changes, 1, 100), [2]);
+        assert_eq!(
+            to_forget(&changes, 1 + MAX_CHANGES - 2, 100).last(),
+            Some(&1)
+        );
+        // One being cleaned up is never forgotten
+        assert!(!to_forget(&changes, MAX_CHANGES, 100).contains(&3));
+    }
+
+    #[test]
+    fn a_change_from_before_cleanups_reads_without_one() {
+        let json = br#"{"id":1,"from":"a","to":"b","changedAt":1,"nodeId":1,"status":"copied"}"#;
+        let Json(change) = Json::<BlobStoreChange>::deserialize(json).unwrap();
+        assert_eq!(change.cleanup, None);
+        assert!(!change.busy(10));
     }
 }

@@ -48,6 +48,9 @@ pub struct MovingBlobStore {
     /// The planned change whose store couldn't be opened, so it's reported
     /// once rather than at every refresh.
     planned_failed: AtomicU32,
+    /// Where this node's blob store is (BM-1), as the node notes it with the
+    /// changes it reads (blob-store-cleanup spec, OC-2).
+    location: ArcSwapOption<String>,
 }
 
 impl MovingBlobStore {
@@ -57,7 +60,17 @@ impl MovingBlobStore {
             old: ArcSwap::from_pointee(old),
             planned: ArcSwapOption::empty(),
             planned_failed: AtomicU32::new(0),
+            location: ArcSwapOption::empty(),
         }
+    }
+
+    /// OC-2: where this node's blob store is, once start-up has said.
+    pub fn location(&self) -> Option<Arc<String>> {
+        self.location.load_full()
+    }
+
+    pub fn set_location(&self, location: String) {
+        self.location.store(Some(Arc::new(location)));
     }
 
     /// CA-4: the planned store deletes go to, if a change is planned.

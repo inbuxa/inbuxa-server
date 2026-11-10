@@ -120,6 +120,29 @@ pub fn blob_store_location(config: &structs::BlobStore) -> String {
     }
 }
 
+/// Where each store behind a blob store setting is (BM-1): the setting's
+/// own place, or for a sharded set each member's, so two settings that
+/// share a store can be told (blob-store-cleanup spec, OC-3).
+pub fn blob_store_places(config: &structs::BlobStore) -> Vec<String> {
+    match config {
+        structs::BlobStore::Sharded(set) => set
+            .stores
+            .iter()
+            .map(|member| {
+                blob_store_location(&match member.clone() {
+                    structs::BlobStoreBase::S3(s) => structs::BlobStore::S3(s),
+                    structs::BlobStoreBase::Azure(s) => structs::BlobStore::Azure(s),
+                    structs::BlobStoreBase::FileSystem(s) => structs::BlobStore::FileSystem(s),
+                    structs::BlobStoreBase::FoundationDb(s) => structs::BlobStore::FoundationDb(s),
+                    structs::BlobStoreBase::PostgreSql(s) => structs::BlobStore::PostgreSql(s),
+                    structs::BlobStoreBase::MySql(s) => structs::BlobStore::MySql(s),
+                })
+            })
+            .collect(),
+        config => vec![blob_store_location(config)],
+    }
+}
+
 fn with_prefix(place: String, prefix: Option<&str>) -> String {
     match prefix.filter(|p| !p.is_empty()) {
         Some(prefix) => format!("{place}, prefix {prefix}"),
@@ -156,6 +179,31 @@ mod tests {
         assert_ne!(
             blob_store_location(&fs("/srv/blobs", 2)),
             blob_store_location(&fs("/srv/other", 2))
+        );
+    }
+
+    #[test]
+    fn a_sharded_set_is_its_members_places() {
+        let mut stores = registry::types::list::List::with_capacity(2);
+        for path in ["/srv/a", "/srv/b"] {
+            stores.push(structs::BlobStoreBase::FileSystem(
+                structs::FileSystemStore {
+                    path: path.into(),
+                    depth: 2,
+                },
+            ));
+        }
+        let set = structs::BlobStore::Sharded(structs::ShardedBlobStore { stores });
+        assert_eq!(
+            blob_store_places(&set),
+            [
+                blob_store_location(&fs("/srv/a", 2)),
+                blob_store_location(&fs("/srv/b", 2))
+            ]
+        );
+        assert_eq!(
+            blob_store_places(&fs("/srv/a", 2)),
+            [blob_store_location(&fs("/srv/a", 2))]
         );
     }
 }

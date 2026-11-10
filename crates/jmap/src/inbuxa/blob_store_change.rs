@@ -8,14 +8,16 @@
 //! store the server noticed at start-up, copying what the new store lacks
 //! from the old one, stopping that, and dismissing a change. A create plans
 //! one, which is copied ahead and applied to the setting
-//! (blob-store-copy-ahead spec). The copy is `services::inbuxa_blob_move`.
-//! Planning, copying, applying, stopping and dismissing are audited by the
-//! request layer (BM-9, CA-9).
+//! (blob-store-copy-ahead spec). A resolved change's old store is cleaned
+//! up, or a cleanup previewed (blob-store-cleanup spec). The copy is
+//! `services::inbuxa_blob_move`, the cleanup `services::inbuxa_blob_cleanup`.
+//! Planning, copying, applying, cleaning up, stopping and dismissing are
+//! audited by the request layer (BM-9, CA-9, OC-12).
 
 use super::relay::json_to_value;
 use common::{Server, auth::AccessToken};
 use inbuxa_features::blob_move::{
-    self as model, BlobStoreChange as Stored, PlanRefusal, Refusal, Stage, Status,
+    self as model, BlobStoreChange as Stored, CleanupRefusal, PlanRefusal, Refusal, Stage, Status,
 };
 use jmap_proto::{
     error::set::SetError,
@@ -35,7 +37,11 @@ use registry::schema::{
     structs,
 };
 use serde_json::json;
-use services::inbuxa_blob_move::{self as copies, NotPlanned};
+use services::{
+    inbuxa_blob_cleanup::{self as cleanups, NotCleaned},
+    inbuxa_blob_move::{self as copies, NotPlanned},
+};
+use std::str::FromStr;
 use store::{
     registry::write::{RegistryWrite, RegistryWriteResult},
     write::now,
@@ -71,6 +77,8 @@ const ALL: &[P] = &[
     P::CopiedAhead,
     P::AppliedAt,
     P::AppliedBy,
+    P::OldStoreKept,
+    P::Cleanup,
 ];
 
 /// BM-9: a change is about the whole server's blobs, so only the server's
@@ -124,6 +132,40 @@ async fn to_value(server: &Server, c: &Stored, properties: &[P], now: u64) -> tr
                 None => serde_json::Value::Null,
             },
             P::AppliedAt => c.applied_at.map_or(serde_json::Value::Null, date),
+            // OC-1: whether there's an old store to clean up, never its settings
+            P::OldStoreKept => json!(c.stage == Stage::Changed && c.old_settings.is_some()),
+            P::Cleanup => match &c.cleanup {
+                Some(cleanup) => {
+                    let p = &cleanup.progress;
+                    let status = cleanup.status_at(now);
+                    json!({
+                        "status": status.as_str(),
+                        "dryRun": cleanup.dry_run,
+                        "startedAt": date(cleanup.started_at),
+                        "startedBy": cleanup.started_by,
+                        "finishedAt": cleanup.finished_at.map_or(serde_json::Value::Null, date),
+                        "node": cleanup.node_id.to_string(),
+                        "blobsPerSecond": cleanup.blobs_per_second,
+                        "bytesPerSecond": cleanup.bytes_per_second,
+                        "progress": match status {
+                            model::CleanupStatus::Done => 1.0,
+                            _ => p.share(),
+                        },
+                        "blobsChecked": p.blobs_checked,
+                        "deleted": p.deleted,
+                        "bytesFreed": p.bytes_freed,
+                        "notThere": p.not_there,
+                        "missing": p.missing,
+                        "damaged": p.damaged,
+                        "different": p.different,
+                        "unreadable": p.unreadable,
+                        "problems": problems(server, c.id).await?,
+                        "snapshotsBefore": cleanup.snapshots_before,
+                        "error": cleanup.error,
+                    })
+                }
+                None => serde_json::Value::Null,
+            },
             P::AppliedBy => json!(c.applied_by),
             P::Status => json!(status.as_str()),
             P::CopyStartedAt => copy.map_or(serde_json::Value::Null, |c| date(c.started_at)),
@@ -149,26 +191,64 @@ async fn to_value(server: &Server, c: &Stored, properties: &[P], now: u64) -> tr
             P::Missing => json!(p.missing),
             P::Damaged => json!(p.damaged),
             P::Unreadable => json!(p.unreadable),
-            P::Problems => {
-                let problems = model::problems(server.store(), c.id).await?;
-                let mut list = serde_json::to_value(&problems).unwrap_or_default();
-                // The account as a JMAP id, like every other account id
-                if let Some(items) = list.as_array_mut() {
-                    for item in items {
-                        if let Some(account) = item.get("accountId").and_then(|v| v.as_u64()) {
-                            item["accountId"] = json!(Id::from(account).to_string());
-                        }
-                    }
-                }
-                list
-            }
+            // A cleanup's problems are its own, under cleanup (OC-6)
+            P::Problems if c.cleanup.is_some() => json!([]),
+            P::Problems => problems(server, c.id).await?,
             P::Error => json!(copy.and_then(|c| c.error.clone())),
             // Write-only; a planned store's settings are never shown (CA-1)
-            P::Action | P::Target => continue,
+            P::Action | P::Target | P::DryRun | P::Confirm => continue,
         };
         out.insert_unchecked(Key::Property(property.clone()), json_to_value(json));
     }
     Ok(Value::Object(out))
+}
+
+/// The kept problems of a change's latest copy or cleanup.
+async fn problems(server: &Server, id: u32) -> trc::Result<serde_json::Value> {
+    let problems = model::problems(server.store(), id).await?;
+    let mut list = serde_json::to_value(&problems).unwrap_or_default();
+    // The account as a JMAP id, like every other account id
+    if let Some(items) = list.as_array_mut() {
+        for item in items {
+            if let Some(account) = item.get("accountId").and_then(|v| v.as_u64()) {
+                item["accountId"] = json!(Id::from(account).to_string());
+            }
+        }
+    }
+    Ok(list)
+}
+
+/// OC-3: why a cleanup was refused, for the administrator.
+fn cleanup_refused(refusal: CleanupRefusal) -> SetError<P> {
+    let why = match refusal {
+        CleanupRefusal::NotFound => return SetError::not_found(),
+        CleanupRefusal::Running(id) => format!(
+            "A copy or cleanup of change {} runs now; one runs at a time. Stop it or wait for it.",
+            Id::from(id)
+        ),
+        CleanupRefusal::NotResolved => {
+            "Only a change whose copy ended copied can be cleaned up.".into()
+        }
+        CleanupRefusal::Reverted => {
+            "The blob store went back to this change's old store; there's nothing to clean up."
+                .into()
+        }
+        CleanupRefusal::NoOldStore => "The server doesn't keep this change's old store any \
+             more: its cleanup is done, or the change was resolved before old stores were kept."
+            .into(),
+        CleanupRefusal::NotCurrent => "This change's new store isn't the blob store now, so \
+             the old store may still be needed."
+            .into(),
+        CleanupRefusal::PlannedThere(id) => format!(
+            "Change {} is planned to copy ahead to this store. Dismiss it first.",
+            Id::from(id)
+        ),
+        CleanupRefusal::NodeElsewhere(node, place) => format!(
+            "Node {node} still has its blob store at {place}. Restart it with the new setting \
+             first."
+        ),
+    };
+    SetError::forbidden().with_description(why)
 }
 
 /// `inbuxa:BlobStoreChange/get`: every change kept, newest first.
@@ -379,6 +459,8 @@ pub async fn set(
         let mut action = None;
         let mut blobs_per_second = None;
         let mut bytes_per_second = None;
+        let mut dry_run = false;
+        let mut confirm = None;
         for (key, value) in value.into_expanded_object() {
             let outcome = match &key {
                 Key::Property(P::Action) => {
@@ -391,9 +473,29 @@ pub async fn set(
                 Key::Property(P::BytesPerSecond) => {
                     limit(P::BytesPerSecond, &value).map(|l| bytes_per_second = Some(l))
                 }
+                Key::Property(P::DryRun) => match value {
+                    Value::Bool(b) => {
+                        dry_run = b;
+                        Ok(())
+                    }
+                    _ => Err(invalid(P::DryRun, "true or false.")),
+                },
+                Key::Property(P::Confirm) => match value {
+                    Value::Element(BlobStoreChangeValue::Id(confirmed)) => {
+                        confirm = Some(confirmed);
+                        Ok(())
+                    }
+                    Value::Str(text) => {
+                        confirm = Id::from_str(&text).ok();
+                        Ok(())
+                    }
+                    _ => Err(invalid(P::Confirm, "The change's own id.")),
+                },
                 _ => Err(SetError::invalid_properties()
                     .with_property(key.clone().into_owned())
-                    .with_description("A change can't be edited, only copied or stopped.")),
+                    .with_description(
+                        "A change can't be edited, only copied, cleaned up or stopped.",
+                    )),
             };
             if let Err(error) = outcome {
                 response.not_updated.append(id, error);
@@ -480,11 +582,52 @@ pub async fn set(
                     ),
                 }
             }
-            Some("stop") => {
-                if change.status_at(now()) != Status::Copying {
+            Some("cleanUp") => {
+                // OC-8: backups taken before the change still need the old store
+                if !dry_run && confirm != Some(id) {
                     response.not_updated.append(
                         id,
-                        SetError::forbidden().with_description("That change isn't being copied."),
+                        SetError::forbidden().with_description(
+                            "Backups of the data store taken before this change was resolved \
+                             need the old store's blobs to restore in full. Keep the old store \
+                             until those backups have aged out, then set confirm to this \
+                             change's id. A preview (dryRun) needs no confirmation.",
+                        ),
+                    );
+                    continue;
+                }
+                match cleanups::start(
+                    server,
+                    change_id,
+                    dry_run,
+                    blobs_per_second,
+                    bytes_per_second,
+                    actor.name.clone(),
+                )
+                .await?
+                {
+                    Ok(()) => response.updated.append(id, None),
+                    Err(NotCleaned::Refused(refusal)) => {
+                        response.not_updated.append(id, cleanup_refused(refusal))
+                    }
+                    Err(NotCleaned::Unusable(why)) => response
+                        .not_updated
+                        .append(id, SetError::forbidden().with_description(why)),
+                    Err(NotCleaned::Overlap) => response.not_updated.append(
+                        id,
+                        SetError::forbidden().with_description(
+                            "The old store and the blob store share a place, so deleting from \
+                             one would delete from the other. Nothing was deleted.",
+                        ),
+                    ),
+                }
+            }
+            Some("stop") => {
+                if !change.busy(now()) {
+                    response.not_updated.append(
+                        id,
+                        SetError::forbidden()
+                            .with_description("That change isn't being copied or cleaned up."),
                     );
                     continue;
                 }
@@ -493,7 +636,7 @@ pub async fn set(
             }
             _ => response.not_updated.append(
                 id,
-                invalid(P::Action, "The actions are copy, stop and apply."),
+                invalid(P::Action, "The actions are copy, stop, apply and cleanUp."),
             ),
         }
     }
@@ -508,6 +651,11 @@ pub async fn set(
             Some(c) if c.status_at(now()) == Status::Copying => response.not_destroyed.append(
                 id,
                 SetError::forbidden().with_description("It's being copied; stop the copy first."),
+            ),
+            Some(c) if c.cleaning_up(now()) => response.not_destroyed.append(
+                id,
+                SetError::forbidden()
+                    .with_description("Its old store is being cleaned up; stop that first."),
             ),
             Some(_) => {
                 model::remove(data, change_id).await?;

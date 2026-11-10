@@ -9,7 +9,9 @@
 //! BM-2). The server records them; an update with `action: "copy"` copies
 //! what the new store lacks from the old one, `action: "stop"` stops that,
 //! and destroying one dismisses it (BM-5 to BM-7). A create with a `target`
-//! plans one, to copy ahead and `apply` (blob-store-copy-ahead spec).
+//! plans one, to copy ahead and `apply` (blob-store-copy-ahead spec). On a
+//! resolved change, `action: "cleanUp"` deletes from the old store what the
+//! current one has (blob-store-cleanup spec).
 
 use crate::object::{AnyId, JmapObject, JmapObjectId};
 use jmap_tools::{Element, Key, Property};
@@ -49,6 +51,10 @@ pub enum BlobStoreChangeProperty {
     CopiedAhead,
     AppliedAt,
     AppliedBy,
+    OldStoreKept,
+    Cleanup,
+    DryRun,
+    Confirm,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -94,6 +100,10 @@ impl Property for BlobStoreChangeProperty {
             BlobStoreChangeProperty::CopiedAhead => "copiedAhead",
             BlobStoreChangeProperty::AppliedAt => "appliedAt",
             BlobStoreChangeProperty::AppliedBy => "appliedBy",
+            BlobStoreChangeProperty::OldStoreKept => "oldStoreKept",
+            BlobStoreChangeProperty::Cleanup => "cleanup",
+            BlobStoreChangeProperty::DryRun => "dryRun",
+            BlobStoreChangeProperty::Confirm => "confirm",
         }
         .into()
     }
@@ -130,6 +140,10 @@ impl BlobStoreChangeProperty {
             b"copiedAhead" => BlobStoreChangeProperty::CopiedAhead,
             b"appliedAt" => BlobStoreChangeProperty::AppliedAt,
             b"appliedBy" => BlobStoreChangeProperty::AppliedBy,
+            b"oldStoreKept" => BlobStoreChangeProperty::OldStoreKept,
+            b"cleanup" => BlobStoreChangeProperty::Cleanup,
+            b"dryRun" => BlobStoreChangeProperty::DryRun,
+            b"confirm" => BlobStoreChangeProperty::Confirm,
         )
     }
 }
@@ -147,7 +161,7 @@ impl Element for BlobStoreChangeValue {
 
     fn try_parse<P>(key: &Key<'_, Self::Property>, value: &str) -> Option<Self> {
         match key {
-            Key::Property(BlobStoreChangeProperty::Id) => {
+            Key::Property(BlobStoreChangeProperty::Id | BlobStoreChangeProperty::Confirm) => {
                 Id::from_str(value).ok().map(BlobStoreChangeValue::Id)
             }
             _ => None,

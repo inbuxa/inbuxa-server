@@ -26,8 +26,9 @@ read with nothing to say why.
 Now the server notices the change when it starts. It keeps reading what
 it can't find from the old store and copies each blob it reads that way
 into the new one. An administrator has it copy everything else, and the
-change is resolved once the new store has every blob. Nothing is ever
-deleted from the old store; that stays the administrator's to do.
+change is resolved once the new store has every blob. Nothing is
+deleted from the old store unless an administrator asks for a cleanup
+afterwards (`features/blob-store-cleanup.md`).
 
 ## Requirements
 
@@ -161,4 +162,4 @@ or `fixed`, for the first thing found holding the blob.
 - Copying ahead of a change (the old store to a new one before the
   setting changes): `features/blob-store-copy-ahead.md` (approved, #341).
 - Deleting what a resolved change left in the old store:
-  `features/blob-store-cleanup.md` (approved, #342).
+  `features/blob-store-cleanup.md` (building, #342).
