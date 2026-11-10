@@ -99,6 +99,9 @@ jobs:
         run: python3 tools/fork/expr-schema.py --check
       - if: always()
         run: python3 -m unittest discover -s tools/fork/tests
+      # The version PR that sets a version adds its CHANGELOG.md entry.
+      - if: always()
+        run: python3 tools/release/changelog-check.py
 
   # The build, and that every test target compiles. The suites are not run:
   # they need a store, fixed ports and containers (docs/spec/
