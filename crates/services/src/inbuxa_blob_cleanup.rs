@@ -113,6 +113,16 @@ pub async fn start(
     Ok(Ok(()))
 }
 
+/// OC-4: what a `different` problem says. Two copies of the same size
+/// differ in their bytes, so the sizes alone would read as a match.
+fn different_detail(current: usize, old: usize) -> String {
+    if current == old {
+        format!("the current blob store's {current} bytes differ from the old one's")
+    } else {
+        format!("the current blob store has {current} bytes, the old one {old}")
+    }
+}
+
 /// OC-3: whether the two stores share a place: one a sharded set with the
 /// other among its members, or a probe written to the current store found
 /// in the old one.
@@ -320,11 +330,7 @@ impl Run<'_> {
                             ProblemKind::Different,
                             key,
                             &holder,
-                            format!(
-                                "the current blob store has {} bytes, the old one {}",
-                                kept.len(),
-                                old.len()
-                            ),
+                            different_detail(kept.len(), old.len()),
                         );
                         return self.save(false).await;
                     }
@@ -527,5 +533,17 @@ mod tests {
         assert!(!one.blob_present(OVERLAP_PROBE_KEY).await.unwrap());
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(format!("{path}-other"));
+    }
+
+    #[test]
+    fn a_different_copy_of_the_same_size_says_the_bytes_differ() {
+        assert_eq!(
+            different_detail(12, 12),
+            "the current blob store's 12 bytes differ from the old one's"
+        );
+        assert_eq!(
+            different_detail(12, 10),
+            "the current blob store has 12 bytes, the old one 10"
+        );
     }
 }
