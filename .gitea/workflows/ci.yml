@@ -60,6 +60,9 @@ jobs:
       # as the server's display_version macro.
       - if: always()
         run: python3 -m unittest discover -s tools/release/tests
+      # The version PR that sets a version adds its CHANGELOG.md entry.
+      - if: always()
+        run: python3 tools/release/version.py --changelog
 
   build:
     if: ${{ vars.BUILD_ON != 'github' }}
