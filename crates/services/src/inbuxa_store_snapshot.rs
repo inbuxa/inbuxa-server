@@ -123,6 +123,17 @@ fn source(server: &Server) -> Result<(SnapshotSource, PathBuf), Refusal> {
     }
 }
 
+/// The snapshots' directory with a RocksDB data store, whether or not a
+/// snapshot can be taken now. A blob store change that isn't settled
+/// refuses a new one (BM-8), but the ones on disk are still listed,
+/// destroyed and cleaned up (SN-7, SN-9).
+fn root(server: &Server) -> Option<PathBuf> {
+    server
+        .store()
+        .snapshot_data_path()
+        .map(|path| path.join(SNAPSHOTS_DIR))
+}
+
 /// `20261109T013000Z`: a snapshot's name, the UTC time it was taken.
 pub fn name_for(seconds: u64) -> String {
     let t = DateTime::from_timestamp(seconds as i64);
@@ -404,9 +415,9 @@ async fn refresh_latest(root: &Path) {
 /// Every snapshot, newest first: those on disk, and the one being taken or
 /// the last one that failed (SN-7).
 pub async fn list(server: &Server) -> Vec<Snapshot> {
-    let mut snapshots = match source(server) {
-        Ok((_, root)) => on_disk(&root).await,
-        Err(_) => Vec::new(),
+    let mut snapshots = match root(server) {
+        Some(root) => on_disk(&root).await,
+        None => Vec::new(),
     };
     if let Some(current) = current().filter(|c| !snapshots.iter().any(|s| s.id == c.id)) {
         snapshots.push(current);
@@ -429,7 +440,7 @@ pub async fn destroy(server: &Server, id: u64) -> trc::Result<Destroyed> {
         set_current(None);
         return Ok(Destroyed::Gone);
     }
-    let Ok((_, root)) = source(server) else {
+    let Some(root) = root(server) else {
         return Ok(Destroyed::NotFound);
     };
     let Some(snapshot) = on_disk(&root).await.into_iter().find(|s| s.id == id) else {
@@ -447,7 +458,7 @@ pub async fn destroy(server: &Server, id: u64) -> trc::Result<Destroyed> {
 pub fn spawn_store_snapshots(inner: Arc<Inner>) {
     tokio::spawn(async move {
         let server = common::BuildServer::build_server(&inner);
-        let Ok((_, root)) = source(&server) else {
+        let Some(root) = root(&server) else {
             return;
         };
         let Ok(mut entries) = tokio::fs::read_dir(&root).await else {

@@ -69,6 +69,17 @@ impl Store {
     /// What a snapshot of this data store and `blobs` would hold, or why
     /// there can't be one.
     #[cfg_attr(not(feature = "rocks"), allow(unused_variables, unreachable_code))]
+    /// The RocksDB directory snapshots are kept under (SN-3), whether or not
+    /// one can be taken now: those already there are still listed, destroyed
+    /// and cleaned up while a new one would be refused (SN-7, BM-8).
+    pub fn snapshot_data_path(&self) -> Option<PathBuf> {
+        match self {
+            #[cfg(feature = "rocks")]
+            Store::RocksDb(store) => Some(store.path().to_path_buf()),
+            _ => None,
+        }
+    }
+
     pub fn snapshot_source(&self, blobs: &BlobStore) -> Result<SnapshotSource, NotSnapshottable> {
         let data_path = match self {
             #[cfg(feature = "rocks")]

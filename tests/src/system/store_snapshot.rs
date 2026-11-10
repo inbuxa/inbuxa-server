@@ -13,8 +13,9 @@
 //! whole, named for its time, with `latest` and `snapshot.json`. Only the
 //! latest two are kept; one can be destroyed, a snapshot can't be changed,
 //! and one being taken can't be destroyed or joined by another. Nobody in
-//! a tenant or without the permission reaches snapshots. Taking and
-//! destroying are audited.
+//! a tenant or without the permission reaches snapshots. While a blob store
+//! change isn't settled, a new one is refused and those on disk are still
+//! listed and destroyed. Taking and destroying are audited.
 
 use crate::utils::{
     account::Account,
@@ -28,11 +29,15 @@ use registry::schema::{
     },
 };
 use serde_json::{Value, json};
-use std::{path::PathBuf, str::FromStr, time::Duration};
+use std::{path::PathBuf, str::FromStr, sync::Arc, time::Duration};
 use store::{
     BlobStore, Store, ValueKey,
     backend::{fs::FsStore, rocksdb::RocksDbStore},
-    write::{AlignedBytes, Archive, snapshot::hold_blob_purge},
+    write::{
+        AlignedBytes, Archive,
+        blob_move::{MovingBlobStore, OldBlobStore},
+        snapshot::hold_blob_purge,
+    },
 };
 use types::{blob_hash::BlobHash, collection::Collection, field::EmailField, id::Id};
 
@@ -132,6 +137,15 @@ fn path_of(snapshot: &Value) -> PathBuf {
             .as_str()
             .unwrap_or_else(|| panic!("no path: {snapshot}")),
     )
+}
+
+/// Gives the server `blob` as its blob store, as a start-up would. Requests
+/// build their server from the shared core, so the test's own handle is
+/// left as it is.
+fn use_blob_store(test: &TestServer, blob: BlobStore) {
+    let mut core = (*test.server.inner.shared_core.load_full()).clone();
+    core.storage.blob = blob;
+    test.server.inner.shared_core.store(Arc::new(core));
 }
 
 pub async fn test(test: &mut TestServer) {
@@ -323,6 +337,50 @@ pub async fn test(test: &mut TestServer) {
         std::fs::read_link(root.join("latest")).unwrap(),
         PathBuf::from(left[0]["name"].as_str().unwrap())
     );
+
+    // BM-8: while a blob store change isn't settled, a new snapshot is
+    // refused, and the ones on disk are still listed and can be destroyed
+    let blobs = test.server.blob_store().clone();
+    let old = FsStore::open(structs::FileSystemStore {
+        path: format!("{}/old-blobs", test.tmp_dir()),
+        depth: 2,
+    })
+    .await
+    .unwrap();
+    use_blob_store(
+        test,
+        BlobStore::Moving(Arc::new(MovingBlobStore::new(
+            blobs.clone(),
+            vec![OldBlobStore {
+                change_id: 1,
+                store: old,
+            }],
+        ))),
+    );
+    let (_, response) = call(
+        admin,
+        "inbuxa:StoreSnapshot/set",
+        json!({"create": {"x": {}}}),
+    )
+    .await;
+    assert!(
+        response["notCreated"]["x"]["description"]
+            .as_str()
+            .is_some_and(|d| d.contains("blob store changed")),
+        "{response}"
+    );
+    let kept = all(admin).await;
+    assert_eq!(kept.len(), 1, "still listed while refused: {kept:?}");
+    let kept_id = kept[0]["id"].as_str().unwrap().to_string();
+    let (_, response) = call(
+        admin,
+        "inbuxa:StoreSnapshot/set",
+        json!({"destroy": [&kept_id]}),
+    )
+    .await;
+    assert_eq!(response["destroyed"], json!([kept_id]), "{response}");
+    assert!(!path_of(&kept[0]).exists());
+    use_blob_store(test, blobs);
 
     // Taking and destroying are audited
     let (_, response) = call(
