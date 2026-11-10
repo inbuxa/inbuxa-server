@@ -34,6 +34,15 @@ class Display(unittest.TestCase):
             with self.assertRaises(ValueError, msg=cargo):
                 version.display(cargo)
 
+    def test_changelog_versions(self):
+        text = "# Changelog\n\n## [27.1-rc.2] - 2026-10-29\n\n### Fixed\n- x\n\n## [2026.10.29] - 2026-10-29\n\n## Earlier releases\n"
+        self.assertEqual(version.changelog_versions(text), ["27.1-rc.2", "2026.10.29"])
+
+    def test_changelog_has_this_version(self):
+        # The tree's own CHANGELOG.md names the version Cargo.toml is on.
+        text = (version.ROOT / "CHANGELOG.md").read_text()
+        self.assertIn(version.display(version.cargo_version()), version.changelog_versions(text))
+
     def test_image_tags(self):
         self.assertEqual(version.image_tags("27.1.0-rc.2"), ["27.1-rc.2", "27.1-rc"])
         self.assertEqual(version.image_tags("27.1.0"), ["27.1", "latest"])

@@ -15,6 +15,8 @@ tested with the same cases.
   version.py --tag TAG         check that TAG is v<displayed>, then print it
   version.py --image-tags      the image tags for this version, one per line
   version.py --prerelease      exit 0 for a release candidate, 1 otherwise
+  version.py --changelog       check that CHANGELOG.md has an entry for this
+                               version, so the version PR that sets it adds one
   version.py --set VERSION     set the version (Cargo form) in Cargo.toml and
                                Cargo.lock: a release candidate, or a series
                                bump, is cut this way by hand
@@ -86,6 +88,12 @@ def members(root=ROOT):
     return names
 
 
+def changelog_versions(text):
+    """The versions CHANGELOG.md has entries for: every `## [VERSION]`
+    heading, as tags name them (27.1-rc.1, 2026.11.10)."""
+    return re.findall(r"(?m)^## \[([^\]]+)\]", text)
+
+
 def cargo_version(root=ROOT):
     return tomllib.loads((root / "Cargo.toml").read_text())["workspace"]["package"]["version"]
 
@@ -145,6 +153,13 @@ def main(argv):
         print("\n".join(image_tags(cargo)))
     elif argv == ["--prerelease"]:
         return 0 if is_prerelease(cargo) else 1
+    elif argv == ["--changelog"]:
+        shown = display(cargo)
+        if shown not in changelog_versions((ROOT / "CHANGELOG.md").read_text()):
+            print(f"CHANGELOG.md has no entry for {shown}. Add a `## [{shown}] - YYYY-MM-DD`", file=sys.stderr)
+            print("section to the version PR that sets it.", file=sys.stderr)
+            return 1
+        print(shown)
     elif argv[0] == "--set" and len(argv) == 2:
         for path, text in set_version(argv[1]).items():
             path.write_text(text)
