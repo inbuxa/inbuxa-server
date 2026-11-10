@@ -159,4 +159,4 @@ or `fixed`, for the first thing found holding the blob.
   that existing blobs stay where they are.
 - An `inbuxa-cli` command.
 - Copying ahead of a change (the old store to a new one before the
-  setting changes): `features/blob-store-copy-ahead.md` (draft, #341).
+  setting changes): `features/blob-store-copy-ahead.md` (approved, #341).

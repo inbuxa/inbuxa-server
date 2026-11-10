@@ -1,6 +1,7 @@
 # Feature spec: copying blobs ahead of a blob store change
 
-Status: draft, 2026-11-10 (inbuxa-server #341). Not a rebuild (SPEC.md
+Status: **approved 2026-11-10** (inbuxa-server #341, PR #354), with the
+answers under [Settled](#settled). Not a rebuild (SPEC.md
 §4): inbuxa's own design. It extends `features/blob-store-change.md`
 (BM-1 to BM-10), which it doesn't change except where it says so.
 
@@ -130,25 +131,16 @@ copy ahead, and `changedAt` and `node` are null.
   and resolves it. Over JMAP: each refusal in CA-1 and CA-7, destroy
   while copying, a tenant administrator's refusal.
 
-## Open questions
+## Settled
 
-1. **Deletes follow (CA-4).** Without it, every blob deleted between the
-   copy ahead and the switch stays in the new store for good, since
-   nothing holds it any more and the cleanup never looks for it. With it,
-   each delete costs a second delete on the target. Recommended: yes.
-2. **Writes follow too?** Writing new blobs to both stores while planned
-   would make the last pass find almost nothing to copy, but it puts the
-   target on the mail path: a slow or failing target would slow or fail
-   delivery. Recommended: no. The last pass and reading through cover
-   the gap.
-3. **`apply` (CA-7).** Without it, the administrator types the same
-   settings into the blob store form, and a typo in the path or bucket
-   makes the switch record a new change instead of using the planned one
-   (CA-5). Recommended: yes.
-4. **Refused while a change is unresolved (CA-1).** The alternative is
-   reading the current store through its old ones during the copy ahead,
-   which works but also writes each such blob into the current store.
-   Recommended: refuse, and keep it simple.
+Approved 2026-11-10 with every recommendation:
+
+1. **Deletes follow** the current store to the planned target (CA-4).
+2. **Writes don't follow.** The target stays off the mail path; the last
+   pass and reading through cover the gap.
+3. **`apply`** writes the target's settings to the blob store setting
+   (CA-7).
+4. **Planning is refused** while another change is unresolved (CA-1).
 
 ## Not yet
 
