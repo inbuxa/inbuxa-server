@@ -16,6 +16,13 @@
 //! change unresolved. Put right, a second copy resolves it, and nothing
 //! is read through any more. A slow copy stops when asked and can't be
 //! dismissed while it runs. Nobody but an administrator reaches changes.
+//!
+//! Then copying ahead (docs/spec/features/blob-store-copy-ahead.md): a
+//! change to a filesystem store is planned, refused where it should be,
+//! copied ahead and applied to the setting; deletes follow to the planned
+//! store meanwhile. Mail delivered after the copy ahead is read through once
+//! the server switches, and the last pass copies only what the copy ahead
+//! didn't have.
 
 use crate::utils::{
     account::Account,
@@ -23,13 +30,18 @@ use crate::utils::{
 };
 use email::{mailbox::INBOX_ID, message::metadata::MessageMetadata};
 use inbuxa_features::blob_move::{self as model, Started};
-use registry::schema::{enums::CompressionAlgo, structs};
+use registry::schema::{
+    enums::CompressionAlgo,
+    prelude::{Object, ObjectType},
+    structs,
+};
 use serde_json::{Value, json};
 use std::{str::FromStr, sync::Arc, time::Duration};
 use store::{
     BlobStore, ValueKey,
     backend::fs::FsStore,
     build::blob::blob_store_location,
+    registry::write::{RegistryWrite, RegistryWriteResult},
     write::{
         AlignedBytes, Archive,
         blob_move::{MovingBlobStore, OldBlobStore},
@@ -403,6 +415,295 @@ pub async fn test(test: &mut TestServer) {
     assert_eq!(response["notFound"], json!([id]), "{response}");
 
     use_blob_store(test, current);
+    copy_ahead(test).await;
+}
+
+async fn plan(admin: &Account, target: Value) -> Value {
+    let (_, response) = call(
+        admin,
+        "inbuxa:BlobStoreChange/set",
+        json!({"create": {"p": {"target": target}}}),
+    )
+    .await;
+    response
+}
+
+async fn setting(test: &TestServer) -> structs::BlobStore {
+    test.server
+        .registry()
+        .object::<structs::BlobStore>(Id::singleton())
+        .await
+        .unwrap()
+        .unwrap_or_default()
+}
+
+async fn put_setting(test: &TestServer, settings: structs::BlobStore) {
+    let registry = test.server.registry();
+    let old = registry
+        .get(ObjectType::BlobStore.singleton())
+        .await
+        .unwrap()
+        .expect("the setting apply wrote");
+    let mut new = old.clone();
+    new.inner = Object::from(settings).inner;
+    assert!(matches!(
+        registry
+            .write(RegistryWrite::update(Id::singleton(), &new, &old))
+            .await
+            .unwrap(),
+        RegistryWriteResult::Success(_)
+    ));
+}
+
+/// The blob-store-copy-ahead spec, CA-1 to CA-8.
+async fn copy_ahead(test: &mut TestServer) {
+    println!("Running blob store copy ahead tests...");
+    let data = test.server.store().clone();
+    let admin = test.account("admin@example.com");
+    let ann = test.account("ann@example.com");
+    let ann_id = ann.id().document_id();
+    let client = ann.jmap_client().await;
+    let current = test.server.blob_store().clone();
+    // Where the server last said its blob store is: the data store, as the
+    // test above left it, whatever the setting is
+    let here = structs::BlobStore::Default;
+    let original = setting(test).await;
+
+    // From a server with no change left: with blobs in a directory, the
+    // test above leaves the move from it to its old store behind
+    for change in model::all(&data).await.unwrap() {
+        model::remove(&data, change.id).await.unwrap();
+    }
+
+    let dir = format!("{}/planned-blobs", test.tmp_dir());
+    let fs_settings = structs::FileSystemStore {
+        path: dir.clone(),
+        depth: 2,
+    };
+    let target = structs::BlobStore::FileSystem(fs_settings.clone());
+    let target_json = serde_json::to_value(&target).unwrap();
+    let planned_store = FsStore::open(fs_settings).await.unwrap();
+
+    let before = import(&client, "Delivered before the copy ahead").await;
+    let before_hash = blob_of(test, ann_id, before).await;
+
+    // CA-1: refusals
+    let response = plan(admin, json!({"@type": "Bogus"})).await;
+    assert_eq!(
+        response["notCreated"]["p"]["type"], "invalidProperties",
+        "{response}"
+    );
+    let response = plan(admin, serde_json::to_value(&here).unwrap()).await;
+    assert_eq!(
+        response["notCreated"]["p"]["type"], "forbidden",
+        "the same place: {response}"
+    );
+    let response = plan(
+        admin,
+        json!({"@type": "FileSystem", "path": "/dev/null/blobs", "depth": 2}),
+    )
+    .await;
+    assert_eq!(
+        response["notCreated"]["p"]["type"], "invalidProperties",
+        "a store that can't be written: {response}"
+    );
+    let (_, response) = call(
+        admin,
+        "inbuxa:BlobStoreChange/set",
+        json!({"create": {"p": {"target": target_json, "from": "x"}}}),
+    )
+    .await;
+    assert_eq!(
+        response["notCreated"]["p"]["type"], "invalidProperties",
+        "{response}"
+    );
+
+    // Planned
+    let response = plan(admin, target_json.clone()).await;
+    let id = response["created"]["p"]["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("not planned: {response}"))
+        .to_string();
+    let change_id = Id::from_str(&id).unwrap().document_id();
+    let change = get(admin, &id).await;
+    assert_eq!(change["stage"], "planned", "{change}");
+    assert_eq!(change["status"], "pending", "{change}");
+    assert_eq!(change["from"], "the data store", "{change}");
+    assert_eq!(change["to"], blob_store_location(&target), "{change}");
+    assert_eq!(change["changedAt"], Value::Null, "{change}");
+    assert!(!change.to_string().contains("FileSystem"), "{change}");
+    let response = plan(
+        admin,
+        json!({"@type": "FileSystem", "path": format!("{dir}-2"), "depth": 2}),
+    )
+    .await;
+    assert_eq!(
+        response["notCreated"]["p"]["type"], "forbidden",
+        "one planned at a time: {response}"
+    );
+    let response = update(admin, &id, json!({"action": "apply"})).await;
+    assert_eq!(
+        response["notUpdated"][&id]["type"], "forbidden",
+        "applied before it's copied ahead: {response}"
+    );
+    // CA-3: not read through, and a snapshot isn't refused for it
+    assert!(model::unresolved(&data).await.unwrap().is_empty());
+
+    // CA-4: deletes follow
+    let planned = test
+        .server
+        .blob_store()
+        .moving()
+        .and_then(|m| m.planned())
+        .expect("deletes follow to the planned store");
+    assert_eq!(planned.change_id, change_id);
+    for store in [current.current(), &planned_store] {
+        store
+            .put_blob(b"deleted-meanwhile", b"x", CompressionAlgo::None)
+            .await
+            .unwrap();
+    }
+    test.server
+        .blob_store()
+        .delete_blob(b"deleted-meanwhile")
+        .await
+        .unwrap();
+    assert!(
+        !planned_store
+            .blob_present(b"deleted-meanwhile")
+            .await
+            .unwrap(),
+        "a delete followed to the planned store"
+    );
+
+    // CA-2: copied ahead; nothing resolved, the setting untouched
+    let response = update(admin, &id, json!({"action": "copy", "blobsPerSecond": 0})).await;
+    assert!(response["updated"].get(&id).is_some(), "{response}");
+    let change = settled(admin, &id).await;
+    assert_eq!(change["status"], "copied", "{change}");
+    assert_eq!(change["stage"], "planned", "{change}");
+    let copied_ahead = count(&change, "copied");
+    assert!(copied_ahead >= 1, "{change}");
+    assert!(
+        planned_store
+            .blob_present(before_hash.as_slice())
+            .await
+            .unwrap(),
+        "copied ahead"
+    );
+    assert_eq!(setting(test).await, original);
+
+    // Written after the copy ahead: only the current store has them
+    let late = import(&client, "Delivered after the copy ahead").await;
+    let later = import(&client, "Also after the copy ahead").await;
+    let late_hash = blob_of(test, ann_id, late).await;
+    let later_hash = blob_of(test, ann_id, later).await;
+    assert!(
+        !planned_store
+            .blob_present(late_hash.as_slice())
+            .await
+            .unwrap()
+    );
+
+    // CA-7: applied, once
+    let response = update(admin, &id, json!({"action": "apply"})).await;
+    assert!(response["updated"].get(&id).is_some(), "{response}");
+    assert_eq!(setting(test).await, target);
+    let change = get(admin, &id).await;
+    assert_eq!(change["appliedBy"], "admin@example.com", "{change}");
+    assert!(change["appliedAt"].is_string(), "{change}");
+    let response = update(admin, &id, json!({"action": "apply"})).await;
+    assert_eq!(
+        response["notUpdated"][&id]["type"], "forbidden",
+        "{response}"
+    );
+
+    // CA-5: the switch, as a start with the new setting would make it
+    let Started::Changed(switched) =
+        model::at_start(&data, blob_store_location(&target), &target, 1, now())
+            .await
+            .unwrap()
+    else {
+        panic!("no change at the switch");
+    };
+    assert_eq!(switched, change_id, "the planned change became the change");
+    use_blob_store(
+        test,
+        BlobStore::Moving(Arc::new(MovingBlobStore::new(
+            planned_store.clone(),
+            vec![OldBlobStore {
+                change_id,
+                store: current.current().clone(),
+            }],
+        ))),
+    );
+    let admin = test.account("admin@example.com");
+    let change = get(admin, &id).await;
+    assert_eq!(change["stage"], "changed", "{change}");
+    assert_eq!(change["status"], "pending", "{change}");
+    assert!(change["changedAt"].is_string(), "{change}");
+    assert_eq!(change["copiedAhead"]["status"], "copied", "{change}");
+    assert_eq!(change["copiedAhead"]["copied"], copied_ahead, "{change}");
+    assert!(
+        model::get(&data, change_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .target_settings
+            .is_none(),
+        "the planned store's settings go at the switch"
+    );
+
+    // BM-3: what came after the copy ahead reads through
+    let message = test.fetch_email(ann_id, late).await;
+    assert!(String::from_utf8_lossy(&message).contains("Delivered after the copy ahead"));
+    assert!(
+        planned_store
+            .blob_present(late_hash.as_slice())
+            .await
+            .unwrap()
+    );
+
+    // CA-6: the last pass copies only what the copy ahead didn't have
+    let response = update(admin, &id, json!({"action": "copy", "blobsPerSecond": 0})).await;
+    assert!(response["updated"].get(&id).is_some(), "{response}");
+    let change = settled(admin, &id).await;
+    assert_eq!(change["status"], "copied", "{change}");
+    let last_pass = count(&change, "copied");
+    assert!(last_pass >= 1 && last_pass < copied_ahead, "{change}");
+    assert!(count(&change, "alreadyThere") >= copied_ahead, "{change}");
+    assert!(
+        planned_store
+            .blob_present(later_hash.as_slice())
+            .await
+            .unwrap()
+    );
+
+    // Put back as it was
+    let (_, response) = call(
+        admin,
+        "inbuxa:BlobStoreChange/set",
+        json!({"destroy": [id]}),
+    )
+    .await;
+    assert_eq!(response["destroyed"], json!([id]), "{response}");
+    use_blob_store(test, current.clone());
+    put_setting(test, original.clone()).await;
+    if let Started::Changed(back) =
+        model::at_start(&data, blob_store_location(&here), &here, 1, now())
+            .await
+            .unwrap()
+    {
+        model::remove(&data, back).await.unwrap();
+    }
+    // The planned store is gone with the change
+    services::inbuxa_blob_move::refresh(&test.server).await;
+    assert!(
+        test.server
+            .blob_store()
+            .moving()
+            .is_none_or(|m| m.planned().is_none())
+    );
 }
 
 /// Runs these tests alone: `cargo test -p tests blob_store_change_tests -- --ignored`.

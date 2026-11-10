@@ -8,7 +8,9 @@
 //! `inbuxa:BlobStoreChange` objects. A change is recorded when a node
 //! starts with its blob store somewhere else than the store last said
 //! (BM-2), and keeps the old store's settings so it can be read through
-//! (BM-3) and copied from (BM-5). The copy itself runs in
+//! (BM-3) and copied from (BM-5). A change can also be planned before the
+//! setting moves, with the new store's settings, and copied ahead
+//! (docs/spec/features/blob-store-copy-ahead.md). The copy itself runs in
 //! `services::inbuxa_blob_move`; this module keeps what a change is.
 //!
 //! Kept in the fork's subspace (`store::SUBSPACE_INBUXA`), never in the
@@ -116,6 +118,42 @@ impl ProblemKind {
     }
 }
 
+/// CA-1, CA-5: whether the setting has moved yet.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, SerdeSerialize, SerdeDeserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Stage {
+    /// Planned: the new store's settings are kept, and a copy goes from the
+    /// current store to it. Nothing reads through it.
+    Planned,
+    /// The setting moved (BM-2). Every change recorded before planning
+    /// existed is one.
+    #[default]
+    Changed,
+}
+
+impl Stage {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Stage::Planned => "planned",
+            Stage::Changed => "changed",
+        }
+    }
+}
+
+/// CA-5: the copy ahead of a planned change, kept once the setting moved.
+#[derive(Debug, Clone, PartialEq, SerdeSerialize, SerdeDeserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CopiedAhead {
+    pub started_at: u64,
+    #[serde(default)]
+    pub finished_at: Option<u64>,
+    pub status: Status,
+    pub copied: u64,
+    pub already_there: u64,
+    pub bytes_copied: u64,
+    pub problems: u64,
+}
+
 /// BM-5: a blob a copy couldn't copy.
 #[derive(Debug, Clone, PartialEq, Eq, SerdeSerialize, SerdeDeserialize)]
 #[serde(rename_all = "camelCase")]
@@ -207,9 +245,40 @@ pub struct BlobStoreChange {
     pub old_settings: Option<structs::BlobStore>,
     #[serde(default)]
     pub copy: Option<Copy>,
+    /// CA-1.
+    #[serde(default)]
+    pub stage: Stage,
+    /// CA-1: a planned change's new store, to copy to (CA-2), follow deletes
+    /// to (CA-4) and write to the setting (CA-7). Dropped at the switch;
+    /// never shown.
+    #[serde(default)]
+    pub target_settings: Option<structs::BlobStore>,
+    /// CA-5.
+    #[serde(default)]
+    pub copied_ahead: Option<CopiedAhead>,
+    /// CA-7: when and by whom the setting was written.
+    #[serde(default)]
+    pub applied_at: Option<u64>,
+    #[serde(default)]
+    pub applied_by: Option<String>,
 }
 
 impl BlobStoreChange {
+    /// BM-3: whether the old store is still read through. A planned change
+    /// never is (CA-3).
+    pub fn is_unresolved(&self) -> bool {
+        self.stage == Stage::Changed && self.status.is_unresolved()
+    }
+
+    /// What a copy of it would copy from: the old store, or for a planned
+    /// change the current one (CA-2).
+    pub fn can_copy(&self) -> bool {
+        match self.stage {
+            Stage::Changed => self.is_unresolved() && self.old_settings.is_some(),
+            Stage::Planned => self.target_settings.is_some(),
+        }
+    }
+
     /// As it reads now: a copy whose node went quiet has stopped with it
     /// (BM-6), even before anything marked it so.
     pub fn status_at(&self, now: u64) -> Status {
@@ -328,9 +397,18 @@ pub async fn all(data: &Store) -> trc::Result<Vec<BlobStoreChange>> {
 /// BM-3, BM-10: the changes still read through, newest first.
 pub async fn unresolved(data: &Store) -> trc::Result<Vec<BlobStoreChange>> {
     let mut changes = all(data).await?;
-    changes.retain(|c| c.status.is_unresolved() && c.old_settings.is_some());
+    changes.retain(|c| c.is_unresolved() && c.old_settings.is_some());
     changes.reverse();
     Ok(changes)
+}
+
+/// CA-1, CA-3: the planned change, if there is one.
+pub async fn planned(data: &Store) -> trc::Result<Option<BlobStoreChange>> {
+    Ok(all(data)
+        .await?
+        .into_iter()
+        .rev()
+        .find(|c| c.stage == Stage::Planned && c.target_settings.is_some()))
 }
 
 /// Where the store last said the blob store was.
@@ -397,7 +475,7 @@ pub async fn at_start(
 
                 // BM-4: back where an unresolved change moved away from
                 for earlier in changes.iter().filter(|c| {
-                    c.status.is_unresolved() && c.status != Status::Copying && c.from == location
+                    c.is_unresolved() && c.status != Status::Copying && c.from == location
                 }) {
                     let reverted = BlobStoreChange {
                         status: Status::Reverted,
@@ -407,25 +485,57 @@ pub async fn at_start(
                     batch.set(class(earlier.id), Json(&reverted).serialize()?);
                 }
 
-                let change = BlobStoreChange {
-                    id,
-                    from: last.location.clone(),
-                    to: location.clone(),
-                    changed_at: now,
-                    node_id,
-                    status: Status::Pending,
-                    old_settings: Some(last.settings.clone()),
-                    copy: None,
+                // CA-5: the planned change for this move becomes the change
+                let plan = changes.iter().find(|c| {
+                    c.stage == Stage::Planned && c.from == last.location && c.to == location
+                });
+                let change = match plan {
+                    Some(plan) => {
+                        let stored = data
+                            .get_value::<Versioned<BlobStoreChange>>(ValueKey::from(class(plan.id)))
+                            .await
+                            .caused_by(trc::location!())?;
+                        let Some(Versioned(plan, plan_version)) = stored else {
+                            continue;
+                        };
+                        batch.assert_value(class(plan.id), AssertValue::Hash(plan_version));
+                        if running(data).await? == Some(plan.id) {
+                            // Its copy ahead is cut short; its node sees the
+                            // switch at its next save
+                            batch.assert_value(running_class(), AssertValue::U32(plan.id));
+                            batch.clear(running_class());
+                        }
+                        forgotten.push(plan.id);
+                        switched(plan, last.settings.clone(), node_id, now)
+                    }
+                    None => {
+                        batch.assert_value(class(id), AssertValue::None);
+                        BlobStoreChange {
+                            id,
+                            from: last.location.clone(),
+                            to: location.clone(),
+                            changed_at: now,
+                            node_id,
+                            status: Status::Pending,
+                            old_settings: Some(last.settings.clone()),
+                            copy: None,
+                            stage: Stage::Changed,
+                            target_settings: None,
+                            copied_ahead: None,
+                            applied_at: None,
+                            applied_by: None,
+                        }
+                    }
                 };
-                batch.assert_value(class(id), AssertValue::None);
-                batch.set(class(id), Json(&change).serialize()?);
-                started = Started::Changed(id);
+                batch.set(class(change.id), Json(&change).serialize()?);
+                started = Started::Changed(change.id);
 
                 // The oldest resolved changes past MAX_CHANGES are forgotten
-                let over = (changes.len() + 1).saturating_sub(MAX_CHANGES);
+                let over =
+                    (changes.len() + usize::from(plan.is_none())).saturating_sub(MAX_CHANGES);
                 for old in changes
                     .iter()
-                    .filter(|c| !c.status.is_unresolved())
+                    .filter(|c| c.stage == Stage::Changed && !c.status.is_unresolved())
                     .take(over)
                 {
                     batch.clear(class(old.id));
@@ -437,12 +547,133 @@ pub async fn at_start(
 
         match data.write(batch.build_all()).await {
             Ok(_) => {
+                // Forgotten changes' problems, and a switched plan's from its
+                // copy ahead: its count is kept in `copiedAhead` (CA-5)
                 for id in forgotten {
                     remove_problems(data, id).await?;
                 }
                 return Ok(started);
             }
             // Another node wrote first: read what it recorded
+            Err(err) if attempt < WRITE_ATTEMPTS && is_assert_failure(&err) => {}
+            Err(err) => return Err(err.caused_by(trc::location!())),
+        }
+    }
+}
+
+/// CA-5: a planned change, as the change it becomes when the setting moves
+/// to its store: read through from `old` until copied, its copy ahead kept.
+fn switched(
+    plan: BlobStoreChange,
+    old: structs::BlobStore,
+    node_id: u64,
+    now: u64,
+) -> BlobStoreChange {
+    let copied_ahead = plan.copy.as_ref().map(|copy| CopiedAhead {
+        started_at: copy.started_at,
+        finished_at: copy.finished_at.or(Some(now)),
+        status: match plan.status {
+            Status::Copying => Status::Interrupted,
+            status => status,
+        },
+        copied: copy.progress.copied,
+        already_there: copy.progress.already_there,
+        bytes_copied: copy.progress.bytes_copied,
+        problems: copy.progress.problems(),
+    });
+    BlobStoreChange {
+        changed_at: now,
+        node_id,
+        status: Status::Pending,
+        old_settings: Some(old),
+        copy: None,
+        stage: Stage::Changed,
+        target_settings: None,
+        copied_ahead,
+        ..plan
+    }
+}
+
+/// CA-1: why a change can't be planned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlanRefusal {
+    /// The new store is where the blob store is now.
+    SamePlace,
+    /// This change is planned already.
+    AlreadyPlanned(u32),
+    /// This change is still read through.
+    Unresolved(u32),
+    /// The server hasn't recorded where its blob store is yet.
+    NoLocation,
+}
+
+/// CA-1: records a planned change from where the blob store is now to
+/// `to`, keeping `target` to open it. The checks of the store itself (it
+/// opens, a probe reads back) are the caller's.
+pub async fn plan(
+    data: &Store,
+    to: String,
+    target: structs::BlobStore,
+) -> trc::Result<Result<BlobStoreChange, PlanRefusal>> {
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        let Some(Versioned(here, version)) = data
+            .get_value::<Versioned<Location>>(ValueKey::from(location_class()))
+            .await
+            .caused_by(trc::location!())?
+        else {
+            return Ok(Err(PlanRefusal::NoLocation));
+        };
+        if here.location == to {
+            return Ok(Err(PlanRefusal::SamePlace));
+        }
+        let changes = all(data).await?;
+        if let Some(planned) = changes.iter().find(|c| c.stage == Stage::Planned) {
+            return Ok(Err(PlanRefusal::AlreadyPlanned(planned.id)));
+        }
+        if let Some(open) = changes.iter().rev().find(|c| c.is_unresolved()) {
+            return Ok(Err(PlanRefusal::Unresolved(open.id)));
+        }
+        let id = changes.iter().map(|c| c.id).max().unwrap_or(0) + 1;
+        let change = BlobStoreChange {
+            id,
+            from: here.location.clone(),
+            to: to.clone(),
+            changed_at: 0,
+            node_id: 0,
+            status: Status::Pending,
+            old_settings: None,
+            copy: None,
+            stage: Stage::Planned,
+            target_settings: Some(target.clone()),
+            copied_ahead: None,
+            applied_at: None,
+            applied_by: None,
+        };
+
+        let mut batch = BatchBuilder::new();
+        // Planned from where the blob store is: refused if it moved meanwhile
+        batch.assert_value(location_class(), AssertValue::Hash(version));
+        batch.assert_value(class(id), AssertValue::None);
+        batch.set(class(id), Json(&change).serialize()?);
+        let over = (changes.len() + 1).saturating_sub(MAX_CHANGES);
+        let mut forgotten = Vec::new();
+        for old in changes
+            .iter()
+            .filter(|c| c.stage == Stage::Changed && !c.status.is_unresolved())
+            .take(over)
+        {
+            batch.clear(class(old.id));
+            forgotten.push(old.id);
+        }
+        match data.write(batch.build_all()).await {
+            Ok(_) => {
+                for id in forgotten {
+                    remove_problems(data, id).await?;
+                }
+                return Ok(Ok(change));
+            }
             Err(err) if attempt < WRITE_ATTEMPTS && is_assert_failure(&err) => {}
             Err(err) => return Err(err.caused_by(trc::location!())),
         }
@@ -465,6 +696,9 @@ pub enum Refusal {
     Running(u32),
     /// The change is resolved, or has no old store to copy from.
     Resolved,
+    /// CA-2: the blob store moved since the change was planned, so copying
+    /// ahead from it would fill the planned store from the wrong place.
+    Moved,
 }
 
 /// BM-5: marks a change as being copied by `copy` and makes it the one
@@ -511,8 +745,19 @@ pub async fn start_copy(
         else {
             return Ok(Err(Refusal::NotFound));
         };
-        if !change.status.is_unresolved() || change.old_settings.is_none() {
+        if !change.can_copy() {
             return Ok(Err(Refusal::Resolved));
+        }
+        let location = data
+            .get_value::<Versioned<Location>>(ValueKey::from(location_class()))
+            .await
+            .caused_by(trc::location!())?;
+        if change.stage == Stage::Planned
+            && location
+                .as_ref()
+                .is_none_or(|Versioned(here, _)| here.location != change.from)
+        {
+            return Ok(Err(Refusal::Moved));
         }
         let change = BlobStoreChange {
             status: Status::Copying,
@@ -762,6 +1007,202 @@ mod tests {
         assert!(get(&data, 2).await.unwrap().is_none());
     }
 
+    fn a_copy(at: u64) -> Copy {
+        Copy {
+            started_at: at,
+            started_by: "admin".into(),
+            node_id: 1,
+            blobs_per_second: 0,
+            bytes_per_second: 0,
+            heartbeat: at,
+            finished_at: None,
+            stop_requested: false,
+            progress: Progress::default(),
+            problems_kept: 0,
+            error: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_planned_change_becomes_the_change() {
+        let data = store::backend::ephemeral::EphemeralStore::open();
+        let a = structs::BlobStore::Default;
+        let b = fs("/srv/blobs");
+        let (here_a, here_b) = ("the data store".to_string(), "dir".to_string());
+
+        // CA-1: nothing to plan from before the server says where it is
+        assert_eq!(
+            plan(&data, here_b.clone(), b.clone()).await.unwrap(),
+            Err(PlanRefusal::NoLocation)
+        );
+        at_start(&data, here_a.clone(), &a, 1, 10).await.unwrap();
+        assert_eq!(
+            plan(&data, here_a.clone(), a.clone()).await.unwrap(),
+            Err(PlanRefusal::SamePlace)
+        );
+        let planned = plan(&data, here_b.clone(), b.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(planned.stage, Stage::Planned);
+        assert_eq!(planned.target_settings, Some(b.clone()));
+        assert_eq!(
+            (planned.from.as_str(), planned.to.as_str()),
+            ("the data store", "dir")
+        );
+        assert_eq!(
+            plan(&data, "elsewhere".into(), fs("/srv/other"))
+                .await
+                .unwrap(),
+            Err(PlanRefusal::AlreadyPlanned(planned.id))
+        );
+
+        // CA-3: not read through, so not unresolved
+        assert!(!planned.is_unresolved());
+        assert!(unresolved(&data).await.unwrap().is_empty());
+        assert_eq!(
+            super::planned(&data).await.unwrap().map(|c| c.id),
+            Some(planned.id)
+        );
+
+        // CA-2: copied ahead; `copied` resolves nothing
+        start_copy(&data, planned.id, a_copy(20), 20)
+            .await
+            .unwrap()
+            .unwrap();
+        update(&data, planned.id, |c| {
+            c.status = Status::Copied;
+            if let Some(copy) = &mut c.copy {
+                copy.progress.copied = 7;
+                copy.progress.bytes_copied = 700;
+                copy.finished_at = Some(25);
+            }
+            true
+        })
+        .await
+        .unwrap();
+        release(&data, planned.id).await.unwrap();
+        let ahead = get(&data, planned.id).await.unwrap().unwrap();
+        assert_eq!(ahead.stage, Stage::Planned);
+        assert!(ahead.target_settings.is_some());
+
+        // CA-5: the switch makes it the change, no new one
+        assert_eq!(
+            at_start(&data, here_b.clone(), &b, 2, 30).await.unwrap(),
+            Started::Changed(planned.id)
+        );
+        assert_eq!(all(&data).await.unwrap().len(), 1);
+        let change = get(&data, planned.id).await.unwrap().unwrap();
+        assert_eq!(change.stage, Stage::Changed);
+        assert_eq!(change.status, Status::Pending);
+        assert_eq!((change.changed_at, change.node_id), (30, 2));
+        assert_eq!(change.old_settings, Some(a.clone()));
+        assert_eq!(change.target_settings, None);
+        assert_eq!(change.copy, None);
+        let kept = change.copied_ahead.clone().unwrap();
+        assert_eq!(
+            (
+                kept.status,
+                kept.copied,
+                kept.bytes_copied,
+                kept.finished_at
+            ),
+            (Status::Copied, 7, 700, Some(25))
+        );
+        assert!(change.is_unresolved());
+        assert_eq!(super::planned(&data).await.unwrap(), None);
+
+        // CA-1: nothing more can be planned while it's read through
+        assert_eq!(
+            plan(&data, "elsewhere".into(), fs("/srv/other"))
+                .await
+                .unwrap(),
+            Err(PlanRefusal::Unresolved(planned.id))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_plan_for_somewhere_else_stays_planned() {
+        let data = store::backend::ephemeral::EphemeralStore::open();
+        let a = structs::BlobStore::Default;
+        at_start(&data, "the data store".into(), &a, 1, 10)
+            .await
+            .unwrap();
+        let planned = plan(&data, "dir".into(), fs("/srv/blobs"))
+            .await
+            .unwrap()
+            .unwrap();
+        start_copy(&data, planned.id, a_copy(20), 20)
+            .await
+            .unwrap()
+            .unwrap();
+
+        // The setting moved somewhere else: a change of its own; the plan is
+        // still planned, and its copy can't start again from here (CA-2)
+        let other = fs("/srv/other");
+        let Started::Changed(id) = at_start(&data, "other".into(), &other, 1, 30)
+            .await
+            .unwrap()
+        else {
+            panic!("no change recorded");
+        };
+        assert_ne!(id, planned.id);
+        assert_eq!(
+            get(&data, planned.id).await.unwrap().unwrap().stage,
+            Stage::Planned
+        );
+        update(&data, planned.id, |c| {
+            c.status = Status::Stopped;
+            true
+        })
+        .await
+        .unwrap();
+        release(&data, planned.id).await.unwrap();
+        assert_eq!(
+            start_copy(&data, planned.id, a_copy(40), 40).await.unwrap(),
+            Err(Refusal::Moved)
+        );
+    }
+
+    #[tokio::test]
+    async fn the_switch_cuts_a_running_copy_ahead_short() {
+        let data = store::backend::ephemeral::EphemeralStore::open();
+        let a = structs::BlobStore::Default;
+        let b = fs("/srv/blobs");
+        at_start(&data, "the data store".into(), &a, 1, 10)
+            .await
+            .unwrap();
+        let planned = plan(&data, "dir".into(), b.clone()).await.unwrap().unwrap();
+        start_copy(&data, planned.id, a_copy(20), 20)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(running(&data).await.unwrap(), Some(planned.id));
+
+        at_start(&data, "dir".into(), &b, 2, 30).await.unwrap();
+        let change = get(&data, planned.id).await.unwrap().unwrap();
+        assert_eq!(change.stage, Stage::Changed);
+        assert_eq!(
+            change.copied_ahead.map(|c| c.status),
+            Some(Status::Interrupted)
+        );
+        // The last pass can start
+        assert_eq!(running(&data).await.unwrap(), None);
+        start_copy(&data, planned.id, a_copy(40), 40)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[test]
+    fn a_change_from_before_planning_reads_as_changed() {
+        let old = br#"{"id":1,"from":"a","to":"b","changedAt":5,"nodeId":1,"status":"pending","oldSettings":{"@type":"Default"}}"#;
+        let Json(change) = Json::<BlobStoreChange>::deserialize(old).unwrap();
+        assert_eq!(change.stage, Stage::Changed);
+        assert!(change.is_unresolved());
+        assert!(change.can_copy());
+    }
+
     #[test]
     fn keys_stay_in_their_own_letter() {
         for class in [
@@ -816,6 +1257,11 @@ mod tests {
                 problems_kept: 0,
                 error: None,
             }),
+            stage: Stage::Changed,
+            target_settings: None,
+            copied_ahead: None,
+            applied_at: None,
+            applied_by: None,
         };
         assert_eq!(change.status_at(1_000 + STALE_AFTER), Status::Copying);
         assert_eq!(change.status_at(1_001 + STALE_AFTER), Status::Interrupted);
@@ -832,6 +1278,11 @@ mod tests {
             status: Status::Pending,
             old_settings: Some(fs("/srv/blobs")),
             copy: None,
+            stage: Stage::Changed,
+            target_settings: None,
+            copied_ahead: None,
+            applied_at: None,
+            applied_by: None,
         };
         let bytes = Json(&change).serialize().unwrap();
         let Json(back) = Json::<BlobStoreChange>::deserialize(&bytes).unwrap();

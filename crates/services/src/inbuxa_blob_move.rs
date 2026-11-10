@@ -7,9 +7,12 @@
 //! Changing the blob store (docs/spec/features/blob-store-change.md): the
 //! copy behind an `inbuxa:BlobStoreChange`. It goes through the blob index
 //! one slice at a time and copies each blob the current store lacks from
-//! the change's old store, as the old store keeps it (BM-5). It runs on the
-//! node the copy was started on. Also, on every node, it keeps reading
-//! through only the changes still unresolved (BM-10).
+//! the change's old store, as the old store keeps it (BM-5). A planned
+//! change is copied the other way round: from the current store to the
+//! planned one (blob-store-copy-ahead spec, CA-2). It runs on the node the
+//! copy was started on. Also, on every node, it keeps reading through only
+//! the changes still unresolved (BM-10), and deletes following to the
+//! planned store, if there is one (CA-4).
 
 use common::{
     BuildServer, Inner, Server,
@@ -17,16 +20,19 @@ use common::{
 };
 use inbuxa_features::blob_move::{
     self as model, BlobStoreChange, Copy, DEFAULT_BLOBS_PER_SECOND, DEFAULT_BYTES_PER_SECOND,
-    MAX_PROBLEMS, Problem, ProblemKind, Progress, Refusal, STALE_AFTER, Status,
+    MAX_PROBLEMS, PlanRefusal, Problem, ProblemKind, Progress, Refusal, STALE_AFTER, Stage, Status,
 };
+use registry::schema::structs;
 use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
 use store::{
     BlobStore,
+    build::blob::blob_store_location,
     write::{
         blob_check::{BlobHolder, LinkedBlob},
+        blob_move::PlannedBlobStore,
         now,
     },
 };
@@ -37,6 +43,9 @@ use types::{blob_hash::BlobHash, collection::Collection};
 const SAVE_EVERY: Duration = Duration::from_secs(10);
 /// BM-10: how often a node reads which changes are still unresolved.
 const REFRESH_EVERY: Duration = Duration::from_secs(60);
+/// CA-1: written to a planned store, read back and deleted, to check it
+/// before anything relies on it.
+const PROBE_KEY: &[u8] = b"INBUXA_BLOB_STORE_PROBE";
 
 fn node_id(server: &Server) -> u64 {
     server.core.network.node_id
@@ -76,6 +85,66 @@ pub async fn start(
     Ok(Ok(()))
 }
 
+/// CA-1: why a change wasn't planned.
+pub enum NotPlanned {
+    Refused(PlanRefusal),
+    /// The planned store can't be opened, or the probe failed: the reason.
+    Unusable(String),
+}
+
+/// CA-1: plans a change to the store `target` names, once it opens and a
+/// probe written to it reads back and deletes.
+pub async fn plan(
+    server: &Server,
+    target: structs::BlobStore,
+) -> trc::Result<Result<BlobStoreChange, NotPlanned>> {
+    let to = blob_store_location(&target);
+    let mut warnings = Vec::new();
+    let store = match BlobStore::open(target.clone(), server.store(), &mut warnings).await {
+        Ok(store) => store,
+        Err(err) => {
+            return Ok(Err(NotPlanned::Unusable(format!(
+                "The blob store couldn't be opened: {err}"
+            ))));
+        }
+    };
+    if let Err(why) = probe(&store).await {
+        return Ok(Err(NotPlanned::Unusable(why)));
+    }
+    match model::plan(server.store(), to, target).await? {
+        Ok(change) => {
+            if let Some(moving) = server.blob_store().moving() {
+                moving.set_planned(Some(PlannedBlobStore {
+                    change_id: change.id,
+                    store,
+                }));
+            }
+            Ok(Ok(change))
+        }
+        Err(refusal) => Ok(Err(NotPlanned::Refused(refusal))),
+    }
+}
+
+async fn probe(store: &BlobStore) -> Result<(), String> {
+    let written = format!("inbuxa {}", now()).into_bytes();
+    store
+        .put_stored(PROBE_KEY, &written)
+        .await
+        .map_err(|err| format!("A test blob couldn't be written to it: {err}"))?;
+    let read = store
+        .get_stored(PROBE_KEY)
+        .await
+        .map_err(|err| format!("A test blob written to it couldn't be read back: {err}"))?;
+    if read.as_deref() != Some(&written[..]) {
+        return Err("A test blob written to it didn't read back the same.".into());
+    }
+    store
+        .delete_blob(PROBE_KEY)
+        .await
+        .map_err(|err| format!("A test blob written to it couldn't be deleted: {err}"))?;
+    Ok(())
+}
+
 /// BM-6: asks a running copy to stop. Any node can: the one running it
 /// sees the request at its next save. None if there's no such change.
 pub async fn stop(server: &Server, id: u32) -> trc::Result<Option<BlobStoreChange>> {
@@ -108,6 +177,8 @@ pub fn spawn_blob_moves(inner: Arc<Inner>) {
 }
 
 /// BM-10: stops reading through changes resolved or dismissed anywhere.
+/// CA-3, CA-4: and follows deletes to a change planned anywhere, until it's
+/// switched to or dismissed.
 pub async fn refresh(server: &Server) {
     let Some(moving) = server.blob_store().moving() else {
         return;
@@ -119,6 +190,42 @@ pub async fn refresh(server: &Server) {
         }
         Err(err) => {
             trc::error!(err.details("Failed to read the blob store changes"));
+        }
+    }
+    let plan = match model::planned(server.store()).await {
+        Ok(plan) => plan,
+        Err(err) => {
+            trc::error!(err.details("Failed to read the planned blob store"));
+            return;
+        }
+    };
+    match plan {
+        None => moving.set_planned(None),
+        Some(plan) if moving.planned().is_some_and(|p| p.change_id == plan.id) => {}
+        Some(plan) => {
+            let settings = plan.target_settings.clone().unwrap_or_default();
+            let mut warnings = Vec::new();
+            match BlobStore::open(settings, server.store(), &mut warnings).await {
+                Ok(store) => {
+                    moving.planned_open_failed(plan.id, false);
+                    moving.set_planned(Some(PlannedBlobStore {
+                        change_id: plan.id,
+                        store,
+                    }));
+                }
+                Err(err) => {
+                    moving.set_planned(None);
+                    if !moving.planned_open_failed(plan.id, true) {
+                        trc::error!(
+                            trc::StoreEvent::UnexpectedError
+                                .into_err()
+                                .details("The planned blob store couldn't be opened")
+                                .ctx(trc::Key::Id, plan.id)
+                                .reason(err)
+                        );
+                    }
+                }
+            }
         }
     }
 }
@@ -249,6 +356,8 @@ impl Holder {
 struct Run<'x> {
     server: &'x Server,
     id: u32,
+    /// CA-2: copying ahead, from the current store to the planned one.
+    ahead: bool,
     old: BlobStore,
     target: BlobStore,
     progress: Progress,
@@ -330,14 +439,26 @@ impl<'x> Run<'x> {
         self.saved = Instant::now();
         match saved {
             Some(c) if c.copy.as_ref().is_some_and(|c| c.stop_requested) => Err(Halt::Stopped),
+            // CA-5: switched to while copying ahead; the last pass is next
+            Some(c) if self.ahead && c.stage != Stage::Planned => Err(Halt::Stopped),
             Some(_) => Ok(()),
             // Dismissed under it: nothing left to copy for
             None => Err(Halt::Stopped),
         }
     }
 
-    /// BM-5: one blob, copied unless the current store has it.
+    /// What a problem calls the store copied from and the one copied to.
+    fn names(&self) -> (&'static str, &'static str) {
+        if self.ahead {
+            ("the current blob store", "the planned blob store")
+        } else {
+            ("the old blob store", "the current blob store")
+        }
+    }
+
+    /// BM-5: one blob, copied unless the store copied to has it.
     async fn one(&mut self, key: &[u8], holder: Holder) -> Result<(), Halt> {
+        let (from, to) = self.names();
         self.blobs.take(1).await;
         self.progress.blobs_checked += 1;
         match self.target.stored_present(key).await {
@@ -351,7 +472,7 @@ impl<'x> Run<'x> {
                     ProblemKind::Unreadable,
                     key,
                     &holder,
-                    format!("the current blob store couldn't say: {err}"),
+                    format!("{to} couldn't say: {err}"),
                 );
                 return self.save(false).await;
             }
@@ -370,7 +491,7 @@ impl<'x> Run<'x> {
                     ProblemKind::Unreadable,
                     key,
                     &holder,
-                    format!("the old blob store failed: {err}"),
+                    format!("{from} failed: {err}"),
                 );
                 return self.save(false).await;
             }
@@ -389,7 +510,7 @@ impl<'x> Run<'x> {
                             key,
                             &holder,
                             format!(
-                                "the old store's {} bytes hash to {}",
+                                "{from}'s {} bytes hash to {}",
                                 content.len(),
                                 actual.to_hex()
                             ),
@@ -417,7 +538,7 @@ impl<'x> Run<'x> {
                 ProblemKind::Unreadable,
                 key,
                 &holder,
-                format!("the current blob store couldn't write it: {err}"),
+                format!("{to} couldn't write it: {err}"),
             ),
         }
         self.save(false).await
@@ -442,6 +563,42 @@ impl<'x> Run<'x> {
     }
 }
 
+/// CA-2: the planned store: the one deletes follow to, or opened now.
+async fn planned_store(server: &Server, change: &BlobStoreChange) -> Result<BlobStore, String> {
+    if let Some(planned) = server
+        .blob_store()
+        .moving()
+        .and_then(|m| m.planned())
+        .filter(|p| p.change_id == change.id)
+    {
+        return Ok(planned.store.clone());
+    }
+    let Some(settings) = change.target_settings.clone() else {
+        return Err("The change keeps no settings for the planned blob store".into());
+    };
+    let mut warnings = Vec::new();
+    BlobStore::open(settings, server.store(), &mut warnings).await
+}
+
+/// What a copy reads from and writes to: the old store and the current
+/// one, or for a planned change the current one and the planned one.
+async fn stores(
+    server: &Server,
+    change: &BlobStoreChange,
+) -> Result<(BlobStore, BlobStore), String> {
+    let current = server.blob_store().current().clone();
+    match change.stage {
+        Stage::Changed => old_store(server, change)
+            .await
+            .map(|old| (old, current))
+            .map_err(|err| format!("The old blob store couldn't be opened: {err}")),
+        Stage::Planned => planned_store(server, change)
+            .await
+            .map(|planned| (current, planned))
+            .map_err(|err| format!("The planned blob store couldn't be opened: {err}")),
+    }
+}
+
 /// The change's old store: the one already read through, or opened now.
 async fn old_store(server: &Server, change: &BlobStoreChange) -> Result<BlobStore, String> {
     if let Some(old) = server.blob_store().moving().and_then(|m| {
@@ -462,13 +619,10 @@ async fn old_store(server: &Server, change: &BlobStoreChange) -> Result<BlobStor
 /// Runs a copy to its end and records how it ended (BM-6).
 async fn run(server: &Server, change: BlobStoreChange) {
     let id = change.id;
-    let (status, error, run) = match old_store(server, &change).await {
-        Err(err) => (
-            Status::Failed,
-            Some(format!("The old blob store couldn't be opened: {err}")),
-            None,
-        ),
-        Ok(old) => {
+    let ahead = change.stage == Stage::Planned;
+    let (status, error, run) = match stores(server, &change).await {
+        Err(err) => (Status::Failed, Some(err), None),
+        Ok((old, target)) => {
             let copy = change.copy.clone().unwrap_or_else(|| Copy {
                 started_at: now(),
                 started_by: String::new(),
@@ -485,8 +639,9 @@ async fn run(server: &Server, change: BlobStoreChange) {
             let mut run = Run {
                 server,
                 id,
+                ahead,
                 old,
-                target: server.blob_store().current().clone(),
+                target,
                 progress: Progress::default(),
                 found: Vec::new(),
                 kept: 0,
@@ -523,9 +678,14 @@ async fn run(server: &Server, change: BlobStoreChange) {
     };
     if result.is_ok() {
         result = model::update(data, id, |c| {
+            // CA-5: switched to under a copy ahead: that change is its own now
+            if ahead && c.stage != Stage::Planned {
+                return false;
+            }
             c.status = status;
-            // BM-6: resolved, so the old store's settings go
-            if status == Status::Copied {
+            // BM-6: resolved, so the old store's settings go. A copy ahead
+            // resolves nothing (CA-2)
+            if status == Status::Copied && !ahead {
                 c.old_settings = None;
             }
             if let Some(copy) = &mut c.copy {
@@ -545,7 +705,7 @@ async fn run(server: &Server, change: BlobStoreChange) {
     if let Err(err) = result.and(model::release(data, id).await) {
         trc::error!(err.details("Failed to save a blob copy's result"));
     }
-    if status == Status::Copied {
+    if status == Status::Copied && !ahead {
         refresh(server).await;
     }
 }

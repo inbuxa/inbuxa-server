@@ -8,11 +8,16 @@
 //! (docs/spec/features/blob-store-change.md) needs from the store: a blob
 //! store that, while a change of blob store is unresolved, looks for what
 //! it doesn't have in the stores the server used before, and keeps what it
-//! finds there (BM-3). Writes and deletes go to the current store only.
+//! finds there (BM-3). Writes and deletes go to the current store only,
+//! except that while a change is planned, a delete also goes to the planned
+//! store (blob-store-copy-ahead spec, CA-4).
 
 use crate::BlobStore;
-use arc_swap::ArcSwap;
-use std::sync::Arc;
+use arc_swap::{ArcSwap, ArcSwapOption};
+use std::sync::{
+    Arc,
+    atomic::{AtomicU32, Ordering},
+};
 use trc::StoreEvent;
 
 /// A blob store the server used before an unresolved change.
@@ -23,11 +28,26 @@ pub struct OldBlobStore {
     pub store: BlobStore,
 }
 
+/// The blob store a planned change will move to (CA-1), which deletes
+/// follow until the switch (CA-4).
+#[derive(Clone)]
+pub struct PlannedBlobStore {
+    /// The planned `inbuxa:BlobStoreChange`.
+    pub change_id: u32,
+    pub store: BlobStore,
+}
+
 /// The current blob store, and the old ones read through while their
-/// changes are unresolved, newest first (BM-3).
+/// changes are unresolved, newest first (BM-3). The server keeps its blob
+/// store in one of these from start-up, with no old stores at all most of
+/// the time, so a planned store can be set while it runs (CA-3).
 pub struct MovingBlobStore {
     pub current: BlobStore,
     old: ArcSwap<Vec<OldBlobStore>>,
+    planned: ArcSwapOption<PlannedBlobStore>,
+    /// The planned change whose store couldn't be opened, so it's reported
+    /// once rather than at every refresh.
+    planned_failed: AtomicU32,
 }
 
 impl MovingBlobStore {
@@ -35,7 +55,50 @@ impl MovingBlobStore {
         MovingBlobStore {
             current,
             old: ArcSwap::from_pointee(old),
+            planned: ArcSwapOption::empty(),
+            planned_failed: AtomicU32::new(0),
         }
+    }
+
+    /// CA-4: the planned store deletes go to, if a change is planned.
+    pub fn planned(&self) -> Option<Arc<PlannedBlobStore>> {
+        self.planned.load_full()
+    }
+
+    /// CA-3, CA-5: the planned store, or none once the change is switched to
+    /// or dismissed.
+    pub fn set_planned(&self, planned: Option<PlannedBlobStore>) {
+        self.planned.store(planned.map(Arc::new));
+    }
+
+    /// Whether this planned change's store failed to open before; marks it
+    /// so when `failed`.
+    pub fn planned_open_failed(&self, change_id: u32, failed: bool) -> bool {
+        if failed {
+            self.planned_failed.swap(change_id, Ordering::Relaxed) == change_id
+        } else {
+            self.planned_failed
+                .compare_exchange(change_id, 0, Ordering::Relaxed, Ordering::Relaxed)
+                .ok();
+            false
+        }
+    }
+
+    /// CA-4: deletes from the current store, then from the planned one. An
+    /// error from the planned store is logged, not returned.
+    pub(crate) async fn raw_delete(&self, key: &[u8]) -> trc::Result<bool> {
+        let deleted = Box::pin(self.current.raw_delete(key)).await?;
+        if let Some(planned) = self.planned.load_full()
+            && let Err(err) = Box::pin(planned.store.raw_delete(key)).await
+        {
+            trc::error!(
+                err.details("Failed to delete a blob from the planned blob store")
+                    .ctx(trc::Key::Id, planned.change_id)
+                    .ctx(trc::Key::Key, key)
+                    .caused_by(trc::location!())
+            );
+        }
+        Ok(deleted)
     }
 
     /// The old stores still read through.
@@ -146,6 +209,12 @@ impl BlobStore {
     pub async fn stored_present(&self, key: &[u8]) -> trc::Result<bool> {
         self.current().blob_present(key).await
     }
+
+    /// A blob store as the server holds it: in a [`MovingBlobStore`], so old
+    /// and planned stores can be added while it runs (BM-3, CA-3).
+    pub fn wrapped(self, old: Vec<OldBlobStore>) -> BlobStore {
+        BlobStore::Moving(Arc::new(MovingBlobStore::new(self, old)))
+    }
 }
 
 #[cfg(test)]
@@ -228,6 +297,66 @@ mod tests {
                 .unwrap(),
             None
         );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn deletes_follow_to_a_planned_store() {
+        let root = std::env::temp_dir().join(format!("inbuxa-blob-plan-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let current = fs_store(&root.join("current")).await;
+        let planned = fs_store(&root.join("planned")).await;
+        let moving = current.clone().wrapped(Vec::new());
+        for key in [&b"copied-ahead"[..], b"kept"] {
+            current
+                .put_blob(key, b"mail", CompressionAlgo::None)
+                .await
+                .unwrap();
+            planned
+                .put_blob(key, b"mail", CompressionAlgo::None)
+                .await
+                .unwrap();
+        }
+
+        // Nothing planned: a delete touches the current store only
+        moving.delete_blob(b"kept").await.unwrap();
+        assert!(!current.blob_present(b"kept").await.unwrap());
+        assert!(planned.blob_present(b"kept").await.unwrap());
+
+        // Planned: it follows
+        moving.moving().unwrap().set_planned(Some(PlannedBlobStore {
+            change_id: 3,
+            store: planned.clone(),
+        }));
+        moving.delete_blob(b"copied-ahead").await.unwrap();
+        assert!(!current.blob_present(b"copied-ahead").await.unwrap());
+        assert!(!planned.blob_present(b"copied-ahead").await.unwrap());
+
+        // Writes and reads still go to the current store only (CA-3)
+        moving
+            .put_blob(b"fresh", b"new mail", CompressionAlgo::None)
+            .await
+            .unwrap();
+        assert!(current.blob_present(b"fresh").await.unwrap());
+        assert!(!planned.blob_present(b"fresh").await.unwrap());
+
+        // A planned store that fails doesn't fail the delete
+        let _ = std::fs::remove_dir_all(root.join("planned"));
+        std::fs::write(root.join("planned"), b"not a directory").unwrap();
+        assert!(moving.delete_blob(b"fresh").await.is_ok());
+        assert!(!current.blob_present(b"fresh").await.unwrap());
+
+        // Switched to or dismissed: deletes stop following
+        moving.moving().unwrap().set_planned(None);
+        assert!(moving.moving().unwrap().planned().is_none());
+
+        // An open failure is reported once per change
+        let m = moving.moving().unwrap();
+        assert!(!m.planned_open_failed(4, true));
+        assert!(m.planned_open_failed(4, true));
+        assert!(!m.planned_open_failed(4, false));
+        assert!(!m.planned_open_failed(4, true));
 
         let _ = std::fs::remove_dir_all(&root);
     }

@@ -1,7 +1,7 @@
 # Feature spec: copying blobs ahead of a blob store change
 
-Status: **approved 2026-11-10** (inbuxa-server #341, PR #354), with the
-answers under [Settled](#settled). Not a rebuild (SPEC.md
+Status: building, 2026-11-10 (inbuxa-server #341). Approved 2026-11-10
+(PR #354), with the answers under [Settled](#settled). Not a rebuild (SPEC.md
 §4): inbuxa's own design. It extends `features/blob-store-change.md`
 (BM-1 to BM-10), which it doesn't change except where it says so.
 

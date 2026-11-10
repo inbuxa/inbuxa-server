@@ -290,6 +290,7 @@ scope = "server"
 retention = "object-life"
 [object."inbuxa:BlobStoreChange".properties]
 copyStartedBy = ["identifier"]
+appliedBy = ["identifier"]
 problems = ["identifier", "metadata"]
 
 [object."inbuxa:StoreSnapshot"]
