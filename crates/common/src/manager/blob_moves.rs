@@ -9,7 +9,8 @@
 //! change (BM-2), then opens the old store of every unresolved change so
 //! what the new store lacks is read from it (BM-3), and the store of a
 //! planned change so deletes follow to it (blob-store-copy-ahead spec,
-//! CA-4).
+//! CA-4). It also notes where this node's blob store is, for a cleanup of
+//! an old store to check (blob-store-cleanup spec, OC-2).
 
 use inbuxa_features::blob_move::{self as model, Started};
 use registry::schema::{prelude::ObjectType, structs};
@@ -72,7 +73,7 @@ pub async fn at_start(bp: &mut Bootstrap, blob: BlobStore) -> BlobStore {
                 bp,
                 format!("Couldn't record where the blob store is: {err}"),
             );
-            return blob.wrapped(Vec::new());
+            return located(blob.wrapped(Vec::new()), &location);
         }
     }
 
@@ -80,7 +81,7 @@ pub async fn at_start(bp: &mut Bootstrap, blob: BlobStore) -> BlobStore {
         Ok(changes) => changes,
         Err(err) => {
             warn(bp, format!("Couldn't read the blob store changes: {err}"));
-            return blob.wrapped(Vec::new());
+            return located(blob.wrapped(Vec::new()), &location);
         }
     };
     let mut old = Vec::with_capacity(unresolved.len());
@@ -130,7 +131,13 @@ pub async fn at_start(bp: &mut Bootstrap, blob: BlobStore) -> BlobStore {
         }
     }
 
-    let wrapped = blob.wrapped(old);
+    let wrapped = located(blob.wrapped(old), &location);
+    if let Err(err) = model::note_node(&data, bp.node_id() as u64, &location, now()).await {
+        warn(
+            bp,
+            format!("Couldn't note where this node's blob store is: {err}"),
+        );
+    }
     match model::planned(&data).await {
         Ok(Some(plan)) => {
             let mut warnings = Vec::new();
@@ -162,4 +169,12 @@ pub async fn at_start(bp: &mut Bootstrap, blob: BlobStore) -> BlobStore {
         Err(err) => warn(bp, format!("Couldn't read the planned blob store: {err}")),
     }
     wrapped
+}
+
+/// OC-2: the blob store, knowing where it is.
+fn located(store: BlobStore, location: &str) -> BlobStore {
+    if let Some(moving) = store.moving() {
+        moving.set_location(location.to_string());
+    }
+    store
 }

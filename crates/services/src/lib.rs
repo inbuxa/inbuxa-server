@@ -23,6 +23,7 @@ use crate::task_manager::{manager::spawn_task_manager, scheduler::spawn_task_sch
 
 pub mod broadcast;
 // inbuxa: AL-5, delegations end at their date
+pub mod inbuxa_blob_cleanup; // inbuxa: cleaning up after a blob store change
 pub mod inbuxa_blob_move; // inbuxa: changing the blob store
 pub mod inbuxa_deliverability; // inbuxa: the deliverability check
 pub mod inbuxa_lock_expiry;

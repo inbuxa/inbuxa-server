@@ -1,7 +1,7 @@
 # Feature spec: cleaning up the old store after a blob store change
 
-Status: approved, 2026-11-10 (inbuxa-server #342, PR #357), with the
-answers under [Settled](#settled). Not a rebuild (SPEC.md
+Status: building, 2026-11-10 (inbuxa-server #342). Approved 2026-11-10
+(PR #357), with the answers under [Settled](#settled). Not a rebuild (SPEC.md
 §4): inbuxa's own design. It extends `features/blob-store-change.md`
 (BM-1 to BM-10) and `features/blob-store-copy-ahead.md` (CA-1 to CA-9),
 which it doesn't change except where it says so.
@@ -163,7 +163,8 @@ blobsPerSecond, bytesPerSecond, progress, blobsChecked, deleted,
 bytesFreed, notThere, missing, damaged, different, unreadable, problems,
 snapshotsBefore, error}`, with `status` one of `running`, `done`,
 `incomplete`, `stopped`, `failed`, `interrupted`. A problem is as BM-5's,
-with `different` as a kind.
+with `different` as a kind. Once a change has a cleanup, its problems are the
+cleanup's, under `cleanup.problems`, and the top-level `problems` is empty.
 
 ## Tests
 

@@ -11,16 +11,19 @@
 //! change is copied the other way round: from the current store to the
 //! planned one (blob-store-copy-ahead spec, CA-2). It runs on the node the
 //! copy was started on. Also, on every node, it keeps reading through only
-//! the changes still unresolved (BM-10), and deletes following to the
-//! planned store, if there is one (CA-4).
+//! the changes still unresolved (BM-10), deletes following to the planned
+//! store, if there is one (CA-4), and notes where its blob store is
+//! (blob-store-cleanup spec, OC-2). The cleanup of a resolved change's old
+//! store is `inbuxa_blob_cleanup`.
 
 use common::{
     BuildServer, Inner, Server,
     manager::{SPAM_CLASSIFIER_KEY, SPAM_TRAINER_KEY},
 };
 use inbuxa_features::blob_move::{
-    self as model, BlobStoreChange, Copy, DEFAULT_BLOBS_PER_SECOND, DEFAULT_BYTES_PER_SECOND,
-    MAX_PROBLEMS, PlanRefusal, Problem, ProblemKind, Progress, Refusal, STALE_AFTER, Stage, Status,
+    self as model, BlobStoreChange, CleanupStatus, Copy, DEFAULT_BLOBS_PER_SECOND,
+    DEFAULT_BYTES_PER_SECOND, MAX_PROBLEMS, PlanRefusal, Problem, ProblemKind, Progress, Refusal,
+    STALE_AFTER, Stage, Status,
 };
 use registry::schema::structs;
 use std::{
@@ -47,7 +50,7 @@ const REFRESH_EVERY: Duration = Duration::from_secs(60);
 /// before anything relies on it.
 const PROBE_KEY: &[u8] = b"INBUXA_BLOB_STORE_PROBE";
 
-fn node_id(server: &Server) -> u64 {
+pub(crate) fn node_id(server: &Server) -> u64 {
     server.core.network.node_id
 }
 
@@ -145,15 +148,25 @@ async fn probe(store: &BlobStore) -> Result<(), String> {
     Ok(())
 }
 
-/// BM-6: asks a running copy to stop. Any node can: the one running it
-/// sees the request at its next save. None if there's no such change.
+/// BM-6, OC-6: asks a running copy or cleanup to stop. Any node can: the
+/// one running it sees the request at its next save. None if there's no
+/// such change.
 pub async fn stop(server: &Server, id: u32) -> trc::Result<Option<BlobStoreChange>> {
-    model::update(server.store(), id, |c| match &mut c.copy {
-        Some(copy) if c.status == Status::Copying && !copy.stop_requested => {
-            copy.stop_requested = true;
-            true
+    model::update(server.store(), id, |c| {
+        if let Some(cleanup) = &mut c.cleanup
+            && cleanup.status == CleanupStatus::Running
+            && !cleanup.stop_requested
+        {
+            cleanup.stop_requested = true;
+            return true;
         }
-        _ => false,
+        match &mut c.copy {
+            Some(copy) if c.status == Status::Copying && !copy.stop_requested => {
+                copy.stop_requested = true;
+                true
+            }
+            _ => false,
+        }
     })
     .await
 }
@@ -165,12 +178,13 @@ pub fn spawn_blob_moves(inner: Arc<Inner>) {
     tokio::spawn(async move {
         let server = inner.build_server();
         let node = node_id(&server);
-        mark_interrupted(&server, |c| c.node_id == node).await;
+        mark_interrupted(&server, |run, _| run == node).await;
+        refresh(&server).await;
         loop {
             tokio::time::sleep(REFRESH_EVERY).await;
             let server = inner.build_server();
             let cutoff = now().saturating_sub(STALE_AFTER);
-            mark_interrupted(&server, |c| c.node_id != node && c.heartbeat < cutoff).await;
+            mark_interrupted(&server, |run, heartbeat| run != node && heartbeat < cutoff).await;
             refresh(&server).await;
         }
     });
@@ -183,6 +197,12 @@ pub async fn refresh(server: &Server) {
     let Some(moving) = server.blob_store().moving() else {
         return;
     };
+    // OC-2: where this node's blob store is, for a cleanup to check
+    if let Some(location) = moving.location()
+        && let Err(err) = model::note_node(server.store(), node_id(server), &location, now()).await
+    {
+        trc::error!(err.details("Failed to note where this node's blob store is"));
+    }
     match model::unresolved(server.store()).await {
         Ok(changes) => {
             let ids = changes.iter().map(|c| c.id).collect::<Vec<_>>();
@@ -230,7 +250,9 @@ pub async fn refresh(server: &Server) {
     }
 }
 
-async fn mark_interrupted(server: &Server, which: impl Fn(&Copy) -> bool) {
+/// BM-6, OC-6: marks the copies and cleanups `which` picks, by their node
+/// and heartbeat, as interrupted.
+async fn mark_interrupted(server: &Server, which: impl Fn(u64, u64) -> bool) {
     let changes = match model::all(server.store()).await {
         Ok(changes) => changes,
         Err(err) => {
@@ -238,36 +260,52 @@ async fn mark_interrupted(server: &Server, which: impl Fn(&Copy) -> bool) {
             return;
         }
     };
-    for change in changes
-        .into_iter()
-        .filter(|c| c.status == Status::Copying && c.copy.as_ref().is_some_and(&which))
-    {
+    let copying = |c: &BlobStoreChange| {
+        c.status == Status::Copying
+            && c.copy
+                .as_ref()
+                .is_some_and(|copy| which(copy.node_id, copy.heartbeat))
+    };
+    let cleaning = |c: &BlobStoreChange| {
+        c.cleanup.as_ref().is_some_and(|cleanup| {
+            cleanup.status == CleanupStatus::Running && which(cleanup.node_id, cleanup.heartbeat)
+        })
+    };
+    for change in changes.into_iter().filter(|c| copying(c) || cleaning(c)) {
         let result = model::update(server.store(), change.id, |c| {
-            if c.status != Status::Copying || !c.copy.as_ref().is_some_and(&which) {
-                return false;
+            let mut marked = false;
+            if copying(c) {
+                c.status = Status::Interrupted;
+                if let Some(copy) = &mut c.copy {
+                    copy.finished_at = Some(now());
+                }
+                marked = true;
             }
-            c.status = Status::Interrupted;
-            if let Some(copy) = &mut c.copy {
-                copy.finished_at = Some(now());
+            if cleaning(c)
+                && let Some(cleanup) = &mut c.cleanup
+            {
+                cleanup.status = CleanupStatus::Interrupted;
+                cleanup.finished_at = Some(now());
+                marked = true;
             }
-            true
+            marked
         })
         .await;
         if let Err(err) = result.and(model::release(server.store(), change.id).await) {
-            trc::error!(err.details("Failed to mark an interrupted blob copy"));
+            trc::error!(err.details("Failed to mark an interrupted blob copy or cleanup"));
         }
     }
 }
 
 /// BM-5: keeps a rate, a second at a time.
-struct Pace {
+pub(crate) struct Pace {
     per_second: u64,
     window: Instant,
     used: u64,
 }
 
 impl Pace {
-    fn new(per_second: u64) -> Self {
+    pub(crate) fn new(per_second: u64) -> Self {
         Pace {
             per_second,
             window: Instant::now(),
@@ -275,7 +313,7 @@ impl Pace {
         }
     }
 
-    async fn take(&mut self, amount: u64) {
+    pub(crate) async fn take(&mut self, amount: u64) {
         if self.per_second == 0 {
             return;
         }
@@ -294,16 +332,16 @@ impl Pace {
 }
 
 /// Who holds a blob, as a problem names it (BM-5).
-struct Holder {
-    name: String,
-    account_id: Option<u32>,
-    object_id: Option<u64>,
+pub(crate) struct Holder {
+    pub(crate) name: String,
+    pub(crate) account_id: Option<u32>,
+    pub(crate) object_id: Option<u64>,
     /// Named by the hash of its content, so it can be checked.
-    content_named: bool,
+    pub(crate) content_named: bool,
 }
 
 impl Holder {
-    fn of(blob: &LinkedBlob) -> Holder {
+    pub(crate) fn of(blob: &LinkedBlob) -> Holder {
         match blob.holders.first() {
             Some(BlobHolder::Document {
                 account_id,
@@ -343,7 +381,7 @@ impl Holder {
         }
     }
 
-    fn fixed() -> Holder {
+    pub(crate) fn fixed() -> Holder {
         Holder {
             name: "fixed".into(),
             account_id: None,
@@ -380,7 +418,7 @@ impl From<trc::Error> for Halt {
     }
 }
 
-fn key_name(key: &[u8]) -> String {
+pub(crate) fn key_name(key: &[u8]) -> String {
     match BlobHash::try_from_hash_slice(key) {
         Ok(hash) => hash.to_hex(),
         Err(_) => String::from_utf8_lossy(key).into_owned(),
@@ -600,7 +638,10 @@ async fn stores(
 }
 
 /// The change's old store: the one already read through, or opened now.
-async fn old_store(server: &Server, change: &BlobStoreChange) -> Result<BlobStore, String> {
+pub(crate) async fn old_store(
+    server: &Server,
+    change: &BlobStoreChange,
+) -> Result<BlobStore, String> {
     if let Some(old) = server.blob_store().moving().and_then(|m| {
         m.old_stores()
             .iter()
@@ -682,12 +723,10 @@ async fn run(server: &Server, change: BlobStoreChange) {
             if ahead && c.stage != Stage::Planned {
                 return false;
             }
+            // BM-6: resolved, and nothing is read through any more. The old
+            // store's settings stay for a cleanup (blob-store-cleanup spec,
+            // OC-1). A copy ahead resolves nothing (CA-2)
             c.status = status;
-            // BM-6: resolved, so the old store's settings go. A copy ahead
-            // resolves nothing (CA-2)
-            if status == Status::Copied && !ahead {
-                c.old_settings = None;
-            }
             if let Some(copy) = &mut c.copy {
                 copy.progress = progress.clone();
                 copy.problems_kept = kept;

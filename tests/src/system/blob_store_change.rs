@@ -23,6 +23,13 @@
 //! store meanwhile. Mail delivered after the copy ahead is read through once
 //! the server switches, and the last pass copies only what the copy ahead
 //! didn't have.
+//!
+//! Then cleaning up (docs/spec/features/blob-store-cleanup.md): a resolved
+//! change's old store is previewed, refused without a confirmation and
+//! while a node is on the old store, and cleaned up. A blob missing from
+//! the current store and one damaged there stay in the old store and are
+//! reported; put right, a second run is done and the old store's settings
+//! go.
 
 use crate::utils::{
     account::Account,
@@ -394,8 +401,8 @@ pub async fn test(test: &mut TestServer) {
             .unwrap()
             .unwrap()
             .old_settings
-            .is_none(),
-        "the old store's settings go once resolved"
+            .is_some(),
+        "the old store's settings are kept for a cleanup (OC-1)"
     );
     let response = update(admin, &id, json!({"action": "copy"})).await;
     assert_eq!(
@@ -416,6 +423,7 @@ pub async fn test(test: &mut TestServer) {
 
     use_blob_store(test, current);
     copy_ahead(test).await;
+    clean_up(test).await;
 }
 
 async fn plan(admin: &Account, target: Value) -> Value {
@@ -704,6 +712,273 @@ async fn copy_ahead(test: &mut TestServer) {
             .moving()
             .is_none_or(|m| m.planned().is_none())
     );
+}
+
+/// The cleanup once its run is over.
+async fn cleaned(admin: &Account, id: &str) -> Value {
+    for _ in 0..900 {
+        let change = get(admin, id).await;
+        if change["cleanup"]["status"] != "running" {
+            return change;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("the cleanup didn't finish: {}", get(admin, id).await);
+}
+
+/// The blob-store-cleanup spec, OC-1 to OC-11.
+async fn clean_up(test: &mut TestServer) {
+    println!("Running blob store cleanup tests...");
+    let data = test.server.store().clone();
+    let admin = test.account("admin@example.com");
+    let ann = test.account("ann@example.com");
+    let ann_id = ann.id().document_id();
+    let client = ann.jmap_client().await;
+    let current = test.server.blob_store().current().clone();
+    for change in model::all(&data).await.unwrap() {
+        model::remove(&data, change.id).await.unwrap();
+    }
+
+    // Mail in both stores, as a copy leaves it
+    let dir = format!("{}/cleanup-old-blobs", test.tmp_dir());
+    let fs_settings = structs::FileSystemStore {
+        path: dir.clone(),
+        depth: 2,
+    };
+    let old_settings = structs::BlobStore::FileSystem(fs_settings.clone());
+    let old = FsStore::open(fs_settings).await.unwrap();
+    let here = structs::BlobStore::Default;
+    let kept = import(&client, "In both stores").await;
+    let altered = import(&client, "Damaged in the current store").await;
+    let removed = import(&client, "Gone from the current store").await;
+    let kept_hash = blob_of(test, ann_id, kept).await;
+    let altered_hash = blob_of(test, ann_id, altered).await;
+    let removed_hash = blob_of(test, ann_id, removed).await;
+    for hash in [&kept_hash, &altered_hash, &removed_hash] {
+        let stored = current.get_stored(hash.as_slice()).await.unwrap().unwrap();
+        old.put_stored(hash.as_slice(), &stored).await.unwrap();
+    }
+    model::at_start(
+        &data,
+        blob_store_location(&old_settings),
+        &old_settings,
+        1,
+        now(),
+    )
+    .await
+    .unwrap();
+    let Started::Changed(change_id) =
+        model::at_start(&data, blob_store_location(&here), &here, 1, now())
+            .await
+            .unwrap()
+    else {
+        panic!("no change recorded");
+    };
+    let id = Id::from(change_id).to_string();
+
+    // OC-3: not before it's resolved
+    let response = update(admin, &id, json!({"action": "cleanUp", "dryRun": true})).await;
+    assert_eq!(
+        response["notUpdated"][&id]["type"], "forbidden",
+        "{response}"
+    );
+
+    // Resolved by a copy; OC-1: the old store is kept
+    let response = update(admin, &id, json!({"action": "copy", "blobsPerSecond": 0})).await;
+    assert!(response["updated"].get(&id).is_some(), "{response}");
+    let change = settled(admin, &id).await;
+    assert_eq!(change["status"], "copied", "{change}");
+    assert_eq!(change["oldStoreKept"], true, "{change}");
+    assert_eq!(change["cleanup"], Value::Null, "{change}");
+
+    // OC-5: a preview deletes nothing
+    let response = update(
+        admin,
+        &id,
+        json!({"action": "cleanUp", "dryRun": true, "blobsPerSecond": 0}),
+    )
+    .await;
+    assert!(response["updated"].get(&id).is_some(), "{response}");
+    let change = cleaned(admin, &id).await;
+    let cleanup = &change["cleanup"];
+    assert_eq!(cleanup["status"], "done", "{change}");
+    assert_eq!(cleanup["dryRun"], true, "{change}");
+    assert_eq!(cleanup["startedBy"], "admin@example.com", "{change}");
+    assert_eq!(count(cleanup, "deleted"), 3, "{change}");
+    assert!(count(cleanup, "bytesFreed") > 0, "{change}");
+    assert!(count(cleanup, "notThere") >= 1, "{change}");
+    assert!(old.blob_present(kept_hash.as_slice()).await.unwrap());
+    assert_eq!(change["oldStoreKept"], true, "{change}");
+
+    // OC-8: deleting needs the change's own id as the confirmation
+    let response = update(admin, &id, json!({"action": "cleanUp"})).await;
+    assert_eq!(
+        response["notUpdated"][&id]["type"], "forbidden",
+        "{response}"
+    );
+    let other = Id::from(change_id + 100).to_string();
+    let response = update(admin, &id, json!({"action": "cleanUp", "confirm": other})).await;
+    assert_eq!(
+        response["notUpdated"][&id]["type"], "forbidden",
+        "{response}"
+    );
+
+    // OC-2, OC-3: a node still on the old store refuses it
+    let old_place = blob_store_location(&old_settings);
+    model::note_node(&data, 99, &old_place, now())
+        .await
+        .unwrap();
+    let response = update(admin, &id, json!({"action": "cleanUp", "confirm": id})).await;
+    assert_eq!(
+        response["notUpdated"][&id]["type"], "forbidden",
+        "{response}"
+    );
+    assert!(
+        response["notUpdated"][&id]["description"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Node 99"),
+        "{response}"
+    );
+    model::note_node(&data, 99, &old_place, now() - 3_600)
+        .await
+        .unwrap();
+
+    // A slow one stops when asked, and can't be dismissed meanwhile
+    let response = update(
+        admin,
+        &id,
+        json!({"action": "cleanUp", "dryRun": true, "blobsPerSecond": 1}),
+    )
+    .await;
+    assert!(response["updated"].get(&id).is_some(), "{response}");
+    let response = update(admin, &id, json!({"action": "copy"})).await;
+    assert_eq!(
+        response["notUpdated"][&id]["type"], "forbidden",
+        "{response}"
+    );
+    let (_, response) = call(
+        admin,
+        "inbuxa:BlobStoreChange/set",
+        json!({"destroy": [id]}),
+    )
+    .await;
+    assert_eq!(
+        response["notDestroyed"][&id]["type"], "forbidden",
+        "{response}"
+    );
+    let response = update(admin, &id, json!({"action": "stop"})).await;
+    assert!(response["updated"].get(&id).is_some(), "{response}");
+    let change = cleaned(admin, &id).await;
+    assert_eq!(change["cleanup"]["status"], "stopped", "{change}");
+
+    // OC-4: what the current store lacks or holds damaged stays in the old one
+    let altered_content = current
+        .get_stored(altered_hash.as_slice())
+        .await
+        .unwrap()
+        .unwrap();
+    current
+        .put_blob(
+            altered_hash.as_slice(),
+            b"Something else entirely",
+            CompressionAlgo::None,
+        )
+        .await
+        .unwrap();
+    let removed_content = current
+        .get_stored(removed_hash.as_slice())
+        .await
+        .unwrap()
+        .unwrap();
+    current.delete_blob(removed_hash.as_slice()).await.unwrap();
+    let response = update(
+        admin,
+        &id,
+        json!({"action": "cleanUp", "confirm": id, "blobsPerSecond": 0}),
+    )
+    .await;
+    assert!(response["updated"].get(&id).is_some(), "{response}");
+    let change = cleaned(admin, &id).await;
+    let cleanup = &change["cleanup"];
+    assert_eq!(cleanup["status"], "incomplete", "{change}");
+    assert_eq!(cleanup["dryRun"], false, "{change}");
+    assert_eq!(count(cleanup, "deleted"), 1, "{change}");
+    assert_eq!(count(cleanup, "missing"), 1, "{change}");
+    assert_eq!(count(cleanup, "damaged"), 1, "{change}");
+    assert_eq!(change["problems"], json!([]), "{change}");
+    let problems = cleanup["problems"].as_array().unwrap();
+    let kind_of = |hash: &BlobHash| {
+        problems
+            .iter()
+            .find(|p| p["blobId"] == hash.to_hex())
+            .map(|p| p["kind"].clone())
+            .unwrap_or_else(|| panic!("no problem for {}: {change}", hash.to_hex()))
+    };
+    assert_eq!(kind_of(&removed_hash), "missing");
+    assert_eq!(kind_of(&altered_hash), "damaged");
+    assert!(!old.blob_present(kept_hash.as_slice()).await.unwrap());
+    for hash in [&altered_hash, &removed_hash] {
+        assert!(old.blob_present(hash.as_slice()).await.unwrap(), "kept");
+    }
+    assert!(
+        String::from_utf8_lossy(&test.fetch_email(ann_id, kept).await).contains("In both stores"),
+        "the message reads from the current store"
+    );
+    assert_eq!(get(admin, &id).await["oldStoreKept"], true);
+
+    // Put right: a second run is done, and the old store's settings go
+    current
+        .put_stored(altered_hash.as_slice(), &altered_content)
+        .await
+        .unwrap();
+    current
+        .put_stored(removed_hash.as_slice(), &removed_content)
+        .await
+        .unwrap();
+    let response = update(
+        admin,
+        &id,
+        json!({"action": "cleanUp", "confirm": id, "blobsPerSecond": 0}),
+    )
+    .await;
+    assert!(response["updated"].get(&id).is_some(), "{response}");
+    let change = cleaned(admin, &id).await;
+    let cleanup = &change["cleanup"];
+    assert_eq!(cleanup["status"], "done", "{change}");
+    assert_eq!(count(cleanup, "deleted"), 2, "{change}");
+    assert_eq!(change["oldStoreKept"], false, "{change}");
+    for hash in [&kept_hash, &altered_hash, &removed_hash] {
+        assert!(!old.blob_present(hash.as_slice()).await.unwrap());
+    }
+    for (message, text) in [
+        (altered, "Damaged in the current store"),
+        (removed, "Gone from the current store"),
+    ] {
+        assert!(String::from_utf8_lossy(&test.fetch_email(ann_id, message).await).contains(text));
+    }
+    assert!(
+        model::get(&data, change_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .old_settings
+            .is_none()
+    );
+    let response = update(admin, &id, json!({"action": "cleanUp", "confirm": id})).await;
+    assert_eq!(
+        response["notUpdated"][&id]["type"], "forbidden",
+        "nothing left to clean up: {response}"
+    );
+
+    // Dismissed
+    let (_, response) = call(
+        admin,
+        "inbuxa:BlobStoreChange/set",
+        json!({"destroy": [id]}),
+    )
+    .await;
+    assert_eq!(response["destroyed"], json!([id]), "{response}");
 }
 
 /// Runs these tests alone: `cargo test -p tests blob_store_change_tests -- --ignored`.
