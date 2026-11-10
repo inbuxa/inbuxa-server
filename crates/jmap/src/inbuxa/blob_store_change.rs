@@ -6,13 +6,17 @@
 
 //! `inbuxa:BlobStoreChange` (blob-store-change spec): the changes of blob
 //! store the server noticed at start-up, copying what the new store lacks
-//! from the old one, stopping that, and dismissing a change. The copy is
-//! `services::inbuxa_blob_move`. Copying, stopping and dismissing are
-//! audited by the request layer (BM-9).
+//! from the old one, stopping that, and dismissing a change. A create plans
+//! one, which is copied ahead and applied to the setting
+//! (blob-store-copy-ahead spec). The copy is `services::inbuxa_blob_move`.
+//! Planning, copying, applying, stopping and dismissing are audited by the
+//! request layer (BM-9, CA-9).
 
 use super::relay::json_to_value;
 use common::{Server, auth::AccessToken};
-use inbuxa_features::blob_move::{self as model, BlobStoreChange as Stored, Refusal, Status};
+use inbuxa_features::blob_move::{
+    self as model, BlobStoreChange as Stored, PlanRefusal, Refusal, Stage, Status,
+};
 use jmap_proto::{
     error::set::SetError,
     method::{
@@ -26,9 +30,16 @@ use jmap_proto::{
     types::date::UTCDate,
 };
 use jmap_tools::{Key, Map, Value};
+use registry::schema::{
+    prelude::{Object, ObjectImpl, ObjectType},
+    structs,
+};
 use serde_json::json;
-use services::inbuxa_blob_move as copies;
-use store::write::now;
+use services::inbuxa_blob_move::{self as copies, NotPlanned};
+use store::{
+    registry::write::{RegistryWrite, RegistryWriteResult},
+    write::now,
+};
 use types::id::Id;
 
 type CValue = Value<'static, P, BlobStoreChangeValue>;
@@ -56,6 +67,10 @@ const ALL: &[P] = &[
     P::Unreadable,
     P::Problems,
     P::Error,
+    P::Stage,
+    P::CopiedAhead,
+    P::AppliedAt,
+    P::AppliedBy,
 ];
 
 /// BM-9: a change is about the whole server's blobs, so only the server's
@@ -91,8 +106,25 @@ async fn to_value(server: &Server, c: &Stored, properties: &[P], now: u64) -> tr
             // BM-9: where the stores are, never their settings
             P::From => json!(c.from),
             P::To => json!(c.to),
+            // CA-1: a planned change hasn't happened yet
+            P::ChangedAt | P::Node if c.stage == Stage::Planned => serde_json::Value::Null,
             P::ChangedAt => date(c.changed_at),
             P::Node => json!(c.node_id.to_string()),
+            P::Stage => json!(c.stage.as_str()),
+            P::CopiedAhead => match &c.copied_ahead {
+                Some(a) => json!({
+                    "startedAt": date(a.started_at),
+                    "finishedAt": a.finished_at.map_or(serde_json::Value::Null, date),
+                    "status": a.status.as_str(),
+                    "copied": a.copied,
+                    "alreadyThere": a.already_there,
+                    "bytesCopied": a.bytes_copied,
+                    "problems": a.problems,
+                }),
+                None => serde_json::Value::Null,
+            },
+            P::AppliedAt => c.applied_at.map_or(serde_json::Value::Null, date),
+            P::AppliedBy => json!(c.applied_by),
             P::Status => json!(status.as_str()),
             P::CopyStartedAt => copy.map_or(serde_json::Value::Null, |c| date(c.started_at)),
             P::CopyFinishedAt => copy
@@ -131,8 +163,8 @@ async fn to_value(server: &Server, c: &Stored, properties: &[P], now: u64) -> tr
                 list
             }
             P::Error => json!(copy.and_then(|c| c.error.clone())),
-            // Write-only
-            P::Action => continue,
+            // Write-only; a planned store's settings are never shown (CA-1)
+            P::Action | P::Target => continue,
         };
         out.insert_unchecked(Key::Property(property.clone()), json_to_value(json));
     }
@@ -198,9 +230,66 @@ fn limit(property: P, value: &Value<'_, P, BlobStoreChangeValue>) -> Result<u64,
     }
 }
 
-/// `inbuxa:BlobStoreChange/set`: the server records changes, so there's no
-/// create. An update copies or stops a copy; destroy dismisses (BM-5 to
-/// BM-7).
+/// CA-7: writes a planned store's settings to the blob store setting, as an
+/// update of the setting would. The reason when the registry refused it.
+async fn write_setting(
+    server: &Server,
+    target: structs::BlobStore,
+) -> trc::Result<Result<(), String>> {
+    let registry = server.registry();
+    let result = match registry.get(ObjectType::BlobStore.singleton()).await? {
+        Some(old) if old.revision != 0 => {
+            let mut new = old.clone();
+            new.inner = Object::from(target).inner;
+            registry
+                .write(RegistryWrite::update(Id::singleton(), &new, &old))
+                .await?
+        }
+        _ => {
+            registry
+                .write(RegistryWrite::insert(&Object::from(target)))
+                .await?
+        }
+    };
+    Ok(match result {
+        RegistryWriteResult::Success(_) => Ok(()),
+        RegistryWriteResult::ValidationError { errors } => Err(errors
+            .iter()
+            .map(|e| e.to_string())
+            .collect::<Vec<_>>()
+            .join("; ")),
+        other => Err(format!("{other:?}")),
+    })
+}
+
+/// CA-1: the planned store's settings, as the blob store setting takes them.
+fn target_settings(
+    value: &Value<'_, P, BlobStoreChangeValue>,
+) -> Result<structs::BlobStore, SetError<P>> {
+    let json = serde_json::to_value(value).unwrap_or_default();
+    let settings: structs::BlobStore = serde_json::from_value(json).map_err(|err| {
+        invalid(
+            P::Target,
+            format!("Not a blob store setting, as x:BlobStore takes it: {err}"),
+        )
+    })?;
+    let mut errors = Vec::new();
+    if !settings.validate(&mut errors) {
+        return Err(invalid(
+            P::Target,
+            errors
+                .iter()
+                .map(|e| e.to_string())
+                .collect::<Vec<_>>()
+                .join("; "),
+        ));
+    }
+    Ok(settings)
+}
+
+/// `inbuxa:BlobStoreChange/set`: the server records changes; a create plans
+/// one (CA-1). An update copies or stops a copy, or applies a planned one;
+/// destroy dismisses (BM-5 to BM-7, CA-2 to CA-8).
 pub async fn set(
     server: &Server,
     access_token: &AccessToken,
@@ -211,13 +300,75 @@ pub async fn set(
     let data = server.store();
     let actor = server.audit_actor(access_token).await;
 
-    for (client_id, _) in request.unwrap_create() {
-        response.not_created.append(
-            client_id,
-            SetError::forbidden().with_description(
-                "The server records a change when it starts with the blob store moved.",
+    'create: for (client_id, value) in request.unwrap_create() {
+        let mut target = None;
+        for (key, value) in value.into_expanded_object() {
+            match &key {
+                Key::Property(P::Target) => match target_settings(&value) {
+                    Ok(settings) => target = Some(settings),
+                    Err(error) => {
+                        response.not_created.append(client_id, error);
+                        continue 'create;
+                    }
+                },
+                _ => {
+                    response.not_created.append(
+                        client_id,
+                        SetError::invalid_properties()
+                            .with_property(key.clone().into_owned())
+                            .with_description(
+                                "Planning a change takes only the new store's settings, \
+                                 as target.",
+                            ),
+                    );
+                    continue 'create;
+                }
+            }
+        }
+        let Some(target) = target else {
+            response.not_created.append(
+                client_id,
+                SetError::forbidden().with_description(
+                    "The server records a change when it starts with the blob store moved. \
+                     To plan one ahead, give the new store's settings as target.",
+                ),
+            );
+            continue;
+        };
+        let refused = |why: String| SetError::forbidden().with_description(why);
+        match copies::plan(server, target).await? {
+            Ok(change) => {
+                let mut out = Map::with_capacity(1);
+                out.insert_unchecked(
+                    Key::Property(P::Id),
+                    Value::Element(BlobStoreChangeValue::Id(Id::from(change.id))),
+                );
+                response.created.insert(client_id, Value::Object(out));
+            }
+            Err(NotPlanned::Unusable(why)) => response
+                .not_created
+                .append(client_id, invalid(P::Target, why)),
+            Err(NotPlanned::Refused(refusal)) => response.not_created.append(
+                client_id,
+                refused(match refusal {
+                    PlanRefusal::SamePlace => {
+                        "That's where the blob store is now; there's nothing to move.".into()
+                    }
+                    PlanRefusal::AlreadyPlanned(id) => format!(
+                        "Change {} is planned already; one at a time. Dismiss it first.",
+                        Id::from(id)
+                    ),
+                    PlanRefusal::Unresolved(id) => format!(
+                        "Change {} isn't settled: blobs only its old store has wouldn't be \
+                         copied ahead. Copy or dismiss it first.",
+                        Id::from(id)
+                    ),
+                    PlanRefusal::NoLocation => {
+                        "The server hasn't recorded where its blob store is yet.".into()
+                    }
+                }),
             ),
-        );
+        }
     }
 
     'update: for (id, value) in request.unwrap_update().into_valid() {
@@ -278,9 +429,55 @@ pub async fn set(
                         SetError::forbidden()
                             .with_description("That change is resolved; there's nothing to copy."),
                     ),
+                    Err(Refusal::Moved) => response.not_updated.append(
+                        id,
+                        SetError::forbidden().with_description(
+                            "The blob store moved since this change was planned. Dismiss it \
+                             and plan again from where the blob store is now.",
+                        ),
+                    ),
                     Err(Refusal::NotFound) => {
                         response.not_updated.append(id, SetError::not_found())
                     }
+                }
+            }
+            Some("apply") => {
+                let why = if change.stage != Stage::Planned {
+                    Some("Only a planned change can be applied.")
+                } else if change.applied_at.is_some() {
+                    Some("It's applied already; the setting takes effect when the nodes restart.")
+                } else if change.status_at(now()) != Status::Copied {
+                    Some("Copy it ahead first: it can be applied once that copy ends copied.")
+                } else {
+                    None
+                };
+                if let Some(why) = why {
+                    response
+                        .not_updated
+                        .append(id, SetError::forbidden().with_description(why));
+                    continue;
+                }
+                let Some(target) = change.target_settings.clone() else {
+                    response.not_updated.append(id, SetError::not_found());
+                    continue;
+                };
+                match write_setting(server, target).await? {
+                    Ok(()) => {
+                        let by = actor.name.clone();
+                        model::update(data, change_id, |c| {
+                            c.applied_at = Some(now());
+                            c.applied_by = Some(by.clone());
+                            true
+                        })
+                        .await?;
+                        response.updated.append(id, None);
+                    }
+                    Err(why) => response.not_updated.append(
+                        id,
+                        SetError::forbidden().with_description(format!(
+                            "The blob store setting wasn't written: {why}"
+                        )),
+                    ),
                 }
             }
             Some("stop") => {
@@ -294,9 +491,10 @@ pub async fn set(
                 copies::stop(server, change_id).await?;
                 response.updated.append(id, None);
             }
-            _ => response
-                .not_updated
-                .append(id, invalid(P::Action, "The actions are copy and stop.")),
+            _ => response.not_updated.append(
+                id,
+                invalid(P::Action, "The actions are copy, stop and apply."),
+            ),
         }
     }
 
@@ -313,8 +511,9 @@ pub async fn set(
             ),
             Some(_) => {
                 model::remove(data, change_id).await?;
-                // BM-7: this node stops reading through it at once; the
-                // others within a minute (BM-10)
+                // BM-7: this node stops reading through it at once, or
+                // following deletes to it (CA-8); the others within a minute
+                // (BM-10)
                 copies::refresh(server).await;
                 response.destroyed.push(id);
             }

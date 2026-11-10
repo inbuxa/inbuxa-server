@@ -268,8 +268,9 @@ impl BlobStore {
             BlobStore::Azure(store) => store.delete_blob(key).await,
             // inbuxa: ST-18
             BlobStore::Sharded(store) => store.delete(key).await,
-            // inbuxa: BM-3: nothing is deleted from an old store
-            BlobStore::Moving(store) => Box::pin(store.current.raw_delete(key)).await,
+            // inbuxa: BM-3: nothing is deleted from an old store; CA-4: a
+            // planned store follows
+            BlobStore::Moving(store) => Box::pin(store.raw_delete(key)).await,
         }
     }
 }

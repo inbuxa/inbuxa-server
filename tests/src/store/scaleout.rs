@@ -236,7 +236,7 @@ pub async fn scaleout_blob_tests() {
 
     // ST-1: nothing changes for a server without one
     assert!(
-        matches!(test.server.core.storage.blob, BlobStore::Store(_)),
+        matches!(test.server.core.storage.blob.current(), BlobStore::Store(_)),
         "the default blob store is unchanged (ST-1)"
     );
 

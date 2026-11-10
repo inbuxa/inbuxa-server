@@ -8,7 +8,8 @@
 //! of blob store the server noticed at start-up (blob-store-change spec,
 //! BM-2). The server records them; an update with `action: "copy"` copies
 //! what the new store lacks from the old one, `action: "stop"` stops that,
-//! and destroying one dismisses it (BM-5 to BM-7).
+//! and destroying one dismisses it (BM-5 to BM-7). A create with a `target`
+//! plans one, to copy ahead and `apply` (blob-store-copy-ahead spec).
 
 use crate::object::{AnyId, JmapObject, JmapObjectId};
 use jmap_tools::{Element, Key, Property};
@@ -43,6 +44,11 @@ pub enum BlobStoreChangeProperty {
     Problems,
     Error,
     Action,
+    Stage,
+    Target,
+    CopiedAhead,
+    AppliedAt,
+    AppliedBy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -83,6 +89,11 @@ impl Property for BlobStoreChangeProperty {
             BlobStoreChangeProperty::Problems => "problems",
             BlobStoreChangeProperty::Error => "error",
             BlobStoreChangeProperty::Action => "action",
+            BlobStoreChangeProperty::Stage => "stage",
+            BlobStoreChangeProperty::Target => "target",
+            BlobStoreChangeProperty::CopiedAhead => "copiedAhead",
+            BlobStoreChangeProperty::AppliedAt => "appliedAt",
+            BlobStoreChangeProperty::AppliedBy => "appliedBy",
         }
         .into()
     }
@@ -114,6 +125,11 @@ impl BlobStoreChangeProperty {
             b"problems" => BlobStoreChangeProperty::Problems,
             b"error" => BlobStoreChangeProperty::Error,
             b"action" => BlobStoreChangeProperty::Action,
+            b"stage" => BlobStoreChangeProperty::Stage,
+            b"target" => BlobStoreChangeProperty::Target,
+            b"copiedAhead" => BlobStoreChangeProperty::CopiedAhead,
+            b"appliedAt" => BlobStoreChangeProperty::AppliedAt,
+            b"appliedBy" => BlobStoreChangeProperty::AppliedBy,
         )
     }
 }

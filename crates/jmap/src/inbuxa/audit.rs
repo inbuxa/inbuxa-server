@@ -523,6 +523,7 @@ async fn fork_current(server: &Server, object: &str, id: &MaybeInvalid<Id>) -> O
                         serde_json::json!({
                             "from": c.from,
                             "to": c.to,
+                            "stage": c.stage.as_str(),
                             "status": c.status.as_str(),
                         })
                     })

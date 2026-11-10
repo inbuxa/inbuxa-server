@@ -26,12 +26,22 @@ const ALWAYS_SECRET: &[&str] = &[
     "otpAuth",
 ];
 
+/// Properties of the fork's own objects that hold a whole set of settings,
+/// credentials and all, under names the rules above don't catch.
+const HOLDS_SECRETS: &[(&str, &str)] = &[
+    // blob-store-copy-ahead spec, CA-1: the planned store's settings
+    ("inbuxa:BlobStoreChange", "target"),
+];
+
 /// Whether `property` of `object` (`x:AiModel`, `apiKey`) holds a secret.
 pub fn is_secret(object: &str, property: &str) -> bool {
     let lower = property.to_ascii_lowercase();
-    ALWAYS_SECRET
+    HOLDS_SECRETS
         .iter()
-        .any(|name| lower == name.to_ascii_lowercase())
+        .any(|(o, p)| *o == object && *p == property)
+        || ALWAYS_SECRET
+            .iter()
+            .any(|name| lower == name.to_ascii_lowercase())
         || lower.ends_with("secret")
         || lower.ends_with("password")
         || lower.ends_with("privatekey")
@@ -169,6 +179,20 @@ mod tests {
         assert!(diff("x:AiModel", Some(&before), Some(&before)).is_empty());
         // A private key by any name, like a relay's STARTTLS key
         assert!(is_secret("inbuxa:Relay", "smtpPrivateKey"));
+    }
+
+    #[test]
+    fn a_planned_blob_store_is_never_kept() {
+        let create = json!({
+            "target": {"@type": "S3", "bucket": "mail", "secretKey": "s3-secret",
+                       "sessionToken": "s3-session"},
+        });
+        let changes = patch("inbuxa:BlobStoreChange", None, create.as_object().unwrap());
+        assert_eq!(changes, vec![Change::redacted("target")]);
+        let text = serde_json::to_string(&changes).unwrap();
+        assert!(!text.contains("s3-secret") && !text.contains("s3-session"));
+        // Only there: another object's `target` is an ordinary property
+        assert!(!is_secret("x:Thing", "target"));
     }
 
     #[test]

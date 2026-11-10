@@ -154,7 +154,7 @@ pub async fn test(test: &mut TestServer) {
     let ann = test.account("ann@example.com");
     let ann_id = ann.id().document_id();
     let client = ann.jmap_client().await;
-    let separate_blobs = matches!(test.server.blob_store(), BlobStore::Fs(_));
+    let separate_blobs = matches!(test.server.blob_store().current(), BlobStore::Fs(_));
     println!(
         "Blobs {}",
         if separate_blobs {

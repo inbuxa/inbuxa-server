@@ -7,24 +7,27 @@
 //! inbuxa: blob-store-change spec (docs/spec/features/blob-store-change.md),
 //! at start-up: records where the blob store is and, when it moved, the
 //! change (BM-2), then opens the old store of every unresolved change so
-//! what the new store lacks is read from it (BM-3).
+//! what the new store lacks is read from it (BM-3), and the store of a
+//! planned change so deletes follow to it (blob-store-copy-ahead spec,
+//! CA-4).
 
 use inbuxa_features::blob_move::{self as model, Started};
 use registry::schema::{prelude::ObjectType, structs};
-use std::sync::Arc;
 use store::{
     BlobStore, Store,
     build::blob::blob_store_location,
     registry::bootstrap::Bootstrap,
     write::{
-        blob_move::{MovingBlobStore, OldBlobStore},
+        blob_move::{OldBlobStore, PlannedBlobStore},
         now,
     },
 };
 use types::id::Id;
 
-/// The blob store to use: `blob` itself or, while changes are unresolved,
-/// `blob` reading through to their old stores.
+/// The blob store to use: `blob`, reading through to the old stores of
+/// unresolved changes, and with deletes following to a planned store. It's
+/// wrapped even when there are none, so a change planned later takes effect
+/// without a restart (CA-3).
 pub async fn at_start(bp: &mut Bootstrap, blob: BlobStore) -> BlobStore {
     let data = bp.data_store.clone();
     if matches!(data, Store::None) || matches!(blob, BlobStore::Store(Store::None)) {
@@ -69,7 +72,7 @@ pub async fn at_start(bp: &mut Bootstrap, blob: BlobStore) -> BlobStore {
                 bp,
                 format!("Couldn't record where the blob store is: {err}"),
             );
-            return blob;
+            return blob.wrapped(Vec::new());
         }
     }
 
@@ -77,7 +80,7 @@ pub async fn at_start(bp: &mut Bootstrap, blob: BlobStore) -> BlobStore {
         Ok(changes) => changes,
         Err(err) => {
             warn(bp, format!("Couldn't read the blob store changes: {err}"));
-            return blob;
+            return blob.wrapped(Vec::new());
         }
     };
     let mut old = Vec::with_capacity(unresolved.len());
@@ -127,9 +130,36 @@ pub async fn at_start(bp: &mut Bootstrap, blob: BlobStore) -> BlobStore {
         }
     }
 
-    if old.is_empty() {
-        blob
-    } else {
-        BlobStore::Moving(Arc::new(MovingBlobStore::new(blob, old)))
+    let wrapped = blob.wrapped(old);
+    match model::planned(&data).await {
+        Ok(Some(plan)) => {
+            let mut warnings = Vec::new();
+            let settings = plan.target_settings.clone().unwrap_or_default();
+            match BlobStore::open(settings, &data, &mut warnings).await {
+                Ok(store) => {
+                    if let Some(moving) = wrapped.moving() {
+                        moving.set_planned(Some(PlannedBlobStore {
+                            change_id: plan.id,
+                            store,
+                        }));
+                    }
+                }
+                Err(err) => warn(
+                    bp,
+                    format!(
+                        "The blob store planned for {} couldn't be opened, so deletes don't \
+                         follow to it until it can (inbuxa:BlobStoreChange {}): {err}",
+                        plan.to,
+                        Id::from(plan.id)
+                    ),
+                ),
+            }
+            for warning in warnings {
+                warn(bp, warning);
+            }
+        }
+        Ok(None) => {}
+        Err(err) => warn(bp, format!("Couldn't read the planned blob store: {err}")),
     }
+    wrapped
 }
