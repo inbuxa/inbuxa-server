@@ -85,7 +85,8 @@ back while the server is stopped.
 
   The complete snapshots on disk are the record: `get` lists those, read
   from each one's `snapshot.json`, and, until the server restarts, the one
-  being taken or the last one that failed.
+  being taken or the last one that failed. They're listed, and can be
+  destroyed, also while a new snapshot would be refused (SN-1).
 - **SN-8.** Only administrators take snapshots: `sysStoreSnapshot`, in the
   built-in Administrator role and granted to existing administrator roles.
   A snapshot holds every account's data, so a tenant administrator is
@@ -139,8 +140,9 @@ the store is copied twice.
   or in `blobs/`), and not a message that came after; no properties at
   create, no updates; with separate blobs, one at a time and no destroy
   while one is taken (the test holds the purge gate); only the latest two
-  kept; destroy; the audit events; a user's and a tenant administrator's
-  refusal.
+  kept; destroy; while a blob store change isn't settled, the refusal,
+  and the snapshot on disk still listed and destroyed; the audit events; a
+  user's and a tenant administrator's refusal.
 - Unit tests: the filesystem blob store's writes (SN-10), the tree copy
   and what it leaves out, the purge gate, snapshot names and the manifest.
 
