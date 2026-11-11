@@ -3926,7 +3926,9 @@ impl EventType {
             EventType::Smtp(SmtpEvent::MultipleMailFrom) => "Multiple MAIL FROM commands",
             EventType::Smtp(SmtpEvent::MailboxDoesNotExist) => "Mailbox does not exist",
             // inbuxa: #364
-            EventType::Smtp(SmtpEvent::DirectoryNoAnswer) => "Directory had no answer for a recipient",
+            EventType::Smtp(SmtpEvent::DirectoryNoAnswer) => {
+                "Directory had no answer for a recipient"
+            }
             EventType::Smtp(SmtpEvent::RelayNotAllowed) => "Relay not allowed",
             EventType::Smtp(SmtpEvent::RcptTo) => "SMTP RCPT TO command",
             EventType::Smtp(SmtpEvent::RcptToDuplicate) => "Duplicate RCPT TO",
