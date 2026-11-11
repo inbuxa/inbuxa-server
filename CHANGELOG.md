@@ -20,6 +20,17 @@ file has no entry for (`tools/release/version.py --changelog`).
 DMARC and TLS reports reach the server on every domain without a postmaster
 account for each, and the sign-in page can match the app that opens it.
 
+### Security
+One advisory (GHSA-c3c4-2c6m-ffrc), overall severity High: records under an
+active legal hold could be destroyed on schedule (spoliation). 27.1-rc.1 to
+27.1-rc.20 are affected.
+- Legal hold: an account deleted while undelete still retained it now has its
+  archived mail frozen by a covering hold, instead of being purged on
+  schedule. (#377)
+- Legal hold: the audit and journal records of such a deleted-but-held account
+  are kept under the hold, instead of being purged once past their retention
+  floor. (#381)
+
 ### Added
 - The sign-in page takes `theme=light` or `theme=dark` from the app that opens
   it, so it matches the console or webmail instead of following the device.
@@ -35,14 +46,6 @@ account for each, and the sign-in page can match the app that opens it.
   usual; anything else is refused at DATA with the same "Mailbox does not
   exist" as before. Extra domains no longer need a postmaster account for
   their reports. (#379, fixes #373)
-
-### Fixed
-- Legal hold: an account deleted while undelete still retained it now has its
-  archived mail frozen by a covering hold, instead of being purged on
-  schedule. (#377)
-- Legal hold: the audit and journal records of such a deleted-but-held account
-  are kept under the hold, instead of being purged once past their retention
-  floor. (#381)
 
 ## [27.1-rc.20] - 2026-11-11
 
