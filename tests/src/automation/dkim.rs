@@ -62,9 +62,10 @@ pub async fn test(test: &TestServer) {
     account.dkim_signatures().await.assert_total(0, 0);
 
     // Create a domain and trigger DKIM key generation
-    let now = now();
-    let selector_rsa = format!("dummy-v1-rsa-{}", now);
-    let selector_ed = format!("dummy-v1-ed25519-{}", now);
+    // inbuxa: the selector's epoch is when the DKIM task ran, which can be a
+    // second or more after this under load, so any time from here to the
+    // keys showing up is right
+    let created_from = now();
     let domain_id = account
         .registry_create_object(Domain {
             name: "dkim.org".to_string(),
@@ -90,16 +91,20 @@ pub async fn test(test: &TestServer) {
         .await
         .assert_total(1, 1)
         .assert_stage_count(DkimRotationStage::Active, 2);
-    assert_eq!(
-        rot1_signatures.v1_rsa[0].selector, selector_rsa,
-        "Unexpected RSA selector: {}",
-        rot1_signatures.v1_rsa[0].selector
-    );
-    assert_eq!(
-        rot1_signatures.v1_ed25519[0].selector, selector_ed,
-        "Unexpected Ed25519 selector: {}",
-        rot1_signatures.v1_ed25519[0].selector
-    );
+    let created_to = now();
+    for (selector, prefix) in [
+        (&rot1_signatures.v1_rsa[0].selector, "dummy-v1-rsa-"),
+        (&rot1_signatures.v1_ed25519[0].selector, "dummy-v1-ed25519-"),
+    ] {
+        let epoch = selector
+            .strip_prefix(prefix)
+            .and_then(|epoch| epoch.parse::<u64>().ok())
+            .unwrap_or_else(|| panic!("Unexpected selector: {selector}"));
+        assert!(
+            (created_from..=created_to).contains(&epoch),
+            "Selector {selector} is not from {created_from} to {created_to}"
+        );
+    }
     assert_eq!(
         rot1_signatures.v1_rsa[0]
             .next_transition_at

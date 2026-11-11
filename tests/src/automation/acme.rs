@@ -613,7 +613,14 @@ pub async fn test(test: &TestServer) {
         })
     };
     account.registry_create_object(renewal()).await;
-    assert_one_renewal(account, names_domain_id).await;
+    // inbuxa: the new renewal is due now, so it may run during this listing
+    // and replace itself under a new id: the listing then reads the old id
+    // after it's gone and counts none. Two would mean it didn't replace the
+    // queued one; exactly one is checked once the queue settles.
+    assert!(
+        count_renewals(account, names_domain_id).await <= 1,
+        "the renewal created over the API was added next to the queued one"
+    );
     test.wait_for_tasks_skip_not_due().await;
     assert_one_renewal(account, names_domain_id).await;
     let response = account.registry_create([renewal(), renewal()]).await;
@@ -1005,16 +1012,32 @@ async fn assert_certificates(account: &crate::utils::account::Account, expected:
     assert_eq!(found, expected);
 }
 
-async fn assert_one_renewal(account: &crate::utils::account::Account, domain: types::id::Id) {
-    let renewals = account
+// inbuxa: track_caller, so a failure names the step that failed rather
+// than this helper
+#[track_caller]
+fn assert_one_renewal(
+    account: &crate::utils::account::Account,
+    domain: types::id::Id,
+) -> impl std::future::Future<Output = ()> + '_ {
+    let caller = std::panic::Location::caller();
+    async move {
+        let renewals = count_renewals(account, domain).await;
+        assert_eq!(
+            renewals, 1,
+            "expected one queued renewal for the domain, at {caller}"
+        );
+    }
+}
+
+async fn count_renewals(account: &crate::utils::account::Account, domain: types::id::Id) -> usize {
+    account
         .registry_get_all::<Task>()
         .await
         .into_iter()
         .filter(|(_, task)| {
             matches!(task, Task::AcmeRenewal(TaskDomainManagement { domain_id, .. }) if *domain_id == domain)
         })
-        .count();
-    assert_eq!(renewals, 1, "expected one queued renewal for the domain");
+        .count()
 }
 
 const ISSUER_ABC_CERT: &str = r#"-----BEGIN CERTIFICATE-----
