@@ -15,6 +15,35 @@ https://github.com/inbuxa/inbuxa-server/security/advisories.
 Every version PR adds that version's entry here. CI refuses a version this
 file has no entry for (`tools/release/version.py --changelog`).
 
+## [27.1-rc.21] - 2026-11-11
+
+DMARC and TLS reports reach the server on every domain without a postmaster
+account for each, and the sign-in page can match the app that opens it.
+
+### Added
+- The sign-in page takes `theme=light` or `theme=dark` from the app that opens
+  it, so it matches the console or webmail instead of following the device.
+  Without the parameter it follows the device as before. (#375, #376)
+
+### Changed
+- With no default folders configured, a new account also gets an Archive
+  folder. A folder list an admin set is left as it is, and existing accounts
+  aren't changed. (#378, fixes #374)
+- Mail to a report address (`postmaster@*` by default) on one of the server's
+  domains is taken even when no account has that address, as long as the
+  sender hasn't signed in. A DMARC, TLS or feedback report in it is read as
+  usual; anything else is refused at DATA with the same "Mailbox does not
+  exist" as before. Extra domains no longer need a postmaster account for
+  their reports. (#379, fixes #373)
+
+### Fixed
+- Legal hold: an account deleted while undelete still retained it now has its
+  archived mail frozen by a covering hold, instead of being purged on
+  schedule. (#377)
+- Legal hold: the audit and journal records of such a deleted-but-held account
+  are kept under the hold, instead of being purged once past their retention
+  floor. (#381)
+
 ## [27.1-rc.20] - 2026-11-11
 
 The audit log, the journal, legal holds and undelete's notes move to tables
