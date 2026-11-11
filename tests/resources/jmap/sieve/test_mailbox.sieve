@@ -14,7 +14,7 @@ if specialuse_exists "dingleberry" {
     error "An invalid special-use exists.";
 }
 
-if specialuse_exists "archive" {
+if specialuse_exists "important" {
     error "A non-existent special-use exists.";
 }
 
@@ -26,7 +26,7 @@ if not specialuse_exists "Deleted Items" "\\Trash" {
     error "Deleted Items has no Trash special-use (RFC 8579 attribute form).";
 }
 
-if specialuse_exists "\\Archive" {
+if specialuse_exists "\\Important" {
     error "A non-existent special-use exists (RFC 8579 attribute form).";
 }
 
