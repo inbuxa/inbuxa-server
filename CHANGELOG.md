@@ -37,9 +37,12 @@ account for each, and the sign-in page can match the app that opens it.
   their reports. (#379, fixes #373)
 
 ### Fixed
-- A legal hold now freezes the archived mail of an account that was deleted
-  while undelete still kept it. Its individually deleted messages could be
-  purged on their undelete deadline while the hold covered them. (#377)
+- Legal hold: an account deleted while undelete still retained it now has its
+  archived mail frozen by a covering hold, instead of being purged on
+  schedule. (#377)
+- Legal hold: the audit and journal records of such a deleted-but-held account
+  are kept under the hold, instead of being purged once past their retention
+  floor. (#381)
 
 ## [27.1-rc.20] - 2026-11-11
 
