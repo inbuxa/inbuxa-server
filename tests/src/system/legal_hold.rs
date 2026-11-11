@@ -962,6 +962,19 @@ pub async fn test(test: &mut TestServer) {
         summary["sizeHeld"].as_u64().is_some_and(|s| s > 0),
         "LH-8: the held size is zero for a deleted-then-held account: {response}"
     );
+
+    // LH-6, AU-7: a hold must also keep the records ABOUT a deleted-but-held
+    // account. held_accounts() -- the set the audit and journal purges keep --
+    // has to include the gone custodian, or its audit trail is purged out from
+    // under the hold. On the buggy path the live-account scan never sees it.
+    assert!(
+        test.server
+            .held_accounts()
+            .await
+            .unwrap()
+            .contains(&departed_id.document_id()),
+        "LH-6/AU-7: the deleted-but-held custodian is missing from held_accounts()"
+    );
 }
 
 async fn import(

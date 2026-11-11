@@ -433,16 +433,8 @@ async fn store_maintenance(
 /// (deleted accounts a hold keeps included), and records how many went.
 async fn purge_journal(server: &Server) -> trc::Result<()> {
     use inbuxa_features::audit::{Action, Actor, Outcome, Record, Target};
-    let mut held = server.held_accounts().await?;
-    if !held.is_empty() {
-        for (account_id, kept) in
-            inbuxa_features::undelete::data::kept_accounts(server.store()).await?
-        {
-            if server.is_kept_held(account_id, &kept).await? {
-                held.insert(account_id);
-            }
-        }
-    }
+    // held_accounts() already folds in deleted-but-kept accounts a hold covers.
+    let held = server.held_accounts().await?;
     let at = store::write::now();
     let purged = inbuxa_features::journal::entries::purge(server.store(), at, |entry| {
         entry.accounts.iter().any(|account| held.contains(account))
