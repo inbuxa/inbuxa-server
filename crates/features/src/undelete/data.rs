@@ -4,8 +4,9 @@
  * SPDX-License-Identifier: AGPL-3.0-only
  */
 
-//! What undelete keeps in the fork's own subspace (`store::SUBSPACE_INBUXA`).
-//! Every key starts with `U`, then one byte for the kind:
+//! What undelete keeps, in a subspace of its own (`store::SUBSPACE_UNDELETE`,
+//! store layout version 3; before it, in `_` under `U`). Every key starts
+//! with one byte for the kind:
 //!
 //! - `n` + account + document: a deleted email waiting for its archive
 //!   record, with what only the deletion knows (mailboxes, keywords, size)
@@ -19,18 +20,19 @@
 //!   `/changes`.
 //! - `k` + account id: a deleted account kept for its period (UD-15a).
 //! - `a` + address: an address a kept account holds reserved (UD-16).
+//! - `g` + kind + account + document: a deleted calendar event, contact or
+//!   file ([`super::groupware`]).
 //!
 //! Values are JSON, so they read back across versions of the fork.
 
 use serde::{Deserialize as SerdeDeserialize, Serialize as SerdeSerialize, de::DeserializeOwned};
 use store::{
-    Deserialize, IterateParams, SUBSPACE_INBUXA, Serialize, Store, ValueKey,
+    Deserialize, IterateParams, SUBSPACE_UNDELETE, Serialize, Store, ValueKey,
     write::{AnyClass, BatchBuilder, ValueClass},
 };
 use trc::AddContext;
 use types::id::Id;
 
-const FEATURE: u8 = b'U';
 const KIND_NOTE: u8 = b'n';
 const KIND_EXTRA: u8 = b'x';
 const KIND_BLOB: u8 = b'b';
@@ -40,12 +42,11 @@ const KIND_KEPT: u8 = b'k';
 const KIND_RESERVED: u8 = b'a';
 
 fn class(kind: u8, rest: &[u8]) -> ValueClass {
-    let mut key = Vec::with_capacity(2 + rest.len());
-    key.push(FEATURE);
+    let mut key = Vec::with_capacity(1 + rest.len());
     key.push(kind);
     key.extend_from_slice(rest);
     ValueClass::Any(AnyClass {
-        subspace: SUBSPACE_INBUXA,
+        subspace: SUBSPACE_UNDELETE,
         key,
     })
 }
@@ -416,7 +417,7 @@ pub async fn clear_account(data: &Store, account_id: u32) -> trc::Result<()> {
         (vec![KIND_BLOB], vec![KIND_BLOB]),
         (vec![KIND_CHANGE], vec![KIND_CHANGE]),
     ];
-    // The groupware notes, `Ug` + kind + account + document
+    // The groupware notes, `g` + kind + account + document
     for kind in 0u8..3 {
         ranges.push((vec![b'g', kind], vec![b'g', kind]));
     }
@@ -433,14 +434,11 @@ pub async fn clear_account(data: &Store, account_id: u32) -> trc::Result<()> {
     Ok(())
 }
 
-/// A key under `U` spelled out in full (the groupware notes, `Ug`).
+/// A key spelled out in full (the groupware notes, `g`).
 fn class_raw(rest: &[u8]) -> ValueClass {
-    let mut key = Vec::with_capacity(1 + rest.len());
-    key.push(FEATURE);
-    key.extend_from_slice(rest);
     ValueClass::Any(AnyClass {
-        subspace: SUBSPACE_INBUXA,
-        key,
+        subspace: SUBSPACE_UNDELETE,
+        key: rest.to_vec(),
     })
 }
 

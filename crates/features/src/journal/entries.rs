@@ -4,7 +4,8 @@
  * SPDX-License-Identifier: AGPL-3.0-only
  */
 
-//! The built-in journal (JR-5, JR-6, JR-13). Keys, after `J`:
+//! The built-in journal (JR-5, JR-6, JR-13), in a subspace of its own
+//! (`store::SUBSPACE_JOURNAL`, store layout version 3). Keys:
 //!
 //! - `e` + node + seq: a chain link: its seq, the hash of the link before
 //!   it, and the SHA-256 of its entry. One chain per node, as the audit log
@@ -26,13 +27,13 @@
 //! its entry is purged. Nothing here changes or removes an entry before
 //! its time; nothing in JMAP can.
 
-use super::{Direction, FEATURE, Json};
+use super::{Direction, Json};
 use crate::hold::HELD_UNTIL;
 use serde::{Deserialize as SerdeDeserialize, Serialize as SerdeSerialize};
 use sha2::{Digest, Sha256};
 use std::fmt;
 use store::{
-    BlobStore, Deserialize, IterateParams, SUBSPACE_INBUXA, Serialize, Store, ValueKey,
+    BlobStore, Deserialize, IterateParams, SUBSPACE_JOURNAL, Serialize, Store, ValueKey,
     write::{AnyClass, BatchBuilder, BlobLink, BlobOp, ValueClass, assert::AssertValue},
 };
 use tokio::sync::Mutex;
@@ -164,14 +165,13 @@ impl Deserialize for Raw {
 }
 
 fn class(kind: u8, parts: &[u64]) -> ValueClass {
-    let mut key = Vec::with_capacity(2 + parts.len() * 8);
-    key.push(FEATURE);
+    let mut key = Vec::with_capacity(1 + parts.len() * 8);
     key.push(kind);
     for part in parts {
         key.extend_from_slice(&part.to_be_bytes());
     }
     ValueClass::Any(AnyClass {
-        subspace: SUBSPACE_INBUXA,
+        subspace: SUBSPACE_JOURNAL,
         key,
     })
 }
@@ -187,11 +187,11 @@ pub fn content_key(id: EntryId) -> ValueKey<ValueClass> {
 
 /// The numbers after the kind byte, from the key's tail.
 fn parse_key(key: &[u8], kind: u8, parts: usize) -> Option<Vec<u64>> {
-    let len = 2 + parts * 8;
+    let len = 1 + parts * 8;
     let tail = key.get(key.len().checked_sub(len)?..)?;
-    (tail[0] == FEATURE && tail[1] == kind).then_some(())?;
+    (tail[0] == kind).then_some(())?;
     Some(
-        tail[2..]
+        tail[1..]
             .chunks_exact(8)
             .map(|chunk| u64::from_be_bytes(chunk.try_into().unwrap()))
             .collect(),
@@ -777,7 +777,8 @@ mod tests {
             panic!()
         };
         assert_eq!(parse_key(&any.key, KIND_EXPIRY, 3), Some(vec![5, 3, 9]));
-        let mut with_subspace = vec![SUBSPACE_INBUXA];
+        assert_eq!(any.subspace, SUBSPACE_JOURNAL);
+        let mut with_subspace = vec![SUBSPACE_JOURNAL];
         with_subspace.extend_from_slice(&any.key);
         assert_eq!(
             parse_key(&with_subspace, KIND_EXPIRY, 3),

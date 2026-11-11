@@ -341,6 +341,35 @@ impl SqliteStore {
         .await
     }
 
+    /// inbuxa: SL-17: copies the rows from `from` up to `to` into subspace
+    /// `dest`, without their first `strip` bytes, in one statement. A row
+    /// already there is overwritten, so a copy can run again.
+    pub(crate) async fn copy_range(
+        &self,
+        from: impl Key,
+        to: impl Key,
+        dest: u8,
+        strip: usize,
+    ) -> trc::Result<u64> {
+        let manager = self.conn_pool.clone();
+        self.spawn_worker(move || {
+            let conn = manager.get().map_err(into_error)?;
+            conn.prepare_cached(&format!(
+                "INSERT OR REPLACE INTO {} (k, v) SELECT substr(k, {}), v FROM {} WHERE k >= ? AND k < ?",
+                crate::subspace_name(dest),
+                strip + 1,
+                crate::subspace_name(from.subspace()),
+            ))
+            .map_err(into_error)
+            .caused_by(trc::location!())?
+            .execute([from.serialize(0), to.serialize(0)])
+            .map(|rows| rows as u64)
+            .map_err(into_error)
+            .caused_by(trc::location!())
+        })
+        .await
+    }
+
     pub(crate) async fn delete_range(&self, from: impl Key, to: impl Key) -> trc::Result<()> {
         let manager = self.conn_pool.clone();
         self.spawn_worker(move || {

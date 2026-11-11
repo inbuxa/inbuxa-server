@@ -28,6 +28,11 @@ pub async fn store_destroy(store: &Store) {
         SUBSPACE_DELETED_ITEMS,
         SUBSPACE_SPAM_SAMPLES,
         store::SUBSPACE_INBUXA, // inbuxa: masked email
+        // inbuxa: SL-16: the fork's large data
+        store::SUBSPACE_AUDIT,
+        store::SUBSPACE_JOURNAL,
+        store::SUBSPACE_HOLDS,
+        store::SUBSPACE_UNDELETE,
         SUBSPACE_BLOB_LINK,
         SUBSPACE_LOGS,
         SUBSPACE_IN_MEMORY_COUNTER,

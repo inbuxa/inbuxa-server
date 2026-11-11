@@ -11,8 +11,9 @@
 //! While any active hold covers an item, nothing may destroy it. A hold is
 //! never deleted: releasing it keeps it, read-only, for the audit trail.
 //!
-//! Kept in the fork's subspace (`store::SUBSPACE_INBUXA`). Every key starts
-//! with `H`, then one byte for the kind:
+//! Kept in a subspace of their own (`store::SUBSPACE_HOLDS`, store layout
+//! version 3; before it, in `_` under `H`). Every key starts with one byte
+//! for the kind:
 //!
 //! - `h` + hold id (u32): the hold, as JSON.
 //!
@@ -21,7 +22,7 @@
 use registry::schema::{prelude::ObjectInner, structs::Account};
 use serde::{Deserialize as SerdeDeserialize, Serialize as SerdeSerialize};
 use store::{
-    Deserialize, IterateParams, SUBSPACE_INBUXA, Serialize, Store, ValueKey,
+    Deserialize, IterateParams, SUBSPACE_HOLDS, Serialize, Store, ValueKey,
     write::{AnyClass, BatchBuilder, ValueClass, assert::AssertValue},
 };
 use trc::AddContext;
@@ -103,7 +104,6 @@ impl Keeping {
     }
 }
 
-const FEATURE: u8 = b'H';
 const KIND_HOLD: u8 = b'h';
 const KIND_ORIGINAL: u8 = b'o';
 const KIND_EXPORT: u8 = b'e';
@@ -401,12 +401,11 @@ impl<T: serde::de::DeserializeOwned + Sync + Send> Deserialize for Json<T> {
 }
 
 fn class(id: u32) -> ValueClass {
-    let mut key = Vec::with_capacity(6);
-    key.push(FEATURE);
+    let mut key = Vec::with_capacity(5);
     key.push(KIND_HOLD);
     key.extend_from_slice(&id.to_be_bytes());
     ValueClass::Any(AnyClass {
-        subspace: SUBSPACE_INBUXA,
+        subspace: SUBSPACE_HOLDS,
         key,
     })
 }
@@ -416,12 +415,11 @@ fn key(id: u32) -> ValueKey<ValueClass> {
 }
 
 fn original_class(item_id: u64) -> ValueClass {
-    let mut key = Vec::with_capacity(10);
-    key.push(FEATURE);
+    let mut key = Vec::with_capacity(9);
     key.push(KIND_ORIGINAL);
     key.extend_from_slice(&item_id.to_be_bytes());
     ValueClass::Any(AnyClass {
-        subspace: SUBSPACE_INBUXA,
+        subspace: SUBSPACE_HOLDS,
         key,
     })
 }
@@ -454,12 +452,11 @@ pub async fn set_original_deadline(
 }
 
 fn export_class(id: u32) -> ValueClass {
-    let mut key = Vec::with_capacity(6);
-    key.push(FEATURE);
+    let mut key = Vec::with_capacity(5);
     key.push(KIND_EXPORT);
     key.extend_from_slice(&id.to_be_bytes());
     ValueClass::Any(AnyClass {
-        subspace: SUBSPACE_INBUXA,
+        subspace: SUBSPACE_HOLDS,
         key,
     })
 }

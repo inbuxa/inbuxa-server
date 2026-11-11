@@ -161,6 +161,11 @@ impl PostgresStore {
                 SUBSPACE_DELETED_ITEMS,
                 SUBSPACE_SPAM_SAMPLES,
                 crate::SUBSPACE_INBUXA, // inbuxa: masked email
+                // inbuxa: SL-16: the fork's large data, from layout version 3
+                crate::SUBSPACE_AUDIT,
+                crate::SUBSPACE_JOURNAL,
+                crate::SUBSPACE_HOLDS,
+                crate::SUBSPACE_UNDELETE,
                 SUBSPACE_BLOB_LINK,
                 SUBSPACE_IN_MEMORY_VALUE,
                 SUBSPACE_PROPERTY,

@@ -46,15 +46,26 @@ struct Step {
     what: &'static str,
 }
 
-const STEPS: &[Step] = &[Step {
-    from: 1,
-    rolling_safe: true,
-    what: "in-memory counters on SQL keep their own expiry",
-}];
+const STEPS: &[Step] = &[
+    Step {
+        from: 1,
+        rolling_safe: true,
+        what: "in-memory counters on SQL keep their own expiry",
+    },
+    Step {
+        from: 2,
+        // SL-18: old nodes would keep writing the moved data to `_`, and an
+        // old binary can't open a RocksDB store with column families it
+        // doesn't know
+        rolling_safe: false,
+        what: "the audit log, journal, holds and undelete notes move to subspaces of their own",
+    },
+];
 
 async fn run_step(server: &Server, from: u32) -> trc::Result<u64> {
     match from {
         1 => counters_keep_expiry(server).await,
+        2 => crate::fork_subspaces::fork_data_own_subspaces(server.store()).await,
         _ => unreachable!("no store layout step from version {from}"),
     }
 }

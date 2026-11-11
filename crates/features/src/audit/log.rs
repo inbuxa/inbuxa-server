@@ -4,9 +4,9 @@
  * SPDX-License-Identifier: AGPL-3.0-only
  */
 
-//! The audit log's storage (AU-2, AU-3, AU-6, AU-7), in the fork's own
-//! subspace (`store::SUBSPACE_INBUXA`). Every key starts with `L`, then one
-//! byte for the kind:
+//! The audit log's storage (AU-2, AU-3, AU-6, AU-7), in a subspace of its
+//! own (`store::SUBSPACE_AUDIT`, store layout version 3). Every key starts
+//! with one byte for the kind:
 //!
 //! - `e` + node + seq: one entry of that node's chain, as JSON. An entry is
 //!   an event, or the outcome of an event written before its change was
@@ -18,7 +18,8 @@
 //!   both add the same seq.
 //! - `f` + node: where the chain starts after purging, and the hash the
 //!   first kept entry names.
-//! - `s`: the settings (`keepFor`).
+//! - `s`: the settings (`keepFor`). These stay in the fork's `_` subspace,
+//!   as `L` + `s`, so a configuration export carries them.
 //!
 //! Numbers are big-endian, so keys sort in time and chain order. Each node
 //! writes only its own chain, so nodes never contend for a key; nothing about
@@ -31,7 +32,7 @@ use serde::{Deserialize as SerdeDeserialize, Serialize as SerdeSerialize};
 use sha2::{Digest, Sha256};
 use std::{fmt, net::IpAddr, str::FromStr};
 use store::{
-    Deserialize, IterateParams, SUBSPACE_INBUXA, Serialize, Store, ValueKey,
+    Deserialize, IterateParams, SUBSPACE_AUDIT, SUBSPACE_INBUXA, Serialize, Store, ValueKey,
     write::{AnyClass, BatchBuilder, ValueClass, assert::AssertValue},
 };
 use tokio::sync::Mutex;
@@ -229,16 +230,17 @@ impl Deserialize for U64 {
 }
 
 fn class(kind: u8, parts: &[u64]) -> ValueClass {
-    let mut key = Vec::with_capacity(2 + parts.len() * 8);
-    key.push(FEATURE);
+    // SL-16: the settings stay in `_`; the log has a subspace of its own
+    let (subspace, mut key) = if kind == KIND_SETTINGS {
+        (SUBSPACE_INBUXA, vec![FEATURE])
+    } else {
+        (SUBSPACE_AUDIT, Vec::with_capacity(1 + parts.len() * 8))
+    };
     key.push(kind);
     for part in parts {
         key.extend_from_slice(&part.to_be_bytes());
     }
-    ValueClass::Any(AnyClass {
-        subspace: SUBSPACE_INBUXA,
-        key,
-    })
+    ValueClass::Any(AnyClass { subspace, key })
 }
 
 fn key(kind: u8, parts: &[u64]) -> ValueKey<ValueClass> {
@@ -259,11 +261,11 @@ pub fn head_key(node: u64) -> ValueKey<ValueClass> {
 /// The numbers after the kind byte, read from the key's tail: the iterator
 /// may or may not hand back the subspace byte.
 fn parse_key(key: &[u8], kind: u8, parts: usize) -> Option<Vec<u64>> {
-    let len = 2 + parts * 8;
+    let len = 1 + parts * 8;
     let tail = key.get(key.len().checked_sub(len)?..)?;
-    (tail[0] == FEATURE && tail[1] == kind).then_some(())?;
+    (tail[0] == kind).then_some(())?;
     Some(
-        tail[2..]
+        tail[1..]
             .chunks_exact(8)
             .map(|chunk| u64::from_be_bytes(chunk.try_into().unwrap()))
             .collect(),
@@ -875,7 +877,8 @@ mod tests {
             panic!()
         };
         assert_eq!(parse_key(&any.key, KIND_TIME, 3), Some(vec![5, 3, 9]));
-        let mut with_subspace = vec![SUBSPACE_INBUXA];
+        assert_eq!(any.subspace, SUBSPACE_AUDIT);
+        let mut with_subspace = vec![SUBSPACE_AUDIT];
         with_subspace.extend_from_slice(&any.key);
         assert_eq!(parse_key(&with_subspace, KIND_TIME, 3), Some(vec![5, 3, 9]));
         assert_eq!(parse_key(&any.key, KIND_ENTRY, 3), None);

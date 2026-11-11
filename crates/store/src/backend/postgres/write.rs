@@ -553,6 +553,37 @@ impl PostgresStore {
         bounded(conn, result, limit)
     }
 
+    /// inbuxa: SL-17: copies the rows from `from` up to `to` into subspace
+    /// `dest`, without their first `strip` bytes, in one statement on the
+    /// server. A row already there is overwritten, so a copy can run again.
+    pub(crate) async fn copy_range(
+        &self,
+        from: impl Key,
+        to: impl Key,
+        dest: u8,
+        strip: usize,
+    ) -> trc::Result<u64> {
+        let conn = self.conn_pool.get().await.map_err(into_pool_error)?;
+        let limit = self.timeouts.maintenance;
+        let result = tokio::time::timeout(limit, async {
+            let table = crate::subspace_name(from.subspace());
+            let dest = crate::subspace_name(dest);
+            let from = from.serialize(0);
+            let to = to.serialize(0);
+            let s = conn
+                .prepare_cached(&format!(
+                    "INSERT INTO {dest} (k, v) SELECT substring(k from {}), v FROM {table} \
+                     WHERE k >= $1 AND k < $2 ON CONFLICT (k) DO UPDATE SET v = EXCLUDED.v",
+                    strip + 1
+                ))
+                .await
+                .map_err(into_error)?;
+            conn.execute(&s, &[&from, &to]).await.map_err(into_error)
+        })
+        .await;
+        bounded(conn, result, limit)
+    }
+
     pub(crate) async fn delete_range(&self, from: impl Key, to: impl Key) -> trc::Result<()> {
         let conn = self.conn_pool.get().await.map_err(into_pool_error)?;
         let limit = self.timeouts.maintenance;

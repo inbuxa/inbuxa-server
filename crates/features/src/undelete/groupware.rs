@@ -50,13 +50,13 @@ pub struct Note {
 }
 
 fn note_class(kind: Kind, account_id: u32, document_id: u32) -> ValueClass {
-    let mut key = Vec::with_capacity(11);
-    key.extend_from_slice(b"Ug");
+    let mut key = Vec::with_capacity(10);
+    key.push(b'g');
     key.push(kind as u8);
     key.extend_from_slice(&account_id.to_be_bytes());
     key.extend_from_slice(&document_id.to_be_bytes());
     ValueClass::Any(AnyClass {
-        subspace: store::SUBSPACE_INBUXA,
+        subspace: store::SUBSPACE_UNDELETE,
         key,
     })
 }

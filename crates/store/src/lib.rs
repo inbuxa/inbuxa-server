@@ -145,6 +145,11 @@ pub const LEGACY_SUBSPACE_BITMAP_TAG: u8 = b'c';
 // inbuxa: SL-15: every lowercase letter is taken, so later subspaces take id
 // bytes from 0x80 up, which are never letters, and a name of their own.
 pub const SUBSPACE_NAMED_FIRST: u8 = 0x80;
+// inbuxa: SL-16: the fork's large data, out of `_` (layout version 3)
+pub const SUBSPACE_AUDIT: u8 = 0x80;
+pub const SUBSPACE_JOURNAL: u8 = 0x81;
+pub const SUBSPACE_HOLDS: u8 = 0x82;
+pub const SUBSPACE_UNDELETE: u8 = 0x83;
 
 /// One-byte names for the subspaces up to 0x7f, which are ASCII.
 const ASCII_NAMES: &[u8; 128] = &{
@@ -170,7 +175,13 @@ pub const fn subspace_name(subspace: u8) -> &'static str {
             Err(_) => unreachable!(),
         }
     } else {
-        panic!("a subspace from 0x80 up has no name")
+        match subspace {
+            SUBSPACE_AUDIT => "ib_audit",
+            SUBSPACE_JOURNAL => "ib_journal",
+            SUBSPACE_HOLDS => "ib_holds",
+            SUBSPACE_UNDELETE => "ib_undelete",
+            _ => panic!("a subspace from 0x80 up has no name"),
+        }
     }
 }
 
@@ -846,8 +857,16 @@ mod subspace_names {
     }
 
     #[test]
+    fn named_subspaces() {
+        assert_eq!(subspace_name(SUBSPACE_AUDIT), "ib_audit");
+        assert_eq!(subspace_name(SUBSPACE_JOURNAL), "ib_journal");
+        assert_eq!(subspace_name(SUBSPACE_HOLDS), "ib_holds");
+        assert_eq!(subspace_name(SUBSPACE_UNDELETE), "ib_undelete");
+    }
+
+    #[test]
     #[should_panic]
     fn an_unnamed_high_byte_is_a_bug() {
-        subspace_name(SUBSPACE_NAMED_FIRST);
+        subspace_name(0xff);
     }
 }

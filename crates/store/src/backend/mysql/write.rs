@@ -452,6 +452,38 @@ impl MysqlStore {
         bounded(conn, result, limit)
     }
 
+    /// inbuxa: SL-17: copies the rows from `from` up to `to` into subspace
+    /// `dest`, without their first `strip` bytes, in one statement on the
+    /// server. A row already there is overwritten, so a copy can run again.
+    pub(crate) async fn copy_range(
+        &self,
+        from: impl Key,
+        to: impl Key,
+        dest: u8,
+        strip: usize,
+    ) -> trc::Result<u64> {
+        let mut conn = self.conn().await?;
+        let limit = self.timeouts.maintenance;
+        let result = tokio::time::timeout(limit, async {
+            let table = crate::subspace_name(from.subspace());
+            let dest = crate::subspace_name(dest);
+            let from = from.serialize(0);
+            let to = to.serialize(0);
+            let s = conn
+                .prep(format!(
+                    "INSERT INTO {dest} (k, v) SELECT SUBSTRING(k, {}), v FROM {table} \
+                     WHERE k >= ? AND k < ? ON DUPLICATE KEY UPDATE v = VALUES(v)",
+                    strip + 1
+                ))
+                .await
+                .map_err(into_error)?;
+            conn.exec_drop(&s, (&from, &to)).await.map_err(into_error)?;
+            Ok(conn.affected_rows())
+        })
+        .await;
+        bounded(conn, result, limit)
+    }
+
     pub(crate) async fn delete_range(&self, from: impl Key, to: impl Key) -> trc::Result<()> {
         let mut conn = self.conn().await?;
         let limit = self.timeouts.maintenance;

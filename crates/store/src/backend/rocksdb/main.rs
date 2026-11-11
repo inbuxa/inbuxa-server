@@ -98,16 +98,33 @@ impl RocksDbStore {
             (SUBSPACE_SEARCH_INDEX, CfProfile::Scan),
             (SUBSPACE_SPAM_SAMPLES, CfProfile::Churn),
             (crate::SUBSPACE_INBUXA, CfProfile::PointLookup), // inbuxa: masked email
+            // inbuxa: SL-16: the fork's large data, from layout version 3
+            (crate::SUBSPACE_AUDIT, CfProfile::Scan),
+            (crate::SUBSPACE_JOURNAL, CfProfile::Scan),
+            (crate::SUBSPACE_HOLDS, CfProfile::PointLookup),
+            (crate::SUBSPACE_UNDELETE, CfProfile::Churn),
             (SUBSPACE_REGISTRY_IDX, CfProfile::Scan),
             (SUBSPACE_REGISTRY_PK, CfProfile::PointLookup),
             (SUBSPACE_DIRECTORY, CfProfile::PointLookup),
-            (LEGACY_SUBSPACE_BITMAP_TEXT, CfProfile::Scan),
-            (LEGACY_SUBSPACE_BITMAP_TAG, CfProfile::Scan),
         ] {
             cfs.push(ColumnFamilyDescriptor::new(
                 crate::subspace_name(subspace),
                 cf_options(profile, &cache, write_buffer_size),
             ));
+        }
+
+        // inbuxa: SL-20: the legacy `v` and `c` are opened only where they
+        // still exist, for store layout step 2 -> 3 to drop. RocksDB won't
+        // open a database without every column family it has.
+        let existing = rocksdb::DB::list_cf(&Options::default(), &idx_path).unwrap_or_default();
+        for subspace in [LEGACY_SUBSPACE_BITMAP_TEXT, LEGACY_SUBSPACE_BITMAP_TAG] {
+            let name = crate::subspace_name(subspace);
+            if existing.iter().any(|cf| cf == name) {
+                cfs.push(ColumnFamilyDescriptor::new(
+                    name,
+                    cf_options(CfProfile::Scan, &cache, write_buffer_size),
+                ));
+            }
         }
 
         let mut db_opts = Options::default();
@@ -138,6 +155,24 @@ impl RocksDbStore {
                 .build()
                 .map_err(|err| format!("Failed to build worker pool: {:?}", err))?,
         })))
+    }
+
+    /// inbuxa: SL-20: drops the legacy `v` and `c` column families where
+    /// they exist, and returns how many it dropped.
+    pub(crate) async fn drop_legacy_subspaces(&self) -> trc::Result<u64> {
+        let db = self.db.clone();
+        self.spawn_worker(move || {
+            let mut dropped = 0;
+            for subspace in [LEGACY_SUBSPACE_BITMAP_TEXT, LEGACY_SUBSPACE_BITMAP_TAG] {
+                let name = crate::subspace_name(subspace);
+                if db.cf_handle(name).is_some() {
+                    db.drop_cf(name).map_err(super::into_error)?;
+                    dropped += 1;
+                }
+            }
+            Ok(dropped)
+        })
+        .await
     }
 
     pub async fn spawn_worker<U, V>(&self, mut f: U) -> trc::Result<V>
@@ -233,4 +268,49 @@ fn cf_options(profile: CfProfile, cache: &Cache, write_buffer_size: usize) -> Op
     opts.set_block_based_table_factory(&block_opts);
 
     opts
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // inbuxa: SL-20: a store from before step 2 -> 3 has `v` and `c`. It
+    // still opens, the step drops them, and it opens again without them.
+    #[tokio::test]
+    async fn legacy_column_families_are_dropped() {
+        let dir = std::env::temp_dir().join(format!("inbuxa-legacy-cf-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        {
+            let mut opts = Options::default();
+            opts.create_if_missing(true);
+            opts.create_missing_column_families(true);
+            rocksdb::DB::open_cf(&opts, &dir, ["v", "c", "p"]).unwrap();
+        }
+        let config = || structs::RocksDbStore {
+            path: dir.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        let has = |name: &str| {
+            rocksdb::DB::list_cf(&Options::default(), &dir)
+                .unwrap()
+                .iter()
+                .any(|cf| cf == name)
+        };
+
+        let Store::RocksDb(store) = RocksDbStore::open(config()).await.unwrap() else {
+            unreachable!()
+        };
+        assert_eq!(store.drop_legacy_subspaces().await.unwrap(), 2);
+        assert_eq!(store.drop_legacy_subspaces().await.unwrap(), 0);
+        drop(store);
+        assert!(!has("v") && !has("c"));
+        assert!(has(crate::subspace_name(crate::SUBSPACE_AUDIT)));
+
+        let Store::RocksDb(store) = RocksDbStore::open(config()).await.unwrap() else {
+            unreachable!()
+        };
+        drop(store);
+        assert!(!has("v") && !has("c"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
