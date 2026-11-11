@@ -102,6 +102,9 @@ impl Server {
         let directory = self
             .get_directory_for_cached_domain(&domain)
             .filter(|directory| directory.can_lookup_recipients());
+        // inbuxa: #364: why the directory had no answer, logged only if the
+        // address ends up refused (a mailing list or catch-all may still take it)
+        let mut directory_miss: Option<(&'static str, String)> = None;
         if let Some(directory) = directory {
             let is_subaddressed = local_part.as_ref() != local_part_orig;
             let address = if is_subaddressed {
@@ -115,12 +118,24 @@ impl Server {
                     if self
                         .assert_directory_serves(directory, &account.email)
                         .await
-                        .is_err() => {}
+                        .is_err() =>
+                {
+                    directory_miss = Some((
+                        "The directory answered with an account on a domain it doesn't serve",
+                        account.email,
+                    ));
+                }
                 Recipient::Group(group)
                     if self
                         .assert_directory_serves(directory, &group.email)
                         .await
-                        .is_err() => {}
+                        .is_err() =>
+                {
+                    directory_miss = Some((
+                        "The directory answered with a group on a domain it doesn't serve",
+                        group.email,
+                    ));
+                }
                 Recipient::Account(account) => {
                     Box::pin(self.synchronize_account(account)).await?;
                     return Ok(if is_subaddressed {
@@ -137,7 +152,14 @@ impl Server {
                         RcptResolution::Accept
                     });
                 }
-                Recipient::Invalid => {}
+                Recipient::Invalid => {
+                    directory_miss = Some((
+                        "The directory found no entry for the address",
+                        directory
+                            .recipient_query(address.as_ref())
+                            .unwrap_or_default(),
+                    ));
+                }
             }
         }
 
@@ -196,6 +218,16 @@ impl Server {
         if domain.flags & DOMAIN_FLAG_RELAY != 0 {
             Ok(RcptResolution::Accept)
         } else {
+            if let Some((reason, details)) = directory_miss {
+                trc::event!(
+                    Smtp(trc::SmtpEvent::DirectoryNoAnswer),
+                    SpanId = session_id,
+                    To = rcpt.to_string(),
+                    Domain = domain_part.to_string(),
+                    Reason = reason,
+                    Details = details,
+                );
+            }
             Ok(RcptResolution::UnknownRecipient)
         }
     }

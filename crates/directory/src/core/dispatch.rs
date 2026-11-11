@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{Account, Credentials, Directory, Recipient, backend::oidc::OidcDiscovery};
@@ -27,6 +29,17 @@ impl Directory {
             Directory::Unavailable(directory) => Err(directory.error()),
         }
         .caused_by(trc::location!())
+    }
+
+    /// inbuxa: #364: what a recipient lookup asks the directory (the LDAP
+    /// mailbox filter for this address, or the SQL query), for the log line
+    /// that explains a refused recipient.
+    pub fn recipient_query(&self, address: &str) -> Option<String> {
+        match &self {
+            Directory::Ldap(store) => Some(store.recipient_query(address)),
+            Directory::Sql(store) => Some(store.recipient_query()),
+            Directory::OpenId(_) | Directory::Unavailable(_) => None,
+        }
     }
 
     pub fn has_bearer_token_support(&self) -> bool {

@@ -527,6 +527,8 @@ impl EventType {
             b"smtp.mail-from" => EventType::Smtp(SmtpEvent::MailFrom),
             b"smtp.multiple-mail-from" => EventType::Smtp(SmtpEvent::MultipleMailFrom),
             b"smtp.mailbox-does-not-exist" => EventType::Smtp(SmtpEvent::MailboxDoesNotExist),
+            // inbuxa: #364
+            b"smtp.directory-no-answer" => EventType::Smtp(SmtpEvent::DirectoryNoAnswer),
             b"smtp.relay-not-allowed" => EventType::Smtp(SmtpEvent::RelayNotAllowed),
             b"smtp.rcpt-to" => EventType::Smtp(SmtpEvent::RcptTo),
             b"smtp.rcpt-to-duplicate" => EventType::Smtp(SmtpEvent::RcptToDuplicate),
@@ -1322,6 +1324,8 @@ impl EventType {
             EventType::Smtp(SmtpEvent::MailFrom) => "smtp.mail-from",
             EventType::Smtp(SmtpEvent::MultipleMailFrom) => "smtp.multiple-mail-from",
             EventType::Smtp(SmtpEvent::MailboxDoesNotExist) => "smtp.mailbox-does-not-exist",
+            // inbuxa: #364
+            EventType::Smtp(SmtpEvent::DirectoryNoAnswer) => "smtp.directory-no-answer",
             EventType::Smtp(SmtpEvent::RelayNotAllowed) => "smtp.relay-not-allowed",
             EventType::Smtp(SmtpEvent::RcptTo) => "smtp.rcpt-to",
             EventType::Smtp(SmtpEvent::RcptToDuplicate) => "smtp.rcpt-to-duplicate",
@@ -2014,6 +2018,8 @@ impl EventType {
             EventType::Smtp(SmtpEvent::MailFrom) => 444,
             EventType::Smtp(SmtpEvent::MultipleMailFrom) => 456,
             EventType::Smtp(SmtpEvent::MailboxDoesNotExist) => 449,
+            // inbuxa: #364
+            EventType::Smtp(SmtpEvent::DirectoryNoAnswer) => 661,
             EventType::Smtp(SmtpEvent::RelayNotAllowed) => 468,
             EventType::Smtp(SmtpEvent::RcptTo) => 464,
             EventType::Smtp(SmtpEvent::RcptToDuplicate) => 465,
@@ -2724,6 +2730,8 @@ impl EventType {
             444 => Some(EventType::Smtp(SmtpEvent::MailFrom)),
             456 => Some(EventType::Smtp(SmtpEvent::MultipleMailFrom)),
             449 => Some(EventType::Smtp(SmtpEvent::MailboxDoesNotExist)),
+            // inbuxa: #364
+            661 => Some(EventType::Smtp(SmtpEvent::DirectoryNoAnswer)),
             468 => Some(EventType::Smtp(SmtpEvent::RelayNotAllowed)),
             464 => Some(EventType::Smtp(SmtpEvent::RcptTo)),
             465 => Some(EventType::Smtp(SmtpEvent::RcptToDuplicate)),
@@ -3121,6 +3129,8 @@ impl EventType {
             EventType::Smtp(SmtpEvent::InvalidEhlo) => Level::Info,
             EventType::Smtp(SmtpEvent::MailFrom) => Level::Info,
             EventType::Smtp(SmtpEvent::MailboxDoesNotExist) => Level::Info,
+            // inbuxa: #364
+            EventType::Smtp(SmtpEvent::DirectoryNoAnswer) => Level::Info,
             EventType::Smtp(SmtpEvent::RelayNotAllowed) => Level::Info,
             EventType::Smtp(SmtpEvent::RcptTo) => Level::Info,
             EventType::Smtp(SmtpEvent::RcptToGreylisted) => Level::Info,
@@ -3915,6 +3925,8 @@ impl EventType {
             EventType::Smtp(SmtpEvent::MailFrom) => "SMTP MAIL FROM command",
             EventType::Smtp(SmtpEvent::MultipleMailFrom) => "Multiple MAIL FROM commands",
             EventType::Smtp(SmtpEvent::MailboxDoesNotExist) => "Mailbox does not exist",
+            // inbuxa: #364
+            EventType::Smtp(SmtpEvent::DirectoryNoAnswer) => "Directory had no answer for a recipient",
             EventType::Smtp(SmtpEvent::RelayNotAllowed) => "Relay not allowed",
             EventType::Smtp(SmtpEvent::RcptTo) => "SMTP RCPT TO command",
             EventType::Smtp(SmtpEvent::RcptToDuplicate) => "Duplicate RCPT TO",
@@ -4299,6 +4311,8 @@ impl EventType {
             EventType::Smtp(SmtpEvent::MailFrom) => "SMTP error",
             EventType::Smtp(SmtpEvent::MultipleMailFrom) => "SMTP error",
             EventType::Smtp(SmtpEvent::MailboxDoesNotExist) => "SMTP error",
+            // inbuxa: #364
+            EventType::Smtp(SmtpEvent::DirectoryNoAnswer) => "SMTP error",
             EventType::Smtp(SmtpEvent::RelayNotAllowed) => "SMTP error",
             EventType::Smtp(SmtpEvent::RcptTo) => "SMTP error",
             EventType::Smtp(SmtpEvent::RcptToDuplicate) => "SMTP error",
@@ -4903,6 +4917,8 @@ impl EventType {
             EventType::Smtp(SmtpEvent::MailFrom),
             EventType::Smtp(SmtpEvent::MultipleMailFrom),
             EventType::Smtp(SmtpEvent::MailboxDoesNotExist),
+            // inbuxa: #364
+            EventType::Smtp(SmtpEvent::DirectoryNoAnswer),
             EventType::Smtp(SmtpEvent::RelayNotAllowed),
             EventType::Smtp(SmtpEvent::RcptTo),
             EventType::Smtp(SmtpEvent::RcptToDuplicate),

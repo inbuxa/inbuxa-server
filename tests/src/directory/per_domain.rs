@@ -24,7 +24,8 @@ use registry::schema::{
     },
 };
 use serde_json::json;
-use std::net::IpAddr;
+use std::{net::IpAddr, time::Duration};
+use trc::{Collector, EventType, Key, SmtpEvent, ipc::subscriber::SubscriberBuilder};
 use types::id::Id;
 
 /// An SQLite directory database with its rows.
@@ -154,6 +155,48 @@ async fn rcpt(address: &str) -> char {
         .unwrap_or('?')
 }
 
+/// RCPT for an address, with the reason and details of the
+/// smtp.directory-no-answer event it raised, if any (#364).
+async fn rcpt_with_miss(address: &str) -> (char, Option<(String, String)>) {
+    let subscriber_id = format!("directory-no-answer-{address}");
+    let subscriber = SubscriberBuilder::new(subscriber_id.clone())
+        .set_interests([EventType::Smtp(SmtpEvent::DirectoryNoAnswer)])
+        .with_lossy(false);
+    Collector::union_interests(subscriber.interests.clone());
+    let (_, mut events) = subscriber.register();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !Collector::get_subscribers().contains(&subscriber_id) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("subscriber was not registered");
+
+    let reply = rcpt(address).await;
+    let miss = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            for event in events.recv().await.expect("subscriber closed") {
+                if event.value_as_str(Key::To) == Some(address) {
+                    return (
+                        event
+                            .value_as_str(Key::Reason)
+                            .unwrap_or_default()
+                            .to_string(),
+                        event
+                            .value_as_str(Key::Details)
+                            .unwrap_or_default()
+                            .to_string(),
+                    );
+                }
+            }
+        }
+    })
+    .await
+    .ok();
+    Collector::remove_subscriber(subscriber_id);
+    (reply, miss)
+}
+
 /// `cargo test -p tests per_domain_directory_tests -- --ignored`.
 #[ignore]
 #[tokio::test(flavor = "multi_thread")]
@@ -218,6 +261,7 @@ pub async fn per_domain_directory_tests() {
             "INSERT INTO emails (name, address) VALUES ('alice@a.test', 'alice@b.test')",
             "INSERT INTO group_members (name, member_of) VALUES ('alice@a.test', 'team@a.test')",
             "INSERT INTO group_members (name, member_of) VALUES ('alice@a.test', 'crew@b.test')",
+            "INSERT INTO emails (name, address) VALUES ('mallory@b.test', 'eve@e.test')",
         ],
     )
     .await;
@@ -250,6 +294,16 @@ pub async fn per_domain_directory_tests() {
         .registry_create_object(domain("b.test", Some(dir_b)))
         .await;
     let c = admin.registry_create_object(domain("c.test", None)).await;
+    // e.test: A's data, looked up by alias, so an alias of a b.test entry
+    // answers for an e.test address (#364, DIR-6 at RCPT)
+    let mut by_alias = sql_directory(&path_a, "E");
+    if let structs::Directory::Sql(sql) = &mut by_alias {
+        sql.query_recipient = "SELECT a.name, a.secret, a.description, a.type FROM accounts a JOIN emails e ON e.name = a.name WHERE e.address = $1 AND a.active = true".into();
+    }
+    let dir_e = admin.registry_create_object(by_alias).await;
+    admin
+        .registry_create_object(domain("e.test", Some(dir_e)))
+        .await;
     // d.test gets its broken directory after dora's internal password exists,
     // since passwords can't be set on a directory domain (DIR-13)
     let d = admin.registry_create_object(domain("d.test", None)).await;
@@ -366,7 +420,33 @@ pub async fn per_domain_directory_tests() {
     assert!(account_of(&test, "dave@a.test").await.is_none());
     assert_eq!(rcpt("dave@a.test").await, '2', "test 7");
     assert!(account_of(&test, "dave@a.test").await.is_some(), "test 7");
-    assert_eq!(rcpt("ghost@a.test").await, '5', "test 7");
+    // #364: the refusal says why, at info level: no entry, with the query
+    let (reply, miss) = rcpt_with_miss("ghost@a.test").await;
+    assert_eq!(reply, '5', "test 7");
+    let (reason, details) = miss.expect("#364: no-entry miss logged");
+    assert_eq!(
+        reason, "The directory found no entry for the address",
+        "#364"
+    );
+    assert!(details.contains("WHERE name = $1"), "#364: {details}");
+    // #364: an answer for a domain the directory doesn't serve is dropped,
+    // and that is logged with the address it answered with
+    let (reply, miss) = rcpt_with_miss("eve@e.test").await;
+    assert_eq!(reply, '5', "#364: DIR-6 at RCPT");
+    let (reason, details) = miss.expect("#364: DIR-6 miss logged");
+    assert_eq!(
+        reason, "The directory answered with an account on a domain it doesn't serve",
+        "#364"
+    );
+    assert_eq!(details, "mallory@b.test", "#364");
+    assert!(account_of(&test, "mallory@b.test").await.is_none(), "#364");
+    // An accepted recipient raises nothing
+    let (reply, miss) = rcpt_with_miss("dave@a.test").await;
+    assert_eq!(reply, '2', "#364");
+    assert!(
+        miss.is_none(),
+        "#364: nothing logged for an accepted address"
+    );
 
     // Test 11: no password change on a directory account (DIR-13)
     let refused = admin

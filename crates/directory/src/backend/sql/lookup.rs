@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use super::{SqlDirectory, SqlMappings};
@@ -197,5 +199,13 @@ impl SqlMappings {
                 description: account.description,
             })
         }
+    }
+}
+
+// inbuxa: #364: the recipient query, for the log line that explains a
+// refused recipient
+impl SqlDirectory {
+    pub fn recipient_query(&self) -> String {
+        self.mappings.query_recipient.clone()
     }
 }
