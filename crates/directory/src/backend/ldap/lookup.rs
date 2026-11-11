@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use super::{LdapDirectory, LdapMappings};
@@ -304,4 +306,12 @@ fn result_to_trace(rs: &ResultEntry) -> trc::Value {
         .chain([trc::Value::from(se.dn)])
         .collect::<Vec<_>>()
         .into()
+}
+
+// inbuxa: #364: the mailbox filter as it runs for an address, for the log
+// line that explains a refused recipient
+impl LdapDirectory {
+    pub fn recipient_query(&self, address: &str) -> String {
+        self.mappings.filter_mailbox.build(address)
+    }
 }

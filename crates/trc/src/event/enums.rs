@@ -13,10 +13,11 @@
 // security.legacy-protocols-changed (LP-8); 644 to 646 are the cluster
 // coordinator's connection events; 647 and 648 are the audit log's
 // (audit-hold-lock spec, AU-3, AU-8); 649 is cluster.node-id-reassigned;
-// 650 to 659 are inbuxa Relay's (relay spec, RL-23, RL-T23).
+// 650 to 659 are inbuxa Relay's (relay spec, RL-23, RL-T23); 660 is
+// store.blob-read-through; 661 is smtp.directory-no-answer (#364).
 // TOTAL_EVENT_COUNT sizes the collector's per-event tables, so it is one
 // more than the highest id; the test below holds it to the variant list
-pub const TOTAL_EVENT_COUNT: usize = 661;
+pub const TOTAL_EVENT_COUNT: usize = 662;
 pub const TOTAL_METRIC_COUNT: usize = 369;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -766,6 +767,9 @@ pub enum SmtpEvent {
     MailFrom = 444,
     MultipleMailFrom = 456,
     MailboxDoesNotExist = 449,
+    /// inbuxa: #364: the domain's directory was asked about a recipient
+    /// and had no answer, so the address is refused.
+    DirectoryNoAnswer = 661,
     RelayNotAllowed = 468,
     RcptTo = 464,
     RcptToDuplicate = 465,
