@@ -874,6 +874,107 @@ pub async fn test(test: &mut TestServer) {
             .is_some_and(|l| l.iter().any(|r| r["target"]["name"] == "held@example.com")),
         "an account isn't named by its address: {accounts}"
     );
+
+    // LH-8, LH-6: a hold placed AFTER an account was deleted must still freeze
+    // the account's archived mail. The account is gone, so settle_archive finds
+    // no live keeping for it; its already-archived items have to follow the hold
+    // all the same, or the next purge destroys mail a hold is asserting over.
+    admin
+        .registry_update_setting(
+            DataRetention {
+                archive_deleted_items_for: Some(registry::schema::prelude::Duration(
+                    std::time::Duration::from_secs(30 * 86_400),
+                )),
+                archive_deleted_accounts_for: Some(registry::schema::prelude::Duration(
+                    std::time::Duration::from_secs(30 * 86_400),
+                )),
+                ..Default::default()
+            },
+            &[
+                Property::ArchiveDeletedItemsFor,
+                Property::ArchiveDeletedAccountsFor,
+            ],
+        )
+        .await;
+    // A dedicated domain with no other account, so a domain-scoped hold covers
+    // exactly this one custodian and its held-item count can't be inflated by
+    // live accounts that merely share a domain.
+    let departed = admin
+        .create_user_account(
+            "departed@custodian.example.net",
+            "departed-secret-7700",
+            "Departed",
+            &[],
+            vec![],
+        )
+        .await;
+    let departed_id = departed.id();
+    let departed_client = departed.jmap_client().await;
+    // A message the custodian deleted before they left: undelete archives it on
+    // a finite deadline. This is the already-archived mail a late hold has to
+    // reach once the account itself is gone.
+    let doomed = import(&departed_client, "Mail of a departed custodian", None).await;
+    departed_client.email_destroy(&doomed).await.unwrap();
+    test.wait_for_tasks_skip_not_due().await;
+
+    // The account is removed while undelete keeps it (and its archived mail).
+    admin
+        .registry_destroy(ObjectType::Account, [departed_id])
+        .await
+        .assert_destroyed(&[departed_id]);
+    test.wait_for_tasks_skip_not_due().await;
+
+    // The hold arrives after the deletion. It can't name the gone account by id
+    // (that scope is refused once the account is missing), so it reaches the
+    // custodian through the custodian.example.net domain its kept record still
+    // carries.
+    let custodian_dom = admin.find_or_create_domain("custodian.example.net").await;
+    let response = admin
+        .hold_set(json!({"reason": "Matter 9100, post-departure", "create": {
+            "late": {"name": "Matter 9100", "scope": {"domains": [custodian_dom.to_string()]}}}}))
+        .await;
+    let late = response["created"]["late"]["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the post-departure hold wasn't placed: {response}"))
+        .to_string();
+    test.wait_for_tasks_skip_not_due().await;
+
+    let (_, response) = admin
+        .hold_call(
+            "inbuxa:LegalHold/get",
+            json!({"ids": [late], "properties": ["accountsCovered", "itemsHeld", "sizeHeld"]}),
+        )
+        .await;
+    let summary = &response["list"][0];
+    // Setup sanity: the hold reaches the gone custodian through its domain.
+    assert_eq!(
+        summary["accountsCovered"], 1,
+        "LH-8: the post-departure hold doesn't cover the deleted custodian: {response}"
+    );
+    // The bug: a deleted account's archived mail is left on its finite deadline,
+    // so the hold shows the account covered but freezes none of its mail; the
+    // scheduled purge then destroys it while the hold is active.
+    assert!(
+        summary["itemsHeld"].as_u64().is_some_and(|n| n >= 1),
+        "LH-8/LH-6: a hold placed after the account was deleted didn't freeze its archived mail: {response}"
+    );
+    assert!(
+        summary["sizeHeld"].as_u64().is_some_and(|s| s > 0),
+        "LH-8: the held size is zero for a deleted-then-held account: {response}"
+    );
+
+    // LH-6, AU-7: a hold must also keep the records ABOUT a deleted-but-held
+    // account. held_accounts() -- the set the audit and journal purges keep --
+    // has to include the gone custodian, or its audit trail is purged out from
+    // under the hold. On the buggy path the live-account scan never sees it.
+    assert!(
+        test.server
+            .held_accounts()
+            .await
+            .unwrap()
+            .contains(&departed_id.document_id()),
+        "LH-6/AU-7: the deleted-but-held custodian is missing from held_accounts()"
+    );
 }
 
 async fn import(

@@ -185,18 +185,34 @@ impl Server {
         let now = now();
         let mut keeping: AHashMap<u32, Option<Keeping>> = AHashMap::new();
         let mut settled = Settled::default();
+        // LH-8: the accounts undelete still keeps after deletion. A gone account
+        // can't be looked up to find its domain or tenant, so its kept record
+        // carries them; its archived items have to follow the holds all the same.
+        let kept_items_retention = inbuxa_features::undelete::settings::retention(registry)
+            .await?
+            .items;
+        let kept_accounts: AHashMap<u32, KeptAccount> = undelete_data::kept_accounts(data)
+            .await?
+            .into_iter()
+            .collect();
         for id in records::all(data, registry).await? {
             let Some(item) = registry.object::<ArchivedItem>(id).await? else {
                 continue;
             };
             let account_id = item.account_id().document_id();
             if !keeping.contains_key(&account_id) {
-                // An account that's gone can't be placed in a domain or
-                // tenant any more: None, and its items are left as they are
                 let known = self.account(account_id).await.is_ok();
                 let value = if known {
                     Some(self.keeping(account_id).await?)
+                } else if let Some(kept) = kept_accounts.get(&account_id) {
+                    // Gone but kept by undelete: follow the holds through the
+                    // domain and tenant the kept record carries, so its items
+                    // freeze and release just like a live account's (LH-8).
+                    let ranges = hold::covering(data, &kept_member(account_id, kept)).await?;
+                    Some(Keeping::new(kept_items_retention, &ranges))
                 } else {
+                    // Gone and not kept: leave items as they are. The None
+                    // branch below releases them once no hold is active.
                     None
                 };
                 keeping.insert(account_id, value);
@@ -282,6 +298,16 @@ impl Server {
         {
             let account_id = id.document_id();
             if self.is_held(account_id).await? {
+                held.insert(account_id);
+            }
+        }
+        // LH-6, AU-7: accounts deleted while undelete keeps them can still be
+        // held, through the domain and tenant their kept record carries. They
+        // have dropped out of the live-account scan above, so fold them in --
+        // otherwise a purge that keeps a held account's records (audit, journal)
+        // would drop a deleted-but-held account's, the exact case a hold is for.
+        for (account_id, kept) in undelete_data::kept_accounts(self.store()).await? {
+            if self.is_kept_held(account_id, &kept).await? {
                 held.insert(account_id);
             }
         }
