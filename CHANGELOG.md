@@ -11,6 +11,24 @@ https://github.com/inbuxa/inbuxa-server/security/advisories.
 Every version PR adds that version's entry here. CI refuses a version this
 file has no entry for (`tools/release/changelog-check.py`).
 
+## [2026.11.11] - 2026-11-11
+
+1 security fix from our own review of the server (high), covering two gaps in
+legal holds. All versions up to and including 2026.11.10, and 27.1-rc.1 to
+27.1-rc.20, are affected. The same fix is in 27.1-rc.21 for the 27.1 series.
+
+### Security
+High
+- Legal hold: an account deleted while undelete still kept it wasn't fully
+  covered by a hold. Messages it had deleted before it was removed could be
+  purged on their undelete deadline (#377 on main), and its audit and journal
+  records could be purged once past their retention floor (#381 on main).
+  Both are now kept for as long as a hold covers the account.
+  (GHSA-c3c4-2c6m-ffrc, #382)
+
+### Upgrading
+- Nothing to do. Rolling back to 2026.11.10 is safe, but brings the gap back.
+
 ## [2026.11.10] - 2026-11-10
 
 A bug fix for the 2026 series. No security fixes beyond 2026.11.9.
