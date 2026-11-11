@@ -40,3 +40,18 @@
 + /admin/roles/Tenant Administrator/enabled sysDeliverabilityGet
 + /admin/roles/Tenant Administrator/enabled sysScheduledReportGet
 + /admin/roles/Tenant Administrator/enabled sysScheduledReportUpdate
+
+# The 0.16 web interface, switched off on the first start with its record
+# kept (PR #251; after.py checks it too), and the permissions for features
+# added since: migrations and Relay (27.1-rc.5), blob store changes, store
+# checks and snapshots (27.1-rc.16).
+- /admin/applications Stalwart Web Interface enabled=True https://github.com/stalwartlabs/webui/releases/download/v1.0.11/webui.zip
++ /admin/applications Stalwart Web Interface enabled=False https://github.com/stalwartlabs/webui/releases/download/v1.0.11/webui.zip
++ /admin/roles/System Administrator/enabled sysBlobStoreChange
++ /admin/roles/System Administrator/enabled sysMigrationRun
++ /admin/roles/System Administrator/enabled sysRelayGet
++ /admin/roles/System Administrator/enabled sysRelayQueueGet
++ /admin/roles/System Administrator/enabled sysRelayQueueUpdate
++ /admin/roles/System Administrator/enabled sysRelayUpdate
++ /admin/roles/System Administrator/enabled sysStoreCheck
++ /admin/roles/System Administrator/enabled sysStoreSnapshot
