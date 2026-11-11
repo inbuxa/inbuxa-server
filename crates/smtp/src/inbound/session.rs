@@ -514,6 +514,7 @@ impl<T: AsyncWrite + AsyncRead + Unpin> Session<T> {
         self.data.mailflow_queue = None;
         self.data.journal_marks.clear();
         self.data.journal_added.clear();
+        self.data.report_only_rcpts.clear();
     }
 
     pub fn reset_tls(&mut self) {

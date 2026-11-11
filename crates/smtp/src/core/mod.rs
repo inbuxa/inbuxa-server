@@ -112,6 +112,10 @@ pub struct SessionData {
     // inbuxa: RL-23: a message a relay took on port 25, judged here as if
     // this server had taken the session
     pub relayed: Option<Relayed>,
+    // inbuxa (#373): recipients RCPT took only because they are report
+    // addresses on one of our domains; no account has them, so DATA drops
+    // them once any report in the message has been read
+    pub report_only_rcpts: Vec<String>,
 }
 
 /// inbuxa: RL-23: what a relay saw of the session it took a message in.
@@ -217,6 +221,7 @@ impl SessionData {
             journal_added: Vec::new(),
             access_token: None,
             relayed: None,
+            report_only_rcpts: Vec::new(),
         }
     }
 }
@@ -347,6 +352,7 @@ impl SessionData {
             journal_added: Vec::new(),
             access_token: None,
             relayed: None,
+            report_only_rcpts: Vec::new(),
         }
     }
 }

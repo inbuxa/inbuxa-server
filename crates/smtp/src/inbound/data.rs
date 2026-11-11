@@ -484,12 +484,21 @@ impl<T: SessionStream> Session<T> {
             (None, None)
         };
 
+        // inbuxa (#373): report addresses RCPT took with no account behind them
+        let report_only = std::mem::take(&mut self.data.report_only_rcpts);
+
         // Analyze reports
         if is_report && ReportData::is_present(&parsed_message) {
             if !rc.analysis.forward {
                 self.data
                     .rcpt_to
                     .retain(|rcpt| !rc.analysis.is_report_address(rcpt.orig_address()));
+            }
+            if !report_only.is_empty() {
+                // Even when reports are forwarded, there is no one to forward these to
+                self.data
+                    .rcpt_to
+                    .retain(|rcpt| !report_only.contains(&rcpt.address_lcase));
             }
 
             if self.data.rcpt_to.is_empty() {
@@ -524,6 +533,22 @@ impl<T: SessionStream> Session<T> {
                     },
                     self.data.session_id,
                 );
+            }
+        }
+
+        // inbuxa (#373): anything other than a report to an address with no
+        // account is refused as RCPT would have refused it
+        if !report_only.is_empty() {
+            self.data
+                .rcpt_to
+                .retain(|rcpt| !report_only.contains(&rcpt.address_lcase));
+            if self.data.rcpt_to.is_empty() {
+                trc::event!(
+                    Smtp(SmtpEvent::MailboxDoesNotExist),
+                    SpanId = self.data.session_id,
+                    To = report_only,
+                );
+                return (b"550 5.1.2 Mailbox does not exist.\r\n"[..]).into();
             }
         }
 

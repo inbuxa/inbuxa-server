@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{smtp::session::TestSession, utils::server::TestServerBuilder};
@@ -373,4 +375,77 @@ fn zip(
     out.extend_from_slice(&0u16.to_le_bytes());
 
     out
+}
+
+// INBUXA (#373): a report to postmaster@ on one of our domains is taken and
+// read even when no account has that address; nothing else gets through.
+#[tokio::test(flavor = "multi_thread")]
+async fn report_to_address_without_account() {
+    let mut test = TestServerBuilder::new("smtp_report_no_account_test")
+        .await
+        .with_http_listener(19060)
+        .await
+        .capture_queue()
+        .build()
+        .await;
+
+    let admin = test.account("admin");
+    admin.find_or_create_domain("reports-local.org").await;
+    admin
+        .registry_create_object(ReportSettings {
+            inbound_report_addresses: Map::new(vec!["postmaster@*".to_string()]),
+            inbound_report_forwarding: true,
+            inbound_report_max_size: MAX_REPORT_SIZE,
+            ..Default::default()
+        })
+        .await;
+    admin.mta_no_auth().await;
+    admin.mta_allow_non_fqdn().await;
+    admin.reload_settings().await;
+    test.reload_core();
+    test.expect_reload_settings().await;
+
+    let mut session = test.new_mta_session();
+    session.data.remote_ip_str = "10.0.0.1".into();
+    session.eval_session_params().await;
+    session.ehlo("mx.test.org").await;
+
+    // An address that isn't a report address is still refused at RCPT
+    session.mail_from("john@test.org", "250").await;
+    session.rcpt_to("nobody@reports-local.org", "550").await;
+    session.cmd("RSET", "250").await;
+
+    // A report is read, and nothing is queued for the missing mailbox,
+    // even with forwarding on
+    session
+        .send_message(
+            "john@test.org",
+            &["postmaster@reports-local.org"],
+            "report:dmarc1",
+            "250",
+        )
+        .await;
+    test.assert_no_events();
+    let admin = test.account("admin");
+    for _ in 0..50 {
+        if admin.registry_get_all::<DmarcExternalReport>().await.len() == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(
+        admin.registry_get_all::<DmarcExternalReport>().await.len(),
+        1
+    );
+
+    // Anything else to it is refused once DATA shows it isn't a report
+    session
+        .send_message(
+            "john@test.org",
+            &["postmaster@reports-local.org"],
+            "From: john@test.org\r\nTo: postmaster@reports-local.org\r\nSubject: hello\r\n\r\nNot a report.\r\n",
+            "550",
+        )
+        .await;
+    test.assert_no_events();
 }
