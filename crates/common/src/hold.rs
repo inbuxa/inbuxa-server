@@ -301,6 +301,16 @@ impl Server {
                 held.insert(account_id);
             }
         }
+        // LH-6, AU-7: accounts deleted while undelete keeps them can still be
+        // held, through the domain and tenant their kept record carries. They
+        // have dropped out of the live-account scan above, so fold them in --
+        // otherwise a purge that keeps a held account's records (audit, journal)
+        // would drop a deleted-but-held account's, the exact case a hold is for.
+        for (account_id, kept) in undelete_data::kept_accounts(self.store()).await? {
+            if self.is_kept_held(account_id, &kept).await? {
+                held.insert(account_id);
+            }
+        }
         Ok(held)
     }
 
