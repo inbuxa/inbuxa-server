@@ -23,7 +23,8 @@ High
   covered by a hold. Messages it had deleted before it was removed could be
   purged on their undelete deadline (#377 on main), and its audit and journal
   records could be purged once past their retention floor (#381 on main).
-  Both are now kept for as long as a hold covers the account. (#382)
+  Both are now kept for as long as a hold covers the account.
+  (GHSA-c3c4-2c6m-ffrc, #382)
 
 ### Upgrading
 - Nothing to do. Rolling back to 2026.11.10 is safe, but brings the gap back.
