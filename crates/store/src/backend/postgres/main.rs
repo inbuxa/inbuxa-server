@@ -176,7 +176,7 @@ impl PostgresStore {
                 SUBSPACE_TELEMETRY_SPAN,
                 SUBSPACE_TELEMETRY_METRIC,
             ] {
-                let table = char::from(table);
+                let table = crate::subspace_name(table);
                 conn.execute(
                     &format!(
                         "CREATE TABLE IF NOT EXISTS {table} (
@@ -191,7 +191,7 @@ impl PostgresStore {
             }
 
             for table in [SUBSPACE_INDEXES, SUBSPACE_REGISTRY_IDX] {
-                let table = char::from(table);
+                let table = crate::subspace_name(table);
                 conn.execute(
                     &format!(
                         "CREATE TABLE IF NOT EXISTS {table} (
@@ -211,7 +211,7 @@ impl PostgresStore {
                         k BYTEA PRIMARY KEY,
                         v BIGINT NOT NULL DEFAULT 0
                     )",
-                        char::from(table)
+                        crate::subspace_name(table)
                     ),
                     &[],
                 )
@@ -221,7 +221,7 @@ impl PostgresStore {
 
             // inbuxa: SL-10: in-memory counters keep their expiry in their
             // row. Added only when missing, so a start doesn't lock the table.
-            let table = char::from(SUBSPACE_IN_MEMORY_COUNTER).to_string();
+            let table = crate::subspace_name(SUBSPACE_IN_MEMORY_COUNTER).to_string();
             let has_expiry = conn
                 .query_opt(
                     concat!(

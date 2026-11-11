@@ -362,7 +362,7 @@ pub async fn store_assert_is_empty(store: &Store, blob_store: BlobStore, include
                         _ => {
                             println!(
                                 "Found key in {:?}: {:?} ({:?}) = {:?} ({:?})",
-                                char::from(subspace),
+                                store::subspace_name(subspace),
                                 key,
                                 String::from_utf8_lossy(key),
                                 value,

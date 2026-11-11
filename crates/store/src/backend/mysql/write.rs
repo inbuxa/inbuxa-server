@@ -137,7 +137,7 @@ impl MysqlStore {
                 Operation::Value { class, op } => {
                     let key = class.serialize(account_id, collection, document_id, 0);
                     let subspace = class.subspace(collection);
-                    let table = char::from(subspace);
+                    let table = crate::subspace_name(subspace);
 
                     match op {
                         ValueOp::Set(value) => {
@@ -393,7 +393,7 @@ impl MysqlStore {
                     assert_value,
                 } => {
                     let key = class.serialize(account_id, collection, document_id, 0);
-                    let table = char::from(class.subspace(collection));
+                    let table = crate::subspace_name(class.subspace(collection));
 
                     let s = trx
                         .prep(format!("SELECT v FROM {} WHERE k = ? FOR UPDATE", table))
@@ -423,7 +423,7 @@ impl MysqlStore {
         let limit = self.timeouts.maintenance;
         let result = tokio::time::timeout(limit, async {
             for subspace in [SUBSPACE_QUOTA, SUBSPACE_COUNTER, SUBSPACE_IN_MEMORY_COUNTER] {
-                purge_table(&mut conn, char::from(subspace)).await?;
+                purge_table(&mut conn, crate::subspace_name(subspace)).await?;
             }
 
             Ok(())
@@ -440,7 +440,7 @@ impl MysqlStore {
             conn.exec_drop(
                 format!(
                     "DELETE FROM {} WHERE e <= ?",
-                    char::from(SUBSPACE_IN_MEMORY_COUNTER)
+                    crate::subspace_name(SUBSPACE_IN_MEMORY_COUNTER)
                 ),
                 (now as i64,),
             )
@@ -456,7 +456,7 @@ impl MysqlStore {
         let mut conn = self.conn().await?;
         let limit = self.timeouts.maintenance;
         let result = tokio::time::timeout(limit, async {
-            let table = char::from(from.subspace());
+            let table = crate::subspace_name(from.subspace());
             let mut from = from.serialize(0);
             let to = to.serialize(0);
 
@@ -518,7 +518,7 @@ impl MysqlStore {
     }
 }
 
-async fn purge_table(conn: &mut Conn, table: char) -> trc::Result<()> {
+async fn purge_table(conn: &mut Conn, table: &str) -> trc::Result<()> {
     let s = conn
         .prep(format!("DELETE FROM {table} WHERE v = 0"))
         .await

@@ -142,6 +142,38 @@ pub const SUBSPACE_INBUXA: u8 = b'_';
 pub const LEGACY_SUBSPACE_BITMAP_TEXT: u8 = b'v';
 pub const LEGACY_SUBSPACE_BITMAP_TAG: u8 = b'c';
 
+// inbuxa: SL-15: every lowercase letter is taken, so later subspaces take id
+// bytes from 0x80 up, which are never letters, and a name of their own.
+pub const SUBSPACE_NAMED_FIRST: u8 = 0x80;
+
+/// One-byte names for the subspaces up to 0x7f, which are ASCII.
+const ASCII_NAMES: &[u8; 128] = &{
+    let mut names = [0u8; 128];
+    let mut byte = 0;
+    while byte < 128 {
+        names[byte] = byte as u8;
+        byte += 1;
+    }
+    names
+};
+
+/// inbuxa: SL-15: the name a backend gives a subspace: its SQL table and its
+/// RocksDB column family. A subspace below [`SUBSPACE_NAMED_FIRST`] keeps its
+/// one-byte name, so nothing changes for upstream's subspaces or for `_`.
+/// One from 0x80 up is named `ib_…`; one with no name is a bug.
+pub const fn subspace_name(subspace: u8) -> &'static str {
+    if subspace < SUBSPACE_NAMED_FIRST {
+        let (_, rest) = ASCII_NAMES.as_slice().split_at(subspace as usize);
+        let (name, _) = rest.split_at(1);
+        match std::str::from_utf8(name) {
+            Ok(name) => name,
+            Err(_) => unreachable!(),
+        }
+    } else {
+        panic!("a subspace from 0x80 up has no name")
+    }
+}
+
 #[derive(Clone)]
 pub struct IterateParams<T: Key> {
     begin: T,
@@ -762,5 +794,60 @@ impl From<Value<'_>> for trc::Value {
 impl From<Value<'static>> for () {
     fn from(_: Value<'static>) -> Self {
         unreachable!()
+    }
+}
+
+#[cfg(test)]
+mod subspace_names {
+    use super::*;
+
+    // inbuxa: SL-15: renaming a subspace would orphan its table or column
+    // family, so every one below 0x80 keeps the name it always had.
+    #[test]
+    fn one_byte_subspaces_keep_their_names() {
+        for subspace in [
+            SUBSPACE_ACL,
+            SUBSPACE_TASK_QUEUE,
+            SUBSPACE_INDEXES,
+            SUBSPACE_BLOB_LINK,
+            SUBSPACE_BLOBS,
+            SUBSPACE_LOGS,
+            SUBSPACE_COUNTER,
+            SUBSPACE_IN_MEMORY_VALUE,
+            SUBSPACE_IN_MEMORY_COUNTER,
+            SUBSPACE_PROPERTY,
+            SUBSPACE_REGISTRY,
+            SUBSPACE_REGISTRY_IDX,
+            SUBSPACE_REGISTRY_PK,
+            SUBSPACE_DIRECTORY,
+            SUBSPACE_QUEUE_MESSAGE,
+            SUBSPACE_QUEUE_EVENT,
+            SUBSPACE_QUOTA,
+            SUBSPACE_REPORT_OUT,
+            SUBSPACE_REPORT_IN,
+            SUBSPACE_TELEMETRY_SPAN,
+            SUBSPACE_TELEMETRY_METRIC,
+            SUBSPACE_SEARCH_INDEX,
+            SUBSPACE_DELETED_ITEMS,
+            SUBSPACE_SPAM_SAMPLES,
+            SUBSPACE_INBUXA,
+            LEGACY_SUBSPACE_BITMAP_TEXT,
+            LEGACY_SUBSPACE_BITMAP_TAG,
+        ] {
+            assert_eq!(subspace_name(subspace).as_bytes(), [subspace]);
+        }
+        assert_eq!(subspace_name(b'_'), "_");
+    }
+
+    #[test]
+    fn names_work_in_const_context() {
+        const NAME: &str = subspace_name(SUBSPACE_LOGS);
+        assert_eq!(NAME, "l");
+    }
+
+    #[test]
+    #[should_panic]
+    fn an_unnamed_high_byte_is_a_bug() {
+        subspace_name(SUBSPACE_NAMED_FIRST);
     }
 }

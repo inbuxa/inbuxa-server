@@ -247,7 +247,7 @@ pub async fn test(test: &TestServer) {
         assert!(
             snapshot.keys.iter().any(|k| k.subspace == subspace),
             "No test data in subspace {}",
-            char::from(subspace)
+            store::subspace_name(subspace)
         );
     }
 
@@ -290,7 +290,7 @@ pub async fn test(test: &TestServer) {
         assert!(
             imported.contains(&subspace),
             "Subspace {} was not exported",
-            char::from(subspace)
+            store::subspace_name(subspace)
         );
     }
 
@@ -383,7 +383,7 @@ async fn cross_backend(
                 source.get_counter(class()).await.unwrap(),
                 target.get_counter(class()).await.unwrap(),
                 "Counter mismatch in {} for {key:?}",
-                char::from(subspace)
+                store::subspace_name(subspace)
             );
         }
     }
@@ -548,7 +548,7 @@ impl Snapshot {
             if !other.keys.contains(key) {
                 println!(
                     "Subspace {}, Key {:?} not found in restored snapshot",
-                    char::from(key.subspace),
+                    store::subspace_name(key.subspace),
                     key.key,
                 );
                 is_err = true;
@@ -558,7 +558,7 @@ impl Snapshot {
             if !self.keys.contains(key) {
                 println!(
                     "Subspace {}, Key {:?} not found in original snapshot",
-                    char::from(key.subspace),
+                    store::subspace_name(key.subspace),
                     key.key,
                 );
                 is_err = true;

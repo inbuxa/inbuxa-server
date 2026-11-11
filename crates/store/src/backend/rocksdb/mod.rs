@@ -18,9 +18,9 @@ pub mod main;
 pub mod read;
 pub mod write;
 
-static CF_LOGS: &str = unsafe { std::str::from_utf8_unchecked(&[SUBSPACE_LOGS]) };
-static CF_INDEXES: &str = unsafe { std::str::from_utf8_unchecked(&[SUBSPACE_INDEXES]) };
-static CF_BLOBS: &str = unsafe { std::str::from_utf8_unchecked(&[SUBSPACE_BLOBS]) };
+static CF_LOGS: &str = crate::subspace_name(SUBSPACE_LOGS);
+static CF_INDEXES: &str = crate::subspace_name(SUBSPACE_INDEXES);
+static CF_BLOBS: &str = crate::subspace_name(SUBSPACE_BLOBS);
 
 pub(crate) trait CfHandle {
     fn subspace_handle(&self, subspace: u8) -> Arc<BoundColumnFamily<'_>>;
@@ -29,9 +29,7 @@ pub(crate) trait CfHandle {
 impl CfHandle for OptimisticTransactionDB<MultiThreaded> {
     #[inline(always)]
     fn subspace_handle(&self, subspace: u8) -> Arc<BoundColumnFamily<'_>> {
-        let subspace = &[subspace];
-        self.cf_handle(unsafe { std::str::from_utf8_unchecked(subspace) })
-            .unwrap()
+        self.cf_handle(crate::subspace_name(subspace)).unwrap()
     }
 }
 

@@ -65,7 +65,7 @@ impl RocksDbStore {
         // Counters
         for subspace in [SUBSPACE_COUNTER, SUBSPACE_QUOTA, SUBSPACE_IN_MEMORY_COUNTER] {
             cfs.push(ColumnFamilyDescriptor::new(
-                std::str::from_utf8(&[subspace]).unwrap(),
+                crate::subspace_name(subspace),
                 cf_options(CfProfile::Counter, &cache, write_buffer_size),
             ));
         }
@@ -105,7 +105,7 @@ impl RocksDbStore {
             (LEGACY_SUBSPACE_BITMAP_TAG, CfProfile::Scan),
         ] {
             cfs.push(ColumnFamilyDescriptor::new(
-                std::str::from_utf8(&[subspace]).unwrap(),
+                crate::subspace_name(subspace),
                 cf_options(profile, &cache, write_buffer_size),
             ));
         }

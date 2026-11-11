@@ -25,7 +25,7 @@ impl PostgresStore {
             let s = conn
                 .prepare_cached(&format!(
                     "SELECT v FROM {} WHERE k = $1",
-                    char::from(key.subspace())
+                    crate::subspace_name(key.subspace())
                 ))
                 .await
                 .map_err(into_error)?;
@@ -61,7 +61,7 @@ impl PostgresStore {
             let s = conn
                 .prepare_cached(&format!(
                     "SELECT k, v FROM {} WHERE k = ANY($1)",
-                    char::from(subspace)
+                    crate::subspace_name(subspace)
                 ))
                 .await
                 .map_err(into_error)?;
@@ -90,7 +90,7 @@ impl PostgresStore {
             let s = conn
                 .prepare_cached(&format!(
                     "SELECT 1 FROM {} WHERE k = $1",
-                    char::from(key.subspace())
+                    crate::subspace_name(key.subspace())
                 ))
                 .await
                 .map_err(into_error)?;
@@ -110,7 +110,7 @@ impl PostgresStore {
         mut cb: impl for<'x> FnMut(&'x [u8], &'x [u8]) -> trc::Result<bool> + Sync + Send,
     ) -> trc::Result<()> {
         let conn = self.conn_pool.get().await.map_err(into_pool_error)?;
-        let table = char::from(params.begin.subspace());
+        let table = crate::subspace_name(params.begin.subspace());
         let begin = params.begin.serialize(0);
         let end = params.end.serialize(0);
         let keys = if params.values { "k, v" } else { "k" };
@@ -230,7 +230,7 @@ impl PostgresStore {
         key: impl Into<ValueKey<ValueClass>> + Sync + Send,
     ) -> trc::Result<i64> {
         let key = key.into();
-        let table = char::from(key.subspace());
+        let table = crate::subspace_name(key.subspace());
         let key = key.serialize(0);
 
         let conn = self.conn_pool.get().await.map_err(into_pool_error)?;

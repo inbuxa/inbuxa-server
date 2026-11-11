@@ -74,8 +74,7 @@ impl RocksDbStore {
         let db = self.db.clone();
         self.spawn_worker(move || {
             db.delete_range_cf(
-                &db.cf_handle(std::str::from_utf8(&[from.subspace()]).unwrap())
-                    .unwrap(),
+                &db.cf_handle(crate::subspace_name(from.subspace())).unwrap(),
                 from.serialize(0),
                 to.serialize(0),
             )
@@ -88,9 +87,7 @@ impl RocksDbStore {
         let db = self.db.clone();
         self.spawn_worker(move || {
             for subspace in [SUBSPACE_QUOTA, SUBSPACE_COUNTER, SUBSPACE_IN_MEMORY_COUNTER] {
-                let cf = db
-                    .cf_handle(std::str::from_utf8(&[subspace]).unwrap())
-                    .unwrap();
+                let cf = db.cf_handle(crate::subspace_name(subspace)).unwrap();
 
                 let mut delete_keys = Vec::new();
 
@@ -174,7 +171,10 @@ impl RocksDBTransaction<'_, '_> {
             .transaction_opt(&WriteOptions::default(), &self.txn_opts);
 
         if has_changes {
-            let cf = self.db.cf_handle("n").unwrap();
+            let cf = self
+                .db
+                .cf_handle(crate::subspace_name(crate::SUBSPACE_COUNTER))
+                .unwrap();
             for &account_id in self.batch.changes.keys() {
                 let key = ValueClass::ChangeId.serialize(account_id, 0, 0, 0);
                 let change_id = txn

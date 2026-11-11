@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use super::{SqliteStore, into_error};
@@ -19,7 +21,7 @@ impl SqliteStore {
             let mut result = conn
                 .prepare_cached(&format!(
                     "SELECT v FROM {} WHERE k = ?",
-                    char::from(key.subspace())
+                    crate::subspace_name(key.subspace())
                 ))
                 .map_err(into_error)?;
             let key = key.serialize(0);
@@ -41,7 +43,7 @@ impl SqliteStore {
             let mut result = conn
                 .prepare_cached(&format!(
                     "SELECT 1 FROM {} WHERE k = ?",
-                    char::from(key.subspace())
+                    crate::subspace_name(key.subspace())
                 ))
                 .map_err(into_error)?;
             let key = key.serialize(0);
@@ -62,7 +64,7 @@ impl SqliteStore {
         let manager = self.conn_pool.clone();
         self.spawn_worker(move || {
             let conn = manager.get().map_err(into_error)?;
-            let table = char::from(params.begin.subspace());
+            let table = crate::subspace_name(params.begin.subspace());
             let begin = params.begin.serialize(0);
             let end = params.end.serialize(0);
             let keys = if params.values { "k, v" } else { "k" };
@@ -132,7 +134,7 @@ impl SqliteStore {
         key: impl Into<ValueKey<ValueClass>> + Sync + Send,
     ) -> trc::Result<i64> {
         let key = key.into();
-        let table = char::from(key.subspace());
+        let table = crate::subspace_name(key.subspace());
         let key = key.serialize(0);
         let manager = self.conn_pool.clone();
         self.spawn_worker(move || {

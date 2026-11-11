@@ -73,7 +73,7 @@ impl SqliteStore {
                     Operation::Value { class, op } => {
                         let key = class.serialize(account_id, collection, document_id, 0);
                         let subspace = class.subspace(collection);
-                        let table = char::from(subspace);
+                        let table = crate::subspace_name(subspace);
 
                         match op {
                             ValueOp::Set(value) => {
@@ -271,7 +271,7 @@ impl SqliteStore {
                         assert_value,
                     } => {
                         let key = class.serialize(account_id, collection, document_id, 0);
-                        let table = char::from(class.subspace(collection));
+                        let table = crate::subspace_name(class.subspace(collection));
 
                         let matches = trx
                             .prepare_cached(&format!("SELECT v FROM {} WHERE k = ?", table))
@@ -306,12 +306,15 @@ impl SqliteStore {
         self.spawn_worker(move || {
             let conn = manager.get().map_err(into_error)?;
             for subspace in [SUBSPACE_QUOTA, SUBSPACE_COUNTER, SUBSPACE_IN_MEMORY_COUNTER] {
-                conn.prepare_cached(&format!("DELETE FROM {} WHERE v = 0", char::from(subspace),))
-                    .map_err(into_error)
-                    .caused_by(trc::location!())?
-                    .execute([])
-                    .map_err(into_error)
-                    .caused_by(trc::location!())?;
+                conn.prepare_cached(&format!(
+                    "DELETE FROM {} WHERE v = 0",
+                    crate::subspace_name(subspace),
+                ))
+                .map_err(into_error)
+                .caused_by(trc::location!())?
+                .execute([])
+                .map_err(into_error)
+                .caused_by(trc::location!())?;
             }
 
             Ok(())
@@ -326,7 +329,7 @@ impl SqliteStore {
             let conn = manager.get().map_err(into_error)?;
             conn.prepare_cached(&format!(
                 "DELETE FROM {} WHERE e <= ?",
-                char::from(SUBSPACE_IN_MEMORY_COUNTER)
+                crate::subspace_name(SUBSPACE_IN_MEMORY_COUNTER)
             ))
             .map_err(into_error)
             .caused_by(trc::location!())?
@@ -345,7 +348,7 @@ impl SqliteStore {
 
             conn.prepare_cached(&format!(
                 "DELETE FROM {} WHERE k >= ? AND k < ?",
-                char::from(from.subspace()),
+                crate::subspace_name(from.subspace()),
             ))
             .map_err(into_error)
             .caused_by(trc::location!())?

@@ -127,7 +127,7 @@ impl MysqlStore {
                 SUBSPACE_TELEMETRY_SPAN,
                 SUBSPACE_TELEMETRY_METRIC,
             ] {
-                let table = char::from(table);
+                let table = crate::subspace_name(table);
                 conn.query_drop(format!(
                     "CREATE TABLE IF NOT EXISTS {table} (
                         k VARBINARY(255) NOT NULL,
@@ -145,13 +145,13 @@ impl MysqlStore {
                     v LONGBLOB NOT NULL,
                     PRIMARY KEY (k)
                 ) ENGINE=InnoDB",
-                char::from(SUBSPACE_BLOBS),
+                crate::subspace_name(SUBSPACE_BLOBS),
             ))
             .await
             .map_err(into_error)?;
 
             for table in [SUBSPACE_INDEXES, SUBSPACE_REGISTRY_IDX] {
-                let table = char::from(table);
+                let table = crate::subspace_name(table);
                 conn.query_drop(format!(
                     "CREATE TABLE IF NOT EXISTS {table} (
                         k BLOB,
@@ -169,7 +169,7 @@ impl MysqlStore {
                     v BIGINT NOT NULL DEFAULT 0,
                     PRIMARY KEY (k)
                 ) ENGINE=InnoDB",
-                    char::from(table)
+                    crate::subspace_name(table)
                 ))
                 .await
                 .map_err(into_error)?;
@@ -179,7 +179,7 @@ impl MysqlStore {
             // row. MySQL has no ADD COLUMN IF NOT EXISTS, so look first, and
             // take "duplicate column" from a node starting at the same time
             // as done.
-            let table = char::from(SUBSPACE_IN_MEMORY_COUNTER).to_string();
+            let table = crate::subspace_name(SUBSPACE_IN_MEMORY_COUNTER).to_string();
             let has_expiry = conn
                 .exec_first::<u8, _, _>(
                     concat!(

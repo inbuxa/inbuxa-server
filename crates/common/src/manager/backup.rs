@@ -110,7 +110,7 @@ impl Core {
         let store = self.storage.data.clone();
         let blob_store = self.storage.blob.clone();
         let (handle, writer) = spawn_writer(
-            dest.join(format!("subspace_{}", char::from(subspace))),
+            dest.join(format!("subspace_{}", store::subspace_name(subspace))),
             subspace,
             schema_version,
         );
@@ -175,7 +175,7 @@ impl Core {
     fn backup_subspace(&self, dest: &Path, subspace: u8, schema_version: u32) -> TaskHandle {
         let store = self.storage.data.clone();
         let (handle, writer) = spawn_writer(
-            dest.join(format!("subspace_{}", char::from(subspace))),
+            dest.join(format!("subspace_{}", store::subspace_name(subspace))),
             subspace,
             schema_version,
         );
