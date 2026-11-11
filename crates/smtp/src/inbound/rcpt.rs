@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
@@ -217,6 +219,23 @@ impl<T: SessionStream> Session<T> {
             }
             Ok(RcptResolution::Expand(members)) => {
                 rcpt_members = Some(members);
+            }
+            // inbuxa (#373): DMARC and TLS reports go to postmaster@ (or
+            // whatever the report addresses say) on every domain, and an admin
+            // shouldn't need an account for each. Take them from senders who
+            // haven't signed in; DATA reads the report and drops the address.
+            Ok(RcptResolution::UnknownRecipient)
+                if !self.is_authenticated()
+                    && self
+                        .server
+                        .core
+                        .smtp
+                        .report
+                        .analysis
+                        .is_report_address(&rcpt.address_lcase) =>
+            {
+                let address = rcpt.address_lcase.clone();
+                self.data.report_only_rcpts.push(address);
             }
             Ok(RcptResolution::UnknownRecipient) => {
                 trc::event!(
