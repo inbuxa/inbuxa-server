@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use ahash::{AHashMap, AHashSet};
@@ -145,6 +147,7 @@ impl EmailConfig {
         }
 
         // Parse default folders
+        let configured_folders = !email.default_folders.is_empty();
         let mut default_folders = Vec::new();
         let mut shared_folder = "Shared Folders".to_string();
         for (special_use, folder) in email.default_folders {
@@ -192,6 +195,18 @@ impl EmailConfig {
                     create: true,
                 });
             }
+        }
+        // INBUXA: with no folder list configured, new accounts also get an
+        // Archive folder, which webmail and most clients expect (#374). A
+        // configured list is the admin's choice and gets only the five above.
+        if !configured_folders {
+            default_folders.push(DefaultFolder {
+                name: "Archive".to_string(),
+                aliases: Vec::new(),
+                special_use: SpecialUse::Archive,
+                subscribe: true,
+                create: true,
+            });
         }
 
         // Search Index settings

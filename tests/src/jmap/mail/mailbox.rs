@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::utils::server::TestServer;
@@ -21,6 +23,45 @@ use types::id::Id;
 
 pub async fn test(test: &TestServer) {
     println!("Running Mailbox tests...");
+
+    // INBUXA (#374): with no default folders configured, a new account gets
+    // the five system folders plus Archive.
+    let fresh = test
+        .create_user_account(
+            "admin",
+            "archive-default@example.com",
+            "these_pretzels_are_making_me_thirsty",
+            &[],
+            "Archive default",
+        )
+        .await;
+    let fresh_client = fresh.jmap_client().await;
+    let mut request = fresh_client.build();
+    request
+        .get_mailbox()
+        .properties([mailbox::Property::Name, mailbox::Property::Role]);
+    let mut folders = request
+        .send_get_mailbox()
+        .await
+        .unwrap()
+        .take_list()
+        .into_iter()
+        .map(|m| (m.role(), m.name().unwrap_or_default().to_string()))
+        .collect::<Vec<_>>();
+    folders.sort_by_key(|(_, name)| name.clone());
+    assert_eq!(
+        folders,
+        [
+            (Role::Archive, "Archive".to_string()),
+            (Role::Trash, "Deleted Items".to_string()),
+            (Role::Drafts, "Drafts".to_string()),
+            (Role::Inbox, "Inbox".to_string()),
+            (Role::Junk, "Junk Mail".to_string()),
+            (Role::Sent, "Sent Items".to_string()),
+        ]
+    );
+    test.account("admin").destroy_account(fresh).await;
+
     let account = test.account("admin@example.com");
     let client = account.jmap_client().await;
 
