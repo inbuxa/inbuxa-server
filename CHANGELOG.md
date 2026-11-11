@@ -15,6 +15,41 @@ https://github.com/inbuxa/inbuxa-server/security/advisories.
 Every version PR adds that version's entry here. CI refuses a version this
 file has no entry for (`tools/release/version.py --changelog`).
 
+## [27.1-rc.20] - 2026-11-11
+
+The audit log, the journal, legal holds and undelete's notes move to tables
+of their own.
+
+### Changed
+- Store layout version 3. The audit log, the journal, legal holds and
+  undelete's notes move out of the settings table into tables of their own
+  (column families on RocksDB): `ib_audit`, `ib_journal`, `ib_holds` and
+  `ib_undelete`. The first node to start copies them, checks the copy row
+  for row against the original, and only then removes the originals. A run
+  that's cut short picks up where it stopped. See
+  https://docs.inbuxa.org/install/updating/#store-layout (#368)
+- Exports and backups have a `compliance` family for the same data, on by
+  default. Before this release it travelled with `registry`, so
+  `EXPORT_TYPES=registry` now copies the settings without it. See
+  https://docs.inbuxa.org/run/backup/ (#368)
+- Relayed inbound mail follows the settings in force now. A relay link judged
+  its messages with the settings it had when it connected, so a change to a
+  domain's directory, the RCPT and DATA rules, the spam filter or sender
+  authentication didn't reach mail arriving through a relay until the link
+  reconnected. (#366, #367)
+- A recipient refused because a domain's LDAP or SQL directory had no answer
+  for it is logged at info level, as `smtp.directory-no-answer`, with the
+  reason and the filter or query that ran. (#364, #365)
+
+### Before you upgrade
+- This upgrade can't roll. Stop every node, start one on 27.1-rc.20 and wait
+  for "Upgraded the store layout to version 3" in its log, then start the
+  others. Mail is down for those few minutes.
+- Back up the data store first. An older release refuses the store
+  afterwards (on RocksDB it can't open it at all), so going back means
+  restoring that backup.
+- Run this with inbuxa-admin 27.1-rc.13 and inbuxa-webmail 27.1-rc.3.
+
 ## [27.1-rc.19] - 2026-11-10
 
 Once a blob store change is settled, the server can clean up the old store.
