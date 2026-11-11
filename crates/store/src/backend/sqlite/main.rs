@@ -69,6 +69,11 @@ impl SqliteStore {
             SUBSPACE_DELETED_ITEMS,
             SUBSPACE_SPAM_SAMPLES,
             crate::SUBSPACE_INBUXA, // inbuxa: masked email
+            // inbuxa: SL-16: the fork's large data, from layout version 3
+            crate::SUBSPACE_AUDIT,
+            crate::SUBSPACE_JOURNAL,
+            crate::SUBSPACE_HOLDS,
+            crate::SUBSPACE_UNDELETE,
             SUBSPACE_BLOB_LINK,
             SUBSPACE_IN_MEMORY_VALUE,
             SUBSPACE_PROPERTY,
@@ -85,7 +90,7 @@ impl SqliteStore {
             SUBSPACE_SEARCH_INDEX,
             SUBSPACE_DIRECTORY,
         ] {
-            let table = char::from(table);
+            let table = crate::subspace_name(table);
             conn.execute(
                 &format!(
                     "CREATE TABLE IF NOT EXISTS {table} (
@@ -99,7 +104,7 @@ impl SqliteStore {
         }
 
         for table in [SUBSPACE_INDEXES, SUBSPACE_REGISTRY_IDX] {
-            let table = char::from(table);
+            let table = crate::subspace_name(table);
             conn.execute(
                 &format!(
                     "CREATE TABLE IF NOT EXISTS {table} (
@@ -118,7 +123,7 @@ impl SqliteStore {
                     k BLOB PRIMARY KEY,
                     v INTEGER NOT NULL DEFAULT 0
                 )",
-                    char::from(table)
+                    crate::subspace_name(table)
                 ),
                 [],
             )
@@ -126,7 +131,7 @@ impl SqliteStore {
         }
 
         // inbuxa: SL-10: in-memory counters keep their expiry in their row
-        let table = char::from(SUBSPACE_IN_MEMORY_COUNTER);
+        let table = crate::subspace_name(SUBSPACE_IN_MEMORY_COUNTER);
         let has_expiry = conn
             .prepare(&format!(
                 "SELECT 1 FROM pragma_table_info('{table}') WHERE name = 'e'"

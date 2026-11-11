@@ -236,7 +236,7 @@ impl PostgresStore {
                 Operation::Value { class, op } => {
                     let key = class.serialize(account_id, collection, document_id, 0);
                     let subspace = class.subspace(collection);
-                    let table = char::from(subspace);
+                    let table = crate::subspace_name(subspace);
 
                     match op {
                         ValueOp::Set(value) => {
@@ -491,7 +491,7 @@ impl PostgresStore {
                 } => {
                     pipeline.flush().await?;
                     let key = class.serialize(account_id, collection, document_id, 0);
-                    let table = char::from(class.subspace(collection));
+                    let table = crate::subspace_name(class.subspace(collection));
 
                     let s = trx
                         .prepare_cached(&format!("SELECT v FROM {} WHERE k = $1 FOR UPDATE", table))
@@ -526,7 +526,7 @@ impl PostgresStore {
         let limit = self.timeouts.maintenance;
         let result = tokio::time::timeout(limit, async {
             for subspace in [SUBSPACE_QUOTA, SUBSPACE_COUNTER, SUBSPACE_IN_MEMORY_COUNTER] {
-                purge_table(&conn, char::from(subspace)).await?;
+                purge_table(&conn, crate::subspace_name(subspace)).await?;
             }
 
             Ok(())
@@ -543,7 +543,7 @@ impl PostgresStore {
             let s = conn
                 .prepare_cached(&format!(
                     "DELETE FROM {} WHERE e <= $1",
-                    char::from(SUBSPACE_IN_MEMORY_COUNTER)
+                    crate::subspace_name(SUBSPACE_IN_MEMORY_COUNTER)
                 ))
                 .await
                 .map_err(into_error)?;
@@ -553,11 +553,42 @@ impl PostgresStore {
         bounded(conn, result, limit)
     }
 
+    /// inbuxa: SL-17: copies the rows from `from` up to `to` into subspace
+    /// `dest`, without their first `strip` bytes, in one statement on the
+    /// server. A row already there is overwritten, so a copy can run again.
+    pub(crate) async fn copy_range(
+        &self,
+        from: impl Key,
+        to: impl Key,
+        dest: u8,
+        strip: usize,
+    ) -> trc::Result<u64> {
+        let conn = self.conn_pool.get().await.map_err(into_pool_error)?;
+        let limit = self.timeouts.maintenance;
+        let result = tokio::time::timeout(limit, async {
+            let table = crate::subspace_name(from.subspace());
+            let dest = crate::subspace_name(dest);
+            let from = from.serialize(0);
+            let to = to.serialize(0);
+            let s = conn
+                .prepare_cached(&format!(
+                    "INSERT INTO {dest} (k, v) SELECT substring(k from {}), v FROM {table} \
+                     WHERE k >= $1 AND k < $2 ON CONFLICT (k) DO UPDATE SET v = EXCLUDED.v",
+                    strip + 1
+                ))
+                .await
+                .map_err(into_error)?;
+            conn.execute(&s, &[&from, &to]).await.map_err(into_error)
+        })
+        .await;
+        bounded(conn, result, limit)
+    }
+
     pub(crate) async fn delete_range(&self, from: impl Key, to: impl Key) -> trc::Result<()> {
         let conn = self.conn_pool.get().await.map_err(into_pool_error)?;
         let limit = self.timeouts.maintenance;
         let result = tokio::time::timeout(limit, async {
-            let table = char::from(from.subspace());
+            let table = crate::subspace_name(from.subspace());
             let mut from = from.serialize(0);
             let to = to.serialize(0);
 
@@ -619,7 +650,7 @@ impl PostgresStore {
     }
 }
 
-async fn purge_table(conn: &Object, table: char) -> trc::Result<()> {
+async fn purge_table(conn: &Object, table: &str) -> trc::Result<()> {
     let s = conn
         .prepare_cached(&format!("DELETE FROM {table} WHERE v = 0"))
         .await

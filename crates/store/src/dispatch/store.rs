@@ -378,6 +378,47 @@ impl Store {
         .caused_by(trc::location!())
     }
 
+    /// inbuxa: SL-17: on SQL, copies the rows from `from` up to `to` into
+    /// subspace `dest` without their first `strip` bytes, in one statement on
+    /// the server, and returns how many it wrote. None where the backend has
+    /// no such statement: the caller copies them itself.
+    #[allow(unused_variables)]
+    pub async fn copy_range(
+        &self,
+        from: impl Key,
+        to: impl Key,
+        dest: u8,
+        strip: usize,
+    ) -> trc::Result<Option<u64>> {
+        match self {
+            #[cfg(feature = "sqlite")]
+            Self::SQLite(store) => store.copy_range(from, to, dest, strip).await.map(Some),
+            #[cfg(feature = "postgres")]
+            Self::PostgreSQL(store) => store.copy_range(from, to, dest, strip).await.map(Some),
+            #[cfg(feature = "mysql")]
+            Self::MySQL(store) => store.copy_range(from, to, dest, strip).await.map(Some),
+            Self::Replicated(store) => crate::sql_backend!(
+                &store.primary,
+                db => db.copy_range(from, to, dest, strip).await
+            )
+            .map(Some),
+            _ => Ok(None),
+        }
+        .caused_by(trc::location!())
+    }
+
+    /// inbuxa: SL-20: drops the legacy `v` and `c` column families on
+    /// RocksDB, which nothing writes. Elsewhere they don't exist. Returns
+    /// how many it dropped.
+    pub async fn drop_legacy_subspaces(&self) -> trc::Result<u64> {
+        match self {
+            #[cfg(feature = "rocks")]
+            Self::RocksDb(store) => store.drop_legacy_subspaces().await,
+            _ => Ok(0),
+        }
+        .caused_by(trc::location!())
+    }
+
     pub async fn delete_range(&self, from: impl Key, to: impl Key) -> trc::Result<()> {
         match self {
             #[cfg(feature = "sqlite")]

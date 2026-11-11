@@ -137,7 +137,7 @@ impl MysqlStore {
                 Operation::Value { class, op } => {
                     let key = class.serialize(account_id, collection, document_id, 0);
                     let subspace = class.subspace(collection);
-                    let table = char::from(subspace);
+                    let table = crate::subspace_name(subspace);
 
                     match op {
                         ValueOp::Set(value) => {
@@ -393,7 +393,7 @@ impl MysqlStore {
                     assert_value,
                 } => {
                     let key = class.serialize(account_id, collection, document_id, 0);
-                    let table = char::from(class.subspace(collection));
+                    let table = crate::subspace_name(class.subspace(collection));
 
                     let s = trx
                         .prep(format!("SELECT v FROM {} WHERE k = ? FOR UPDATE", table))
@@ -423,7 +423,7 @@ impl MysqlStore {
         let limit = self.timeouts.maintenance;
         let result = tokio::time::timeout(limit, async {
             for subspace in [SUBSPACE_QUOTA, SUBSPACE_COUNTER, SUBSPACE_IN_MEMORY_COUNTER] {
-                purge_table(&mut conn, char::from(subspace)).await?;
+                purge_table(&mut conn, crate::subspace_name(subspace)).await?;
             }
 
             Ok(())
@@ -440,7 +440,7 @@ impl MysqlStore {
             conn.exec_drop(
                 format!(
                     "DELETE FROM {} WHERE e <= ?",
-                    char::from(SUBSPACE_IN_MEMORY_COUNTER)
+                    crate::subspace_name(SUBSPACE_IN_MEMORY_COUNTER)
                 ),
                 (now as i64,),
             )
@@ -452,11 +452,43 @@ impl MysqlStore {
         bounded(conn, result, limit)
     }
 
+    /// inbuxa: SL-17: copies the rows from `from` up to `to` into subspace
+    /// `dest`, without their first `strip` bytes, in one statement on the
+    /// server. A row already there is overwritten, so a copy can run again.
+    pub(crate) async fn copy_range(
+        &self,
+        from: impl Key,
+        to: impl Key,
+        dest: u8,
+        strip: usize,
+    ) -> trc::Result<u64> {
+        let mut conn = self.conn().await?;
+        let limit = self.timeouts.maintenance;
+        let result = tokio::time::timeout(limit, async {
+            let table = crate::subspace_name(from.subspace());
+            let dest = crate::subspace_name(dest);
+            let from = from.serialize(0);
+            let to = to.serialize(0);
+            let s = conn
+                .prep(format!(
+                    "INSERT INTO {dest} (k, v) SELECT SUBSTRING(k, {}), v FROM {table} \
+                     WHERE k >= ? AND k < ? ON DUPLICATE KEY UPDATE v = VALUES(v)",
+                    strip + 1
+                ))
+                .await
+                .map_err(into_error)?;
+            conn.exec_drop(&s, (&from, &to)).await.map_err(into_error)?;
+            Ok(conn.affected_rows())
+        })
+        .await;
+        bounded(conn, result, limit)
+    }
+
     pub(crate) async fn delete_range(&self, from: impl Key, to: impl Key) -> trc::Result<()> {
         let mut conn = self.conn().await?;
         let limit = self.timeouts.maintenance;
         let result = tokio::time::timeout(limit, async {
-            let table = char::from(from.subspace());
+            let table = crate::subspace_name(from.subspace());
             let mut from = from.serialize(0);
             let to = to.serialize(0);
 
@@ -518,7 +550,7 @@ impl MysqlStore {
     }
 }
 
-async fn purge_table(conn: &mut Conn, table: char) -> trc::Result<()> {
+async fn purge_table(conn: &mut Conn, table: &str) -> trc::Result<()> {
     let s = conn
         .prep(format!("DELETE FROM {table} WHERE v = 0"))
         .await

@@ -127,11 +127,56 @@ before January, else 27.7. Release candidates may carry it before then.
   PostgreSQL the copy is done server-side (`INSERT … SELECT`).
 - **SL-18.** Not rolling-safe (SL-6). On RocksDB an old binary can't open a
   store with column families it doesn't know.
-- **SL-19.** The moved data travels in exports in a family of its own,
-  included by default, so a configuration export can leave it out. Importing
+- **SL-19.** The moved data travels in exports in a family of its own
+  (`compliance`), included by default, so a configuration export can leave
+  it out. Importing
   an export taken at version 1 or 2 runs the steps after the import.
 - **SL-20.** The legacy `v` and `c` column families, which nothing writes,
   are dropped in the same step.
+
+#### The keys in `_` and their owners (SL-16)
+
+Every key in `_` starts with a byte naming its feature. The step lists the
+two-byte prefixes in `_`, reading one key per prefix, and stops on any it
+can't place, before it writes anything. The table is `OWNERS` in
+`crates/migration/src/fork_subspaces.rs`.
+
+| First byte | Owner | At step 2 → 3 |
+|---|---|---|
+| `A` | AI limits | stays |
+| `B` | first boot defaults | stays |
+| `C` | account snapshots | stays |
+| `D` | deliverability reports | stays |
+| `E` | inbuxa relay | stays |
+| `F` | front ends | stays |
+| `G` | scheduled reports | stays |
+| `H` | legal holds (`h`, `o`, `e`) | moves to `ib_holds` (0x82) |
+| `I` | migrations | stays |
+| `J` | journal: entries (`e`, `c`, `p`, `t`, `x`, `h`, `f`), archive (`o`, `w`) | moves to `ib_journal` (0x81); the journals themselves (`j`) are settings and stay |
+| `K` | account locks | stays |
+| `L` | audit log (`e`, `t`, `o`, `h`, `f`) | moves to `ib_audit` (0x80); its settings (`s`) stay |
+| `M` | masked email | stays |
+| `P` | permissions and protocol policies | stays |
+| `Q` | acceptance records | stays |
+| `R` | mail flow rules | stays |
+| `S` | spam rules, scale-out storage, scheduled reports from 2026.10.6.2 | stays |
+| `T` | log files | stays |
+| `U` | undelete notes (`n`, `x`, `b`, `r`, `c`, `k`, `a`, `g`) | moves to `ib_undelete` (0x83) |
+| `V` | store checks, the layout mark (`Vs`), lease (`Vm`) and step progress (`Vt`) | stays |
+| `W` | blob store changes, the sharing policy | stays |
+
+A key moves without its first byte, so `Le` + node + seq becomes `e` + node
++ seq in `ib_audit`. A feature's settings stay in `_`, where a configuration
+export (`registry`) carries them. On prod on 2026-11-11, `_` held 9,629
+rows (3.2 MB), of which 6,813 were the audit log and none were journal,
+hold or undelete rows.
+
+The step copies each moving prefix (on SQL with one `INSERT … SELECT`), then
+checks every copy: the row count, and for the audit log's and journal's
+chain heads and floors the rows themselves. Only when every check passes
+does it write `Vt`, then delete the originals and drop `v` and `c`. A run
+that stopped while deleting copies what's left again and deletes it
+without checking again; a run that stopped before `Vt` starts over.
 
 ### Imports and checks
 

@@ -73,7 +73,7 @@ impl SqliteStore {
                     Operation::Value { class, op } => {
                         let key = class.serialize(account_id, collection, document_id, 0);
                         let subspace = class.subspace(collection);
-                        let table = char::from(subspace);
+                        let table = crate::subspace_name(subspace);
 
                         match op {
                             ValueOp::Set(value) => {
@@ -271,7 +271,7 @@ impl SqliteStore {
                         assert_value,
                     } => {
                         let key = class.serialize(account_id, collection, document_id, 0);
-                        let table = char::from(class.subspace(collection));
+                        let table = crate::subspace_name(class.subspace(collection));
 
                         let matches = trx
                             .prepare_cached(&format!("SELECT v FROM {} WHERE k = ?", table))
@@ -306,12 +306,15 @@ impl SqliteStore {
         self.spawn_worker(move || {
             let conn = manager.get().map_err(into_error)?;
             for subspace in [SUBSPACE_QUOTA, SUBSPACE_COUNTER, SUBSPACE_IN_MEMORY_COUNTER] {
-                conn.prepare_cached(&format!("DELETE FROM {} WHERE v = 0", char::from(subspace),))
-                    .map_err(into_error)
-                    .caused_by(trc::location!())?
-                    .execute([])
-                    .map_err(into_error)
-                    .caused_by(trc::location!())?;
+                conn.prepare_cached(&format!(
+                    "DELETE FROM {} WHERE v = 0",
+                    crate::subspace_name(subspace),
+                ))
+                .map_err(into_error)
+                .caused_by(trc::location!())?
+                .execute([])
+                .map_err(into_error)
+                .caused_by(trc::location!())?;
             }
 
             Ok(())
@@ -326,11 +329,40 @@ impl SqliteStore {
             let conn = manager.get().map_err(into_error)?;
             conn.prepare_cached(&format!(
                 "DELETE FROM {} WHERE e <= ?",
-                char::from(SUBSPACE_IN_MEMORY_COUNTER)
+                crate::subspace_name(SUBSPACE_IN_MEMORY_COUNTER)
             ))
             .map_err(into_error)
             .caused_by(trc::location!())?
             .execute([now as i64])
+            .map(|rows| rows as u64)
+            .map_err(into_error)
+            .caused_by(trc::location!())
+        })
+        .await
+    }
+
+    /// inbuxa: SL-17: copies the rows from `from` up to `to` into subspace
+    /// `dest`, without their first `strip` bytes, in one statement. A row
+    /// already there is overwritten, so a copy can run again.
+    pub(crate) async fn copy_range(
+        &self,
+        from: impl Key,
+        to: impl Key,
+        dest: u8,
+        strip: usize,
+    ) -> trc::Result<u64> {
+        let manager = self.conn_pool.clone();
+        self.spawn_worker(move || {
+            let conn = manager.get().map_err(into_error)?;
+            conn.prepare_cached(&format!(
+                "INSERT OR REPLACE INTO {} (k, v) SELECT substr(k, {}), v FROM {} WHERE k >= ? AND k < ?",
+                crate::subspace_name(dest),
+                strip + 1,
+                crate::subspace_name(from.subspace()),
+            ))
+            .map_err(into_error)
+            .caused_by(trc::location!())?
+            .execute([from.serialize(0), to.serialize(0)])
             .map(|rows| rows as u64)
             .map_err(into_error)
             .caused_by(trc::location!())
@@ -345,7 +377,7 @@ impl SqliteStore {
 
             conn.prepare_cached(&format!(
                 "DELETE FROM {} WHERE k >= ? AND k < ?",
-                char::from(from.subspace()),
+                crate::subspace_name(from.subspace()),
             ))
             .map_err(into_error)
             .caused_by(trc::location!())?

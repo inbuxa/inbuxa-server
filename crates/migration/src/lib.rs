@@ -18,6 +18,7 @@ use store::{
 use trc::AddContext;
 
 pub mod destroy;
+pub mod fork_subspaces;
 pub mod layout;
 pub mod v016;
 

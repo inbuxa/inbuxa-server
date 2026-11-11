@@ -4,7 +4,8 @@
  * SPDX-License-Identifier: AGPL-3.0-only
  */
 
-//! Reports on their way to an outside archive (JR-7). Keys, after `J`:
+//! Reports on their way to an outside archive (JR-7), in the journal's
+//! subspace (`store::SUBSPACE_JOURNAL`). Keys:
 //!
 //! - `o` + the report's queue id: what goes into the built-in journal if
 //!   the archive never takes the report, as JSON. Cleared once it's
@@ -12,10 +13,10 @@
 //! - `w` + journal id (u32): how often that journal's archive didn't take a
 //!   report, and the last time and reason, for the console's warning.
 
-use super::{FEATURE, Json, entries::Entry};
+use super::{Json, entries::Entry};
 use serde::{Deserialize as SerdeDeserialize, Serialize as SerdeSerialize};
 use store::{
-    SUBSPACE_INBUXA, Serialize, Store, ValueKey,
+    SUBSPACE_JOURNAL, Serialize, Store, ValueKey,
     write::{AnyClass, BatchBuilder, ValueClass},
 };
 use trc::AddContext;
@@ -44,12 +45,11 @@ pub struct Failures {
 }
 
 fn class(kind: u8, id: &[u8]) -> ValueClass {
-    let mut key = Vec::with_capacity(2 + id.len());
-    key.push(FEATURE);
+    let mut key = Vec::with_capacity(1 + id.len());
     key.push(kind);
     key.extend_from_slice(id);
     ValueClass::Any(AnyClass {
-        subspace: SUBSPACE_INBUXA,
+        subspace: SUBSPACE_JOURNAL,
         key,
     })
 }

@@ -40,6 +40,8 @@ pub(super) enum Family {
     Report = 6,
     Telemetry = 7,
     Tasks = 8,
+    // inbuxa: SL-19: the fork's large data (store layout version 3)
+    Compliance = 9,
 }
 
 type TaskHandle = (tokio::task::JoinHandle<()>, std::thread::JoinHandle<()>);
@@ -81,6 +83,7 @@ impl Core {
                 Family::Report,
                 Family::Telemetry,
                 Family::Tasks,
+                Family::Compliance,
             ]
             .into_iter()
             .collect();
@@ -110,7 +113,7 @@ impl Core {
         let store = self.storage.data.clone();
         let blob_store = self.storage.blob.clone();
         let (handle, writer) = spawn_writer(
-            dest.join(format!("subspace_{}", char::from(subspace))),
+            dest.join(format!("subspace_{}", store::subspace_name(subspace))),
             subspace,
             schema_version,
         );
@@ -175,7 +178,7 @@ impl Core {
     fn backup_subspace(&self, dest: &Path, subspace: u8, schema_version: u32) -> TaskHandle {
         let store = self.storage.data.clone();
         let (handle, writer) = spawn_writer(
-            dest.join(format!("subspace_{}", char::from(subspace))),
+            dest.join(format!("subspace_{}", store::subspace_name(subspace))),
             subspace,
             schema_version,
         );
@@ -342,13 +345,21 @@ impl Family {
                 // travel in this family and in `data`, so they ride along.
                 SUBSPACE_DELETED_ITEMS,
                 SUBSPACE_SPAM_SAMPLES,
-                store::SUBSPACE_INBUXA, // inbuxa: the fork's own data (masked email, undelete, policies)
+                store::SUBSPACE_INBUXA, // inbuxa: the fork's own settings and small records (masked email, policies)
             ],
             Family::Changelog => &[SUBSPACE_LOGS],
             Family::Queue => &[SUBSPACE_QUEUE_MESSAGE, SUBSPACE_QUEUE_EVENT],
             Family::Report => &[SUBSPACE_REPORT_OUT, SUBSPACE_REPORT_IN],
             Family::Telemetry => &[SUBSPACE_TELEMETRY_SPAN, SUBSPACE_TELEMETRY_METRIC],
             Family::Tasks => &[SUBSPACE_TASK_QUEUE],
+            // inbuxa: SL-19: in a family of its own, so a configuration
+            // export (`registry`) can leave out the audit log and journal
+            Family::Compliance => &[
+                store::SUBSPACE_AUDIT,
+                store::SUBSPACE_JOURNAL,
+                store::SUBSPACE_HOLDS,
+                store::SUBSPACE_UNDELETE,
+            ],
         }
     }
 
@@ -362,6 +373,7 @@ impl Family {
             "report" => Ok(Family::Report),
             "telemetry" => Ok(Family::Telemetry),
             "tasks" => Ok(Family::Tasks),
+            "compliance" => Ok(Family::Compliance),
             _ => Err(format!("Unknown family {}", family)),
         }
     }

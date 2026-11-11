@@ -12,9 +12,11 @@
 //! - [`report`]: the journal report around the untouched message (JR-3);
 //! - [`entries`]: the built-in journal and its chain (JR-5, JR-6, JR-13).
 //!
-//! Kept in the fork's subspace (`store::SUBSPACE_INBUXA`). Every key starts
-//! with `J`; journals are `j` + id (u32), as JSON. There are few, so they're
-//! read whole.
+//! Journals are settings, so they're kept in the fork's subspace
+//! (`store::SUBSPACE_INBUXA`), where a configuration export carries them:
+//! `J` + `j` + id (u32), as JSON. There are few, so they're read whole. What
+//! they journal has a subspace of its own (`store::SUBSPACE_JOURNAL`; see
+//! [`entries`] and [`archive`]).
 
 pub mod archive;
 pub mod entries;

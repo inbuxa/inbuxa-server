@@ -199,13 +199,28 @@ pub async fn test(test: &TestServer) {
         batch.set(
             ValueClass::Any(AnyClass {
                 subspace: SUBSPACE_INBUXA,
-                key: [b'U', b'x']
+                key: [b'M', b'm']
                     .into_iter()
                     .chain(item_id.to_be_bytes())
                     .collect(),
             }),
             random_bytes(32),
         );
+        // inbuxa: SL-19: the fork's large data, in the compliance family
+        for subspace in [
+            store::SUBSPACE_AUDIT,
+            store::SUBSPACE_JOURNAL,
+            store::SUBSPACE_HOLDS,
+            store::SUBSPACE_UNDELETE,
+        ] {
+            batch.set(
+                ValueClass::Any(AnyClass {
+                    subspace,
+                    key: [b'x'].into_iter().chain(item_id.to_be_bytes()).collect(),
+                }),
+                random_bytes(32),
+            );
+        }
     }
     db.write(batch.build_all()).await.unwrap();
 
@@ -243,11 +258,15 @@ pub async fn test(test: &TestServer) {
         SUBSPACE_DELETED_ITEMS,
         SUBSPACE_SPAM_SAMPLES,
         SUBSPACE_INBUXA,
+        store::SUBSPACE_AUDIT,
+        store::SUBSPACE_JOURNAL,
+        store::SUBSPACE_HOLDS,
+        store::SUBSPACE_UNDELETE,
     ] {
         assert!(
             snapshot.keys.iter().any(|k| k.subspace == subspace),
             "No test data in subspace {}",
-            char::from(subspace)
+            store::subspace_name(subspace)
         );
     }
 
@@ -286,11 +305,15 @@ pub async fn test(test: &TestServer) {
         SUBSPACE_DELETED_ITEMS,
         SUBSPACE_SPAM_SAMPLES,
         SUBSPACE_INBUXA,
+        store::SUBSPACE_AUDIT,
+        store::SUBSPACE_JOURNAL,
+        store::SUBSPACE_HOLDS,
+        store::SUBSPACE_UNDELETE,
     ] {
         assert!(
             imported.contains(&subspace),
             "Subspace {} was not exported",
-            char::from(subspace)
+            store::subspace_name(subspace)
         );
     }
 
@@ -383,7 +406,7 @@ async fn cross_backend(
                 source.get_counter(class()).await.unwrap(),
                 target.get_counter(class()).await.unwrap(),
                 "Counter mismatch in {} for {key:?}",
-                char::from(subspace)
+                store::subspace_name(subspace)
             );
         }
     }
@@ -510,6 +533,10 @@ impl Snapshot {
             (SUBSPACE_REPORT_IN, true),
             (SUBSPACE_DIRECTORY, true),
             (SUBSPACE_INBUXA, true),
+            (store::SUBSPACE_AUDIT, true),
+            (store::SUBSPACE_JOURNAL, true),
+            (store::SUBSPACE_HOLDS, true),
+            (store::SUBSPACE_UNDELETE, true),
         ] {
             if subspace == SUBSPACE_BLOBS && !with_blobs {
                 continue;
@@ -548,7 +575,7 @@ impl Snapshot {
             if !other.keys.contains(key) {
                 println!(
                     "Subspace {}, Key {:?} not found in restored snapshot",
-                    char::from(key.subspace),
+                    store::subspace_name(key.subspace),
                     key.key,
                 );
                 is_err = true;
@@ -558,7 +585,7 @@ impl Snapshot {
             if !self.keys.contains(key) {
                 println!(
                     "Subspace {}, Key {:?} not found in original snapshot",
-                    char::from(key.subspace),
+                    store::subspace_name(key.subspace),
                     key.key,
                 );
                 is_err = true;

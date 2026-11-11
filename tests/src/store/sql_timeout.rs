@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::utils::{server::TestServer, storage::build_data_store};
@@ -284,7 +286,7 @@ impl Backend {
     }
 
     fn populate_query(&self) -> String {
-        let table = char::from(SUBSPACE_PROPERTY);
+        let table = store::subspace_name(SUBSPACE_PROPERTY);
         let prefix = key_prefix();
         let padding = VALUE_SIZE - U32_LEN;
         let last = NUM_KEYS - 1;
@@ -308,7 +310,7 @@ impl Backend {
     }
 
     fn populate_counters_query(&self) -> String {
-        let table = char::from(SUBSPACE_COUNTER);
+        let table = store::subspace_name(SUBSPACE_COUNTER);
         let prefix = key_prefix();
         let last = NUM_KEYS - 1;
 
@@ -328,11 +330,14 @@ impl Backend {
     }
 
     fn purge_query(&self) -> String {
-        format!("DELETE FROM {} WHERE v = 0", char::from(SUBSPACE_COUNTER))
+        format!(
+            "DELETE FROM {} WHERE v = 0",
+            store::subspace_name(SUBSPACE_COUNTER)
+        )
     }
 
     fn count_counters_query(&self) -> String {
-        let table = char::from(SUBSPACE_COUNTER);
+        let table = store::subspace_name(SUBSPACE_COUNTER);
         match self {
             #[cfg(feature = "postgres")]
             Backend::Postgres => format!("SELECT COUNT(*) FROM {table} WHERE k >= $1 AND k <= $2"),
@@ -342,7 +347,7 @@ impl Backend {
     }
 
     fn scan_query(&self) -> String {
-        let table = char::from(SUBSPACE_PROPERTY);
+        let table = store::subspace_name(SUBSPACE_PROPERTY);
         match self {
             #[cfg(feature = "postgres")]
             Backend::Postgres => {
@@ -356,7 +361,7 @@ impl Backend {
     }
 
     fn delete_query(&self) -> String {
-        let table = char::from(SUBSPACE_PROPERTY);
+        let table = store::subspace_name(SUBSPACE_PROPERTY);
         match self {
             #[cfg(feature = "postgres")]
             Backend::Postgres => format!("DELETE FROM {table} WHERE k >= $1 AND k <= $2"),

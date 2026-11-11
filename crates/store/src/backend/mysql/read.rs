@@ -22,7 +22,7 @@ impl MysqlStore {
             let s = conn
                 .prep(format!(
                     "SELECT v FROM {} WHERE k = ?",
-                    char::from(key.subspace())
+                    crate::subspace_name(key.subspace())
                 ))
                 .await
                 .map_err(into_error)?;
@@ -49,7 +49,7 @@ impl MysqlStore {
             let s = conn
                 .prep(format!(
                     "SELECT 1 FROM {} WHERE k = ?",
-                    char::from(key.subspace())
+                    crate::subspace_name(key.subspace())
                 ))
                 .await
                 .map_err(into_error)?;
@@ -69,7 +69,7 @@ impl MysqlStore {
         mut cb: impl for<'x> FnMut(&'x [u8], &'x [u8]) -> trc::Result<bool> + Sync + Send,
     ) -> trc::Result<()> {
         let mut conn = self.conn().await?;
-        let table = char::from(params.begin.subspace());
+        let table = crate::subspace_name(params.begin.subspace());
         let begin = params.begin.serialize(0);
         let end = params.end.serialize(0);
         let keys = if params.values { "k, v" } else { "k" };
@@ -193,7 +193,7 @@ impl MysqlStore {
         key: impl Into<ValueKey<ValueClass>> + Sync + Send,
     ) -> trc::Result<i64> {
         let key = key.into();
-        let table = char::from(key.subspace());
+        let table = crate::subspace_name(key.subspace());
         let key = key.serialize(0);
         let mut conn = self.conn().await?;
         let limit = self.timeouts.query;
