@@ -35,8 +35,9 @@ use registry::{
         prelude::{ObjectType, Property},
         structs::{
             Certificate, CertificateManagement, DkimManagement, DnsManagement, Domain, Expression,
-            ExpressionMatch, MtaOutboundStrategy, MtaRoute, MtaRouteInbuxaRelay, PublicText,
-            PublicTextValue, SecretText, SecretTextValue, Tenant, TlsInternalReport, UserRoles,
+            ExpressionMatch, MtaOutboundStrategy, MtaRoute, MtaRouteInbuxaRelay, MtaStageData,
+            PublicText, PublicTextValue, SecretText, SecretTextValue, Tenant, TlsInternalReport,
+            UserRoles,
         },
     },
     types::{datetime::UTCDateTime, map::Map},
@@ -1069,6 +1070,39 @@ pub async fn link(test: &mut TestServer) {
     let reply = send_mail(smtp_port, "jane@example.com", &message("Live one", "")).await;
     assert!(reply.starts_with("250"), "{reply}");
     wait_for_mail(&jane, "Live one", 1).await;
+
+    // #366: a setting changed while the link is up applies to the next
+    // relayed message, without the link reconnecting
+    let max_hops = |hops: &str| MtaStageData {
+        max_received_headers: Expression {
+            else_: hops.into(),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    admin
+        .registry_update_setting(max_hops("3"), &[Property::MaxReceivedHeaders])
+        .await;
+    let five_hops =
+        "Received: from a.example by b.example; Thu, 29 Oct 2026 10:00:00 +0000\n".repeat(5);
+    let reply = send_mail(
+        smtp_port,
+        "jane@example.com",
+        &message("Five hops", &five_hops),
+    )
+    .await;
+    assert!(reply.starts_with("450 4.4.6"), "#366: {reply}");
+    admin
+        .registry_update_setting(max_hops("50"), &[Property::MaxReceivedHeaders])
+        .await;
+    let reply = send_mail(
+        smtp_port,
+        "jane@example.com",
+        &message("Five hops again", &five_hops),
+    )
+    .await;
+    assert!(reply.starts_with("250"), "#366: {reply}");
+    wait_for_mail(&jane, "Five hops again", 1).await;
 
     // Live: this server's refusal is the sender's reply, and the relay
     // keeps nothing

@@ -985,7 +985,7 @@ struct Sent {
 /// The relay linked: kept up to date until the link drops, the relay is
 /// turned off, moved or joined again, or this node stops.
 async fn session(
-    server: &Server,
+    link_server: &Server,
     instance: &Arc<ServerInstance>,
     relay: &Relay,
     keys: &DownstreamKeys,
@@ -993,6 +993,7 @@ async fn session(
     woken: &mut watch::Receiver<u64>,
     status: &mut StatusWriter,
 ) -> Result<(), LinkError> {
+    let server = link_server;
     let data = server.store();
     let pin = relay.join.relay_pin;
     let dialer = Arc::new(Dialer::new(relay, cert, pin)?);
@@ -1044,6 +1045,10 @@ async fn session(
     ping.set_missed_tick_behavior(MissedTickBehavior::Delay);
     ping.reset();
     loop {
+        // inbuxa: #366: each pass sees the settings in force now; a reload
+        // swaps the shared core while the link stays up
+        let current = link_server.inner.build_server();
+        let server = &current;
         tokio::select! {
             frame = ws.frame() => {
                 let frame = frame?;
@@ -1548,8 +1553,10 @@ impl Taker {
             {
                 continue;
             }
+            // inbuxa: #366: the settings in force now, not when the link
+            // connected: a reload swaps the shared core under a live link
             let job = Job {
-                server: self.server.clone(),
+                server: self.server.inner.build_server(),
                 instance: self.instance.clone(),
                 dialer: self.dialer.clone(),
                 relay_id: self.relay_id,
