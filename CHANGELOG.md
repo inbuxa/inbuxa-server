@@ -15,6 +15,35 @@ https://github.com/inbuxa/inbuxa-server/security/advisories.
 Every version PR adds that version's entry here. CI refuses a version this
 file has no entry for (`tools/release/version.py --changelog`).
 
+## [27.1-rc.22] - 2026-11-13
+
+Fixes from the community: Check now reads fresh DNS, Automatic DNS publishes
+newly enabled record types, and the dashboard counts DMARC warnings the way
+the reports page does.
+
+### Added
+- Release downloads come with `SHA256SUMS.minisig`, a minisign signature of
+  `SHA256SUMS`, so a download can be checked against the published key. (#386)
+
+### Changed
+- The container image bundles inbuxa-migrate 27.1-rc.14: upstream v1.0.16's
+  Exchange EWS and Graph fixes, and the POP3, Fastmail, Zoho and Zimbra
+  sources. (#393)
+
+### Fixed
+- Deliverability: Check now used the same cached DNS answers as mail traffic,
+  so a check right after fixing reverse DNS or adding a DMARC record could
+  still show the old state. A manual check now skips the caches. The daily
+  check and SMTP keep them. Thanks to Stefan. (#387, fixes #385)
+- Automatic DNS: adding a record type to `publishRecords` on a domain already
+  set to Automatic queued no DNS task, so the new records were never
+  published until the domain was switched to Manual and back. The save now
+  publishes them. Thanks to Stefan. (#389, fixes #372)
+- DMARC reports: the dashboard marked a report "with warnings" when any row
+  failed SPF or DKIM, so forwarded mail that passed DMARC on DKIM counted as a
+  warning. A warning now means a row failed DMARC, as on the reports page.
+  (#392, fixes #391)
+
 ## [27.1-rc.21] - 2026-11-11
 
 DMARC and TLS reports reach the server on every domain without a postmaster
