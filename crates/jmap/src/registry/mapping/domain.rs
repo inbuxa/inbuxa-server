@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::registry::mapping::{
@@ -98,55 +100,7 @@ pub(crate) async fn validate_domain(
         }
     }
 
-    // Schedule DNS update task
-    let will_trigger_dkim = matches!(domain.dkim_management, DkimManagement::Automatic(_))
-        && old_domain
-            .is_none_or(|old| !matches!(old.dkim_management, DkimManagement::Automatic(_)));
-    let will_schedule_dkim = !will_trigger_dkim
-        && matches!(domain.dkim_management, DkimManagement::Automatic(_))
-        && publishes_dkim(domain)
-        && old_domain.is_some_and(|old| !publishes_dkim(old));
-    let will_trigger_acme = if let DnsManagement::Automatic(details) = &domain.dns_management
-        && old_domain.is_none_or(|old| !matches!(old.dns_management, DnsManagement::Automatic(_)))
-    {
-        let on_success_renew_certificate = old_domain.is_none()
-            && matches!(
-                domain.certificate_management,
-                CertificateManagement::Automatic(_)
-            );
-        tasks.push(Task::DnsManagement(TaskDnsManagement {
-            domain_id: Id::default(),
-            update_records: Map::new(
-                details
-                    .publish_records
-                    .iter()
-                    .filter(|&&r| r != DnsRecordType::Dkim || !will_trigger_dkim)
-                    .copied()
-                    .collect(),
-            ),
-            on_success_renew_certificate,
-            status: TaskStatus::now(),
-        }));
-        on_success_renew_certificate
-    } else {
-        if will_schedule_dkim {
-            tasks.push(Task::DnsManagement(TaskDnsManagement {
-                domain_id: Id::default(),
-                update_records: Map::new(vec![DnsRecordType::Dkim]),
-                on_success_renew_certificate: false,
-                status: TaskStatus::now(),
-            }));
-        }
-        false
-    };
-
-    // Schedule DKIM key rotation task
-    if will_trigger_dkim || will_schedule_dkim {
-        tasks.push(Task::DkimManagement(TaskDomainManagement {
-            domain_id: Id::default(),
-            status: TaskStatus::now(),
-        }));
-    }
+    let will_trigger_acme = schedule_dns_tasks(domain, old_domain, tasks);
 
     // Schedule ACME renewal task if needed
     if !will_trigger_acme
@@ -188,6 +142,62 @@ pub(crate) async fn validate_domain(
     Ok(Ok(response))
 }
 
+// Keep task planning independent of registry I/O so update transitions can be
+// checked without contacting a DNS provider or starting a task manager.
+fn schedule_dns_tasks(domain: &Domain, old_domain: Option<&Domain>, tasks: &mut Vec<Task>) -> bool {
+    let will_trigger_dkim = matches!(domain.dkim_management, DkimManagement::Automatic(_))
+        && old_domain
+            .is_none_or(|old| !matches!(old.dkim_management, DkimManagement::Automatic(_)));
+    let will_schedule_dkim = !will_trigger_dkim
+        && matches!(domain.dkim_management, DkimManagement::Automatic(_))
+        && publishes_dkim(domain)
+        && old_domain.is_some_and(|old| !publishes_dkim(old));
+    let mut will_trigger_acme = false;
+    if let DnsManagement::Automatic(details) = &domain.dns_management {
+        let old_records = old_domain.and_then(|old| match &old.dns_management {
+            DnsManagement::Automatic(details) => Some(&details.publish_records),
+            DnsManagement::Manual => None,
+        });
+        // Only publish newly enabled families on Automatic -> Automatic updates.
+        // The DNS task does not delete records for disabled families. Compare
+        // membership rather than Map equality: JSON key order is not a change.
+        let update_records = Map::new(
+            details
+                .publish_records
+                .iter()
+                .filter(|&&record| {
+                    old_records.is_none_or(|old| !old.contains(&record))
+                        && (record != DnsRecordType::Dkim || !will_trigger_dkim)
+                })
+                .copied()
+                .collect(),
+        );
+        if old_records.is_none() || !update_records.is_empty() {
+            will_trigger_acme = old_domain.is_none()
+                && matches!(
+                    domain.certificate_management,
+                    CertificateManagement::Automatic(_)
+                );
+            tasks.push(Task::DnsManagement(TaskDnsManagement {
+                domain_id: Id::default(),
+                update_records,
+                on_success_renew_certificate: will_trigger_acme,
+                status: TaskStatus::now(),
+            }));
+        }
+    }
+
+    // Schedule DKIM key rotation task
+    if will_trigger_dkim || will_schedule_dkim {
+        tasks.push(Task::DkimManagement(TaskDomainManagement {
+            domain_id: Id::default(),
+            status: TaskStatus::now(),
+        }));
+    }
+
+    will_trigger_acme
+}
+
 fn publishes_dkim(domain: &Domain) -> bool {
     matches!(
         &domain.dns_management,
@@ -225,4 +235,172 @@ pub(crate) async fn validate_dns_server(
     }
 
     Ok(Ok(response))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use registry::schema::structs::DnsManagementProperties;
+
+    fn automatic(records: &[DnsRecordType]) -> Domain {
+        Domain {
+            dns_management: DnsManagement::Automatic(DnsManagementProperties {
+                publish_records: Map::new(records.to_vec()),
+                ..Default::default()
+            }),
+            dkim_management: DkimManagement::Automatic(Default::default()),
+            ..Default::default()
+        }
+    }
+
+    fn plan(old: Option<&Domain>, new: &Domain) -> (Vec<Task>, bool) {
+        let mut tasks = Vec::new();
+        let renew = schedule_dns_tasks(new, old, &mut tasks);
+        (tasks, renew)
+    }
+
+    fn dns_tasks(tasks: &[Task]) -> Vec<&TaskDnsManagement> {
+        tasks
+            .iter()
+            .filter_map(|task| match task {
+                Task::DnsManagement(task) => Some(task),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn automatic_enabling_dmarc_queues_only_new_families() {
+        let old = automatic(&[DnsRecordType::Dkim, DnsRecordType::Spf, DnsRecordType::Mx]);
+        let new = automatic(&[
+            DnsRecordType::Dkim,
+            DnsRecordType::Spf,
+            DnsRecordType::Mx,
+            DnsRecordType::Dmarc,
+        ]);
+        let (tasks, renew) = plan(Some(&old), &new);
+        assert_eq!(tasks.len(), 1);
+        let dns = dns_tasks(&tasks);
+        assert_eq!(dns[0].update_records.as_slice(), &[DnsRecordType::Dmarc]);
+        assert!(!dns[0].on_success_renew_certificate);
+        assert!(!renew);
+    }
+
+    #[test]
+    fn automatic_unchanged_or_reordered_records_do_not_queue() {
+        let old = automatic(&[DnsRecordType::Dkim, DnsRecordType::Spf]);
+        assert!(plan(Some(&old), &old).0.is_empty());
+        let mut new = automatic(&[]);
+        let DnsManagement::Automatic(details) = &mut new.dns_management else {
+            unreachable!();
+        };
+        details.publish_records =
+            serde_json::from_str(r#"{"spf":true,"dmarc":false,"mx":null,"dkim":true}"#).unwrap();
+        assert!(plan(Some(&old), &new).0.is_empty());
+    }
+
+    #[test]
+    fn manual_record_changes_do_not_queue_automatic_dns() {
+        // Manual has no publishRecords field in the typed schema; any such
+        // input is discarded by deserialization before task planning.
+        let old = Domain::default();
+        let new = Domain {
+            dns_management: serde_json::from_str(
+                r#"{"@type":"Manual","publishRecords":{"dmarc":true}}"#,
+            )
+            .unwrap(),
+            ..Default::default()
+        };
+        assert!(plan(Some(&old), &new).0.is_empty());
+    }
+
+    #[test]
+    fn manual_to_automatic_keeps_initial_publication() {
+        let old = Domain::default();
+        let mut new = automatic(&[DnsRecordType::Spf, DnsRecordType::Dmarc]);
+        new.dkim_management = DkimManagement::Manual;
+        let (tasks, renew) = plan(Some(&old), &new);
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(
+            dns_tasks(&tasks)[0].update_records.as_slice(),
+            &[DnsRecordType::Spf, DnsRecordType::Dmarc]
+        );
+        assert!(!renew);
+    }
+
+    #[test]
+    fn newly_published_dkim_is_combined_with_other_new_families() {
+        let old = automatic(&[DnsRecordType::Spf]);
+        let new = automatic(&[
+            DnsRecordType::Spf,
+            DnsRecordType::Dkim,
+            DnsRecordType::Dmarc,
+        ]);
+        let (tasks, _) = plan(Some(&old), &new);
+        let dns = dns_tasks(&tasks);
+        assert_eq!(dns.len(), 1);
+        assert_eq!(
+            dns[0].update_records.as_slice(),
+            &[DnsRecordType::Dkim, DnsRecordType::Dmarc]
+        );
+        assert_eq!(tasks.len(), 2);
+        assert!(matches!(tasks[1], Task::DkimManagement(_)));
+    }
+
+    #[test]
+    fn newly_automatic_dkim_keeps_its_own_publication_path() {
+        let mut old = automatic(&[DnsRecordType::Spf]);
+        old.dkim_management = DkimManagement::Manual;
+        let new = automatic(&[
+            DnsRecordType::Spf,
+            DnsRecordType::Dkim,
+            DnsRecordType::Dmarc,
+        ]);
+        let (tasks, _) = plan(Some(&old), &new);
+        assert_eq!(tasks.len(), 2);
+        let dns = dns_tasks(&tasks);
+        assert_eq!(dns.len(), 1);
+        assert_eq!(dns[0].update_records.as_slice(), &[DnsRecordType::Dmarc]);
+        assert!(matches!(tasks[1], Task::DkimManagement(_)));
+        let dkim_only = automatic(&[DnsRecordType::Spf, DnsRecordType::Dkim]);
+        let (tasks, _) = plan(Some(&old), &dkim_only);
+        assert_eq!(tasks.len(), 1);
+        assert!(matches!(tasks[0], Task::DkimManagement(_)));
+    }
+
+    #[test]
+    fn removing_families_does_not_delete_or_republish_records() {
+        let old = automatic(&[DnsRecordType::Spf, DnsRecordType::Dmarc]);
+        let new = automatic(&[DnsRecordType::Spf]);
+        assert!(plan(Some(&old), &new).0.is_empty());
+        let replaced = automatic(&[DnsRecordType::Mx]);
+        let (tasks, _) = plan(Some(&old), &replaced);
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(
+            dns_tasks(&tasks)[0].update_records.as_slice(),
+            &[DnsRecordType::Mx]
+        );
+    }
+
+    #[test]
+    fn automatic_to_manual_does_not_queue_dns() {
+        let old = automatic(&[DnsRecordType::Spf, DnsRecordType::Dmarc]);
+        let mut new = old.clone();
+        new.dns_management = DnsManagement::Manual;
+        assert!(plan(Some(&old), &new).0.is_empty());
+    }
+
+    #[test]
+    fn new_automatic_domain_keeps_certificate_handoff() {
+        let mut new = automatic(&[DnsRecordType::Spf, DnsRecordType::Dkim]);
+        new.certificate_management = CertificateManagement::Automatic(Default::default());
+        let (tasks, renew) = plan(None, &new);
+        assert_eq!(tasks.len(), 2);
+        let dns = dns_tasks(&tasks);
+        assert_eq!(dns.len(), 1);
+        assert_eq!(dns[0].update_records.as_slice(), &[DnsRecordType::Spf]);
+        assert!(dns[0].on_success_renew_certificate);
+        assert!(renew);
+        assert!(matches!(tasks[1], Task::DkimManagement(_)));
+    }
 }
