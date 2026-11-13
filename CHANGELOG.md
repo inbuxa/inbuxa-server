@@ -21,10 +21,6 @@ Fixes from the community: Check now reads fresh DNS, Automatic DNS publishes
 newly enabled record types, and the dashboard counts DMARC warnings the way
 the reports page does.
 
-### Added
-- Release downloads come with `SHA256SUMS.minisig`, a minisign signature of
-  `SHA256SUMS`, so a download can be checked against the published key. (#386)
-
 ### Changed
 - The container image bundles inbuxa-migrate 27.1-rc.14: upstream v1.0.16's
   Exchange EWS and Graph fixes, and the POP3, Fastmail, Zoho and Zimbra
