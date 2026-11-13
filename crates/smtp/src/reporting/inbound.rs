@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::core::Session;
@@ -104,13 +106,11 @@ impl LogReport for Report {
         }
 
         trc::event!(
-            IncomingReport(
-                if (dmarc_reject + dmarc_quarantine + dkim_fail + spf_fail) > 0 {
-                    IncomingReportEvent::DmarcReportWithWarnings
-                } else {
-                    IncomingReportEvent::DmarcReport
-                }
-            ),
+            IncomingReport(if fails_dmarc(self.records()) {
+                IncomingReportEvent::DmarcReportWithWarnings
+            } else {
+                IncomingReportEvent::DmarcReport
+            }),
             RangeFrom = trc::Value::Timestamp(self.date_range_begin()),
             RangeTo = trc::Value::Timestamp(self.date_range_end()),
             Domain = self.domain().to_string(),
@@ -128,6 +128,20 @@ impl LogReport for Report {
             SpfNone = spf_none,
         );
     }
+}
+
+/// inbuxa: whether a DMARC report shows mail that failed DMARC: a row where
+/// neither the aligned SPF nor the aligned DKIM result passed. One failing
+/// on its own is not a warning: forwarded mail fails SPF and still passes on
+/// DKIM, which is what DMARC is for, and the console's reports page counts it
+/// as passed too (#391). A row that fails DMARC carries its quarantine or
+/// reject disposition with it.
+fn fails_dmarc(records: &[mail_auth::report::Record]) -> bool {
+    records.iter().any(|record| {
+        record.count() > 0
+            && !matches!(record.dmarc_dkim_result(), DmarcResult::Pass)
+            && !matches!(record.dmarc_spf_result(), DmarcResult::Pass)
+    })
 }
 
 impl LogReport for TlsReport {
@@ -204,5 +218,53 @@ impl LogReport for Feedback<'_> {
                 .map(|d| trc::Value::String(d.as_ref().into()))
                 .collect::<Vec<_>>(),
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fails_dmarc;
+    use mail_auth::report::{ActionDisposition, DmarcResult, Record};
+
+    fn row(dkim: DmarcResult, spf: DmarcResult) -> Record {
+        Record::new()
+            .with_count(1)
+            .with_dmarc_dkim_result(dkim)
+            .with_dmarc_spf_result(spf)
+    }
+
+    #[test]
+    fn forwarded_mail_passing_on_dkim_is_not_a_warning() {
+        // #391: DKIM pass, SPF fail is a DMARC pass
+        assert!(!fails_dmarc(&[
+            row(DmarcResult::Pass, DmarcResult::Pass),
+            row(DmarcResult::Pass, DmarcResult::Fail),
+        ]));
+        assert!(!fails_dmarc(&[row(DmarcResult::Fail, DmarcResult::Pass)]));
+        assert!(!fails_dmarc(&[row(
+            DmarcResult::Pass,
+            DmarcResult::Unspecified
+        )]));
+        assert!(!fails_dmarc(&[]));
+    }
+
+    #[test]
+    fn a_row_failing_both_is_a_warning() {
+        assert!(fails_dmarc(&[
+            row(DmarcResult::Pass, DmarcResult::Pass),
+            row(DmarcResult::Fail, DmarcResult::Fail)
+                .with_action_disposition(ActionDisposition::Reject),
+        ]));
+        assert!(fails_dmarc(&[row(
+            DmarcResult::Fail,
+            DmarcResult::Unspecified
+        )]));
+    }
+
+    #[test]
+    fn an_empty_row_counts_for_nothing() {
+        assert!(!fails_dmarc(&[
+            row(DmarcResult::Fail, DmarcResult::Fail).with_count(0)
+        ]));
     }
 }
