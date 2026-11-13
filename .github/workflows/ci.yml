@@ -489,6 +489,25 @@ jobs:
           done
           sha256sum inbuxa-linux-*.tar.gz inbuxa-relay-* > SHA256SUMS
           cat SHA256SUMS
+      # Sign SHA256SUMS with the suite's minisign key, so a download can be
+      # verified against the public key the docs publish, as Gitea's
+      # publish.yml does when it builds. No key (as on a fork, or before the
+      # key is added) leaves the release unsigned.
+      - name: sign SHA256SUMS with minisign
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${MINISIGN_SECRET_KEY:-}" ]; then
+            echo "::warning::MINISIGN_SECRET_KEY is not set; this release will be unsigned"
+            exit 0
+          fi
+          sudo apt-get -qq update >/dev/null && sudo apt-get -qq install -y --no-install-recommends minisign >/dev/null
+          umask 077
+          key="$(mktemp)"; printf '%s\n' "$MINISIGN_SECRET_KEY" > "$key"
+          minisign -S -s "$key" -m out/SHA256SUMS -t "inbuxa $TAG"
+          rm -f "$key"
+          echo "signed out/SHA256SUMS -> out/SHA256SUMS.minisig"
       # The relay binaries' .sig files are made on Gitea, which holds the
       # release key (publish.yml, relay-sign), once these are attached.
       #
@@ -507,7 +526,9 @@ jobs:
           rel="$(curl -fsS "${retry[@]}" -H "$auth" "$api/releases/tags/$TAG" | jq -r .id)"
           assets="$(curl -fsS "${retry[@]}" -H "$auth" "$api/releases/$rel/assets")"
           for f in out/inbuxa-linux-amd64.tar.gz out/inbuxa-linux-arm64.tar.gz \
-                   out/inbuxa-relay-x86_64-linux-musl out/inbuxa-relay-aarch64-linux-musl out/SHA256SUMS; do
+                   out/inbuxa-relay-x86_64-linux-musl out/inbuxa-relay-aarch64-linux-musl out/SHA256SUMS \
+                   out/SHA256SUMS.minisig; do
+            [ -e "$f" ] || continue   # SHA256SUMS.minisig is absent only on an unsigned release
             name="$(basename "$f")"
             old="$(jq -r --arg n "$name" '.[] | select(.name == $n) | .id' <<<"$assets")"
             for id in $old; do curl -fsS "${retry[@]}" -o /dev/null -X DELETE -H "$auth" "$api/releases/$rel/assets/$id"; done
