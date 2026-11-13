@@ -22,14 +22,17 @@ use inbuxa_features::deliverability::{
     lists::{self, Answer, BlockList, Subject},
 };
 use mail_auth::{
-    AuthenticatedMessage, DkimResult, DnsError, Error, SpfResult as Spf,
+    AuthenticatedMessage, DkimResult, DnsError, Error, Parameters, SpfResult as Spf,
     common::headers::HeaderWriter,
     dmarc::{self, Alignment},
     mta_sts::{MtaSts as MtaStsRecord, TlsRpt},
     spf::verify::SpfParameters,
 };
 use registry::schema::{prelude::ObjectType, structs::Domain};
-use smtp::outbound::mta_sts::{lookup::MtaStsLookup, verify::VerifyPolicy};
+use smtp::outbound::mta_sts::{
+    lookup::{MtaStsLookup, fetch_policy_uncached},
+    verify::VerifyPolicy,
+};
 use std::{
     collections::BTreeSet,
     future::Future,
@@ -52,6 +55,30 @@ const SETTLE: Duration = Duration::from_secs(120);
 
 /// DL-15: wakes this node's check, from **Check now** here or on another node.
 pub static CHECK_NOW: LazyLock<Notify> = LazyLock::new(Notify::new);
+
+/// A manual request bypasses this server's DNS caches, without clearing them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CheckMode {
+    Scheduled,
+    Manual,
+}
+
+impl CheckMode {
+    fn for_request(asked: bool) -> Self {
+        if asked { Self::Manual } else { Self::Scheduled }
+    }
+
+    fn cache<T>(self, cache: &T) -> Option<&T> {
+        match self {
+            Self::Scheduled => Some(cache),
+            Self::Manual => None,
+        }
+    }
+}
+
+fn manually_rate_limited(checked_at: u64, current_time: u64) -> bool {
+    current_time.saturating_sub(checked_at) < model::MIN_INTERVAL_SECS
+}
 
 pub fn spawn_deliverability(inner: Arc<Inner>) {
     tokio::spawn(async move {
@@ -79,11 +106,11 @@ pub fn spawn_deliverability(inner: Arc<Inner>) {
             if asked
                 && let Ok(Some(last)) =
                     model::report(server.store(), server.core.network.node_id).await
-                && now().saturating_sub(last.checked_at) < model::MIN_INTERVAL_SECS
+                && manually_rate_limited(last.checked_at, now())
             {
                 continue;
             }
-            if let Err(err) = run(&server).await {
+            if let Err(err) = run(&server, CheckMode::for_request(asked)).await {
                 trc::error!(err.details("Failed to run the deliverability check"));
             }
         }
@@ -125,9 +152,9 @@ fn next_slot(last: u64, slot: u64) -> u64 {
 }
 
 /// Runs the check on this node and keeps the report.
-pub async fn run(server: &Server) -> trc::Result<Report> {
+pub async fn run(server: &Server, mode: CheckMode) -> trc::Result<Report> {
     let settings = model::settings(server.store()).await?;
-    let addresses = addresses(server, &settings).await;
+    let addresses = addresses(server, &settings, mode).await;
     let mut domains = Vec::new();
     let ids = server
         .registry()
@@ -135,10 +162,10 @@ pub async fn run(server: &Server) -> trc::Result<Report> {
         .await?;
     for id in ids {
         if let Some(domain) = server.registry().object::<Domain>(id).await? {
-            domains.push(check_domain(server, &settings, &domain, &addresses).await?);
+            domains.push(check_domain(server, &settings, &domain, &addresses, mode).await?);
         }
     }
-    let certificates = certificates(server, &addresses).await;
+    let certificates = certificates(server, &addresses, mode).await;
     let report = Report {
         node_id: server.core.network.node_id,
         hostname: server.core.network.server_name.clone(),
@@ -153,7 +180,7 @@ pub async fn run(server: &Server) -> trc::Result<Report> {
 
 // --- DL-1, DL-2: the addresses ---------------------------------------------
 
-async fn addresses(server: &Server, settings: &Settings) -> Vec<Address> {
+async fn addresses(server: &Server, settings: &Settings, mode: CheckMode) -> Vec<Address> {
     let queue = &server.core.smtp.queue;
     // The strategy the scheduler picks for a message it knows nothing about:
     // what an expression on the node's own name, as a cluster uses, gives.
@@ -180,7 +207,7 @@ async fn addresses(server: &Server, settings: &Settings) -> Vec<Address> {
         })
         .collect();
     if found.is_empty() {
-        for ip in resolve_name(server, &ehlo).await {
+        for ip in resolve_name(server, &ehlo, mode).await {
             found.push((ip, AddressSource::Ehlo, ehlo.clone()));
         }
     }
@@ -194,23 +221,23 @@ async fn addresses(server: &Server, settings: &Settings) -> Vec<Address> {
             ehlo: ehlo.clone(),
             ..Default::default()
         };
-        reverse_dns(server, ip, &ehlo, &mut address).await;
-        address.listings = listings(server, settings, Subject::Ip(ip)).await;
+        reverse_dns(server, ip, &ehlo, &mut address, mode).await;
+        address.listings = listings(server, settings, Subject::Ip(ip), mode).await;
         out.push(address);
     }
     out
 }
 
 /// The IPv4 and IPv6 addresses `name` resolves to; none when it doesn't.
-async fn resolve_name(server: &Server, name: &str) -> Vec<IpAddr> {
+async fn resolve_name(server: &Server, name: &str, mode: CheckMode) -> Vec<IpAddr> {
     let dns = &server.core.smtp.resolvers.dns;
     let cache = &server.inner.cache;
     let fqdn = fqdn(name);
     let mut ips = Vec::new();
-    if let Some(Ok(v4)) = timed(dns.ipv4_lookup(fqdn.as_str(), Some(&cache.dns_ipv4))).await {
+    if let Some(Ok(v4)) = timed(dns.ipv4_lookup(fqdn.as_str(), mode.cache(&cache.dns_ipv4))).await {
         ips.extend(v4.rrset.iter().copied().map(IpAddr::V4));
     }
-    if let Some(Ok(v6)) = timed(dns.ipv6_lookup(fqdn.as_str(), Some(&cache.dns_ipv6))).await {
+    if let Some(Ok(v6)) = timed(dns.ipv6_lookup(fqdn.as_str(), mode.cache(&cache.dns_ipv6))).await {
         ips.extend(v6.rrset.iter().copied().map(IpAddr::V6));
     }
     ips
@@ -218,9 +245,15 @@ async fn resolve_name(server: &Server, name: &str) -> Vec<IpAddr> {
 
 /// DL-5: the PTR names, whether one resolves back, and whether that one is
 /// the EHLO name.
-async fn reverse_dns(server: &Server, ip: IpAddr, ehlo: &str, address: &mut Address) {
+async fn reverse_dns(
+    server: &Server,
+    ip: IpAddr,
+    ehlo: &str,
+    address: &mut Address,
+    mode: CheckMode,
+) {
     let dns = &server.core.smtp.resolvers.dns;
-    match timed(dns.ptr_lookup(ip, Some(&server.inner.cache.dns_ptr))).await {
+    match timed(dns.ptr_lookup(ip, mode.cache(&server.inner.cache.dns_ptr))).await {
         Some(Ok(names)) => {
             address.ptr = names.rrset.iter().map(|n| bare(n)).collect();
         }
@@ -229,7 +262,7 @@ async fn reverse_dns(server: &Server, ip: IpAddr, ehlo: &str, address: &mut Addr
         None => address.ptr_error = Some("No answer in 5 seconds".into()),
     }
     for name in address.ptr.clone() {
-        if resolve_name(server, &name).await.contains(&ip) {
+        if resolve_name(server, &name, mode).await.contains(&ip) {
             address.forward_confirmed = true;
             if name.eq_ignore_ascii_case(&bare(ehlo)) {
                 address.ehlo_matches = true;
@@ -240,7 +273,12 @@ async fn reverse_dns(server: &Server, ip: IpAddr, ehlo: &str, address: &mut Addr
 
 // --- DL-4, DL-6, DL-12: blocklists ----------------------------------------
 
-async fn listings(server: &Server, settings: &Settings, subject: Subject<'_>) -> Vec<Listing> {
+async fn listings(
+    server: &Server,
+    settings: &Settings,
+    subject: Subject<'_>,
+    mode: CheckMode,
+) -> Vec<Listing> {
     let mut out = Vec::new();
     let mut asked = Vec::new();
     for list in lists::LISTS {
@@ -258,20 +296,27 @@ async fn listings(server: &Server, settings: &Settings, subject: Subject<'_>) ->
         }
     }
     for chunk in asked.chunks(PARALLEL) {
-        out.extend(join_all(chunk.iter().map(|(list, name)| ask(server, list, name))).await);
+        out.extend(
+            join_all(
+                chunk
+                    .iter()
+                    .map(|(list, name)| ask(server, list, name, mode)),
+            )
+            .await,
+        );
     }
     // In the lists' own order, whether asked or off
     out.sort_by_key(|l| lists::LISTS.iter().position(|list| list.name == l.list));
     out
 }
 
-async fn ask(server: &Server, list: &BlockList, name: &str) -> Listing {
+async fn ask(server: &Server, list: &BlockList, name: &str, mode: CheckMode) -> Listing {
     let dns = &server.core.smtp.resolvers.dns;
     let mut listing = Listing {
         list: list.name.into(),
         ..Default::default()
     };
-    match timed(dns.ipv4_lookup(name, Some(&server.inner.cache.dns_ipv4))).await {
+    match timed(dns.ipv4_lookup(name, mode.cache(&server.inner.cache.dns_ipv4))).await {
         Some(Ok(answer)) => {
             let Some(code) = answer.rrset.first().copied() else {
                 return listing;
@@ -314,6 +359,7 @@ async fn check_domain(
     settings: &Settings,
     domain: &Domain,
     addresses: &[Address],
+    mode: CheckMode,
 ) -> trc::Result<DomainReport> {
     let name = domain.name.to_lowercase();
     let mut report = DomainReport {
@@ -331,13 +377,20 @@ async fn check_domain(
         };
         let sender = format!("postmaster@{name}");
         let output = dns
-            .check_host(cache.build_auth_parameters(SpfParameters::new(
-                ip,
-                &name,
-                &address.ehlo,
-                &server.core.network.server_name,
-                &sender,
-            )))
+            .check_host(Parameters {
+                params: SpfParameters::new(
+                    ip,
+                    &name,
+                    &address.ehlo,
+                    &server.core.network.server_name,
+                    &sender,
+                ),
+                cache_txt: mode.cache(&cache.dns_txt),
+                cache_mx: mode.cache(&cache.dns_mx),
+                cache_ptr: mode.cache(&cache.dns_ptr),
+                cache_ipv4: mode.cache(&cache.dns_ipv4),
+                cache_ipv6: mode.cache(&cache.dns_ipv6),
+            })
             .await;
         report.spf.push(SpfResult {
             ip: address.ip.clone(),
@@ -346,11 +399,12 @@ async fn check_domain(
     }
 
     // DL-8: each key the domain signs with is the one published
-    report.dkim = dkim_keys(server, &name).await?;
+    report.dkim = dkim_keys(server, &name, mode).await?;
 
     // DL-9: what DMARC asks of alignment; the console works it out
     if let Some(Ok(record)) =
-        timed(dns.txt_lookup::<dmarc::Dmarc>(format!("_dmarc.{name}."), Some(&cache.dns_txt))).await
+        timed(dns.txt_lookup::<dmarc::Dmarc>(format!("_dmarc.{name}."), mode.cache(&cache.dns_txt)))
+            .await
     {
         report.dmarc = Some(Dmarc {
             policy: match record.p {
@@ -365,16 +419,17 @@ async fn check_domain(
     }
 
     // DL-10
-    report.mta_sts = mta_sts(server, &name).await;
+    report.mta_sts = mta_sts(server, &name, mode).await;
 
     // DL-11
     report.tls_rpt = matches!(
-        timed(dns.txt_lookup::<TlsRpt>(format!("_smtp._tls.{name}."), Some(&cache.dns_txt))).await,
+        timed(dns.txt_lookup::<TlsRpt>(format!("_smtp._tls.{name}."), mode.cache(&cache.dns_txt)))
+            .await,
         Some(Ok(_))
     );
 
     // DL-12
-    report.listings = listings(server, settings, Subject::Domain(&name)).await;
+    report.listings = listings(server, settings, Subject::Domain(&name), mode).await;
 
     Ok(report)
 }
@@ -382,7 +437,7 @@ async fn check_domain(
 /// Signs a message that's never sent with each of the domain's DKIM keys,
 /// and verifies it as a receiver would: a key that's missing from DNS, or
 /// published but different, fails here before it fails anyone's mail.
-async fn dkim_keys(server: &Server, domain: &str) -> trc::Result<Vec<DkimKey>> {
+async fn dkim_keys(server: &Server, domain: &str, mode: CheckMode) -> trc::Result<Vec<DkimKey>> {
     let Some(signers) = server.dkim_signers(domain).await? else {
         return Ok(Vec::new());
     };
@@ -415,7 +470,14 @@ async fn dkim_keys(server: &Server, domain: &str) -> trc::Result<Vec<DkimKey>> {
                     .smtp
                     .resolvers
                     .dns
-                    .verify_dkim(server.inner.cache.build_auth_parameters(&parsed))
+                    .verify_dkim(Parameters {
+                        params: &parsed,
+                        cache_txt: mode.cache(&server.inner.cache.dns_txt),
+                        cache_mx: mode.cache(&server.inner.cache.dns_mx),
+                        cache_ptr: mode.cache(&server.inner.cache.dns_ptr),
+                        cache_ipv4: mode.cache(&server.inner.cache.dns_ipv4),
+                        cache_ipv6: mode.cache(&server.inner.cache.dns_ipv6),
+                    })
                     .await;
                 outputs
                     .first()
@@ -439,18 +501,23 @@ fn dkim_state(result: &DkimResult) -> DkimState {
     }
 }
 
-async fn mta_sts(server: &Server, domain: &str) -> MtaSts {
+async fn mta_sts(server: &Server, domain: &str, mode: CheckMode) -> MtaSts {
     let dns = &server.core.smtp.resolvers.dns;
     let cache = &server.inner.cache;
     let mut out = MtaSts::default();
-    let Some(Ok(record)) =
-        timed(dns.txt_lookup::<MtaStsRecord>(format!("_mta-sts.{domain}."), Some(&cache.dns_txt)))
-            .await
+    let Some(Ok(record)) = timed(
+        dns.txt_lookup::<MtaStsRecord>(format!("_mta-sts.{domain}."), mode.cache(&cache.dns_txt)),
+    )
+    .await
     else {
         return out;
     };
     out.record_id = Some(record.id.clone());
-    match server.lookup_mta_sts_policy(domain, MTA_STS_TIMEOUT).await {
+    let policy = match mode {
+        CheckMode::Scheduled => server.lookup_mta_sts_policy(domain, MTA_STS_TIMEOUT).await,
+        CheckMode::Manual => fetch_policy_uncached(server, domain, &record, MTA_STS_TIMEOUT).await,
+    };
+    match policy {
         Ok(policy) => {
             out.fetched = true;
             out.mode = Some(
@@ -462,7 +529,7 @@ async fn mta_sts(server: &Server, domain: &str) -> MtaSts {
                 .into(),
             );
             out.max_age = Some(policy.max_age);
-            if let Some(Ok(mxs)) = timed(dns.mx_lookup(domain, Some(&cache.dns_mx))).await {
+            if let Some(Ok(mxs)) = timed(dns.mx_lookup(domain, mode.cache(&cache.dns_mx))).await {
                 for mx in mxs.rrset.iter() {
                     for exchange in mx.exchanges.iter() {
                         let host = bare(exchange);
@@ -482,14 +549,14 @@ async fn mta_sts(server: &Server, domain: &str) -> MtaSts {
 
 /// The EHLO names, and the server's MX names that point at this node, each
 /// with whether the node holds a certificate for it.
-async fn certificates(server: &Server, addresses: &[Address]) -> Vec<Certificate> {
+async fn certificates(server: &Server, addresses: &[Address], mode: CheckMode) -> Vec<Certificate> {
     let mine: Vec<IpAddr> = addresses.iter().filter_map(|a| a.ip.parse().ok()).collect();
     let mut names: BTreeSet<String> = addresses.iter().map(|a| bare(&a.ehlo)).collect();
     let default_host = server.core.network.server_name.as_str();
     for mx in &server.core.network.info.mxs {
         let name = bare(mx.hostname.as_deref().unwrap_or(default_host));
         if !names.contains(&name)
-            && resolve_name(server, &name)
+            && resolve_name(server, &name, mode)
                 .await
                 .iter()
                 .any(|ip| mine.contains(ip))
@@ -542,6 +609,25 @@ fn alignment(alignment: &Alignment) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn manual_requests_bypass_caches_but_daily_checks_keep_them() {
+        let cache = ();
+        assert!(CheckMode::for_request(true).cache(&cache).is_none());
+        assert!(std::ptr::eq(
+            CheckMode::for_request(false).cache(&cache).unwrap(),
+            &cache
+        ));
+    }
+
+    #[test]
+    fn the_manual_rate_limit_keeps_its_ten_minute_boundary() {
+        assert_eq!(model::MIN_INTERVAL_SECS, 600);
+        assert!(manually_rate_limited(1_000, 1_599));
+        assert!(!manually_rate_limited(1_000, 1_600));
+        assert!(!manually_rate_limited(1_000, 1_601));
+        assert!(manually_rate_limited(1_000, 999));
+    }
 
     #[test]
     fn the_daily_slot_follows_the_last_run() {
