@@ -84,6 +84,29 @@ async fn fetch_policy(
     record: &MtaSts,
     timeout: Duration,
 ) -> Result<Arc<Policy>, Error> {
+    let policy = fetch_policy_uncached(server, domain, record, timeout).await?;
+
+    server.inner.cache.dns_mta_sts.insert(
+        domain.into(),
+        policy.clone(),
+        Duration::from_secs(if (3600..31557600).contains(&policy.max_age) {
+            policy.max_age
+        } else {
+            86400
+        }),
+    );
+
+    Ok(policy)
+}
+
+/// Fetch a policy without reading or updating the SMTP policy cache.
+#[allow(unused_variables)]
+pub async fn fetch_policy_uncached(
+    server: &Server,
+    domain: &str,
+    record: &MtaSts,
+    timeout: Duration,
+) -> Result<Arc<Policy>, Error> {
     // Fetch policy
     #[cfg(not(feature = "test_mode"))]
     let bytes = server
@@ -105,16 +128,6 @@ async fn fetch_policy(
         std::str::from_utf8(&bytes).map_err(|err| Error::InvalidPolicy(err.to_string()))?,
         record.id.clone(),
     )?);
-
-    server.inner.cache.dns_mta_sts.insert(
-        domain.into(),
-        policy.clone(),
-        Duration::from_secs(if (3600..31557600).contains(&policy.max_age) {
-            policy.max_age
-        } else {
-            86400
-        }),
-    );
 
     Ok(policy)
 }

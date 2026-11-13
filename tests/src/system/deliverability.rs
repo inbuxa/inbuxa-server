@@ -196,9 +196,12 @@ pub async fn test(test: &mut TestServer) {
         soon,
     );
 
-    let report = services::inbuxa_deliverability::run(&server)
-        .await
-        .expect("the check runs");
+    let report = services::inbuxa_deliverability::run(
+        &server,
+        services::inbuxa_deliverability::CheckMode::Scheduled,
+    )
+    .await
+    .expect("the check runs");
 
     // DL-2: no addresses set, so what the EHLO name resolves to
     assert_eq!(report.addresses.len(), 1, "{report:#?}");
@@ -272,6 +275,77 @@ pub async fn test(test: &mut TestServer) {
         report.certificates.iter().any(|c| c.name == hostname),
         "{:#?}",
         report.certificates
+    );
+
+    // Manual checks must not reuse the seeded DNS answers. The mail-auth
+    // test resolver returns NXDOMAIN for uncached names; no public DNS is used.
+    let manual = services::inbuxa_deliverability::run(
+        &server,
+        services::inbuxa_deliverability::CheckMode::Manual,
+    )
+    .await
+    .expect("manual check runs without cached DNS");
+    assert!(
+        manual.addresses.is_empty(),
+        "manual check reused cached address/PTR: {manual:#?}"
+    );
+    let manual_good = manual
+        .domains
+        .iter()
+        .find(|d| d.domain == "good.example.org")
+        .unwrap();
+    assert!(manual_good.dmarc.is_none() && !manual_good.tls_rpt);
+    assert!(manual_good.mta_sts.record_id.is_none());
+    let manual_bad = manual
+        .domains
+        .iter()
+        .find(|d| d.domain == "bad.example.org")
+        .unwrap();
+    assert!(
+        manual_bad
+            .listings
+            .iter()
+            .all(|l| l.state != ListingState::Listed)
+    );
+
+    // Bypassing a cache must not flush or replace it: a daily check still
+    // sees the exact same DNS-backed findings after the manual run.
+    let after_manual = services::inbuxa_deliverability::run(
+        &server,
+        services::inbuxa_deliverability::CheckMode::Scheduled,
+    )
+    .await
+    .expect("scheduled check keeps its cached answers");
+    assert_eq!(after_manual.addresses, report.addresses);
+    assert_eq!(after_manual.domains, report.domains);
+    assert_eq!(after_manual.certificates, report.certificates);
+
+    let cached_policy = server
+        .inner
+        .cache
+        .dns_mta_sts
+        .get("good.example.org")
+        .unwrap();
+    let policy = smtp::outbound::mta_sts::lookup::fetch_policy_uncached(
+        &server,
+        "good.example.org",
+        &MtaSts::parse(b"v=STSv1; id=manual-policy").unwrap(),
+        Duration::from_secs(10),
+    )
+    .await
+    .expect("manual policy fetch");
+    assert_eq!(policy.id, "manual-policy");
+    assert!(
+        std::sync::Arc::ptr_eq(
+            &cached_policy,
+            &server
+                .inner
+                .cache
+                .dns_mta_sts
+                .get("good.example.org")
+                .unwrap(),
+        ),
+        "manual fetch replaced SMTP's cached policy"
     );
 
     // --- Over JMAP ---------------------------------------------------------
