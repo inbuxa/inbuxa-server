@@ -15,6 +15,30 @@ https://github.com/inbuxa/inbuxa-server/security/advisories.
 Every version PR adds that version's entry here. CI refuses a version this
 file has no entry for (`tools/release/version.py --changelog`).
 
+## [27.1-rc.23] - 2026-11-15
+
+Delivery history keeps inbound and outbound mail apart, automatic DKIM makes
+a DKIM2 key as soon as it is ticked, and release downloads are signed.
+
+### Added
+- Delivery history: inbound and outbound lists can be scoped by kind.
+  `x:Trace/query` takes a `kind` filter (received, submitted, remote, local,
+  any), worked out from each trace's events, so older history is covered
+  too. Inbound defaults to mail received from other servers and Outbound to
+  remote deliveries, so mail your users send over 587/465 and local
+  deliveries no longer mix in; a Show filter brings them back. Thanks to
+  Faisal. (#398, fixes #397)
+- A `spam.result` event (info level) records the spam verdict, score and the
+  rules hit, highest points first, so they appear in an inbound trace. (#398)
+- Release downloads come with `SHA256SUMS.minisig`, a minisign signature of
+  `SHA256SUMS`. (#396)
+
+### Fixed
+- Automatic DKIM: ticking a new signing algorithm on a domain already set to
+  Automatic, such as DKIM2 next to DKIM1, made no key until the next
+  rotation. The save now makes it. Unticking one still takes effect at
+  rotation. Thanks to Stefan. (#399)
+
 ## [27.1-rc.22] - 2026-11-13
 
 Fixes from the community: Check now reads fresh DNS, Automatic DNS publishes
