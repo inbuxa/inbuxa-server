@@ -298,7 +298,7 @@ impl SpamFilterAnalyzeScore for Server {
 
 /// inbuxa: #397: the verdict, the score and the rules the message hit, at
 /// info level, so a stored trace shows why a message scored the way it did.
-/// `rules` is the X-Spam-Result list, or, when one rule rejects or discards
+/// `rules` is the X-Spam-Result list (highest points first), or, when one rule rejects or discards
 /// on its own, that rule's name.
 fn spam_result_event(span_id: u64, verdict: &'static str, score: f32, rules: Vec<String>) {
     trc::event!(
@@ -310,12 +310,40 @@ fn spam_result_event(span_id: u64, verdict: &'static str, score: f32, rules: Vec
     );
 }
 
-/// Each rule as X-Spam-Result writes it: `TAG (points)`.
+/// Each rule as X-Spam-Result writes it, `TAG (points)`, but highest points
+/// first, so the rules that moved the score lead (the header lists lowest
+/// first).
 fn rule_list(results: &[(&str, f32)]) -> Vec<String> {
-    results
-        .iter()
+    let mut rules = results.to_vec();
+    rules.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+    rules
+        .into_iter()
         .map(|(tag, score)| format!("{tag} ({score:.2})"))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn rule_list_puts_the_highest_points_first() {
+        let results = [
+            ("B_ZERO", 0.0),
+            ("RCVD", 0.1),
+            ("A_ZERO", 0.0),
+            ("HAM", -1.5),
+            ("RBL", 3.0),
+        ];
+        assert_eq!(
+            super::rule_list(&results),
+            [
+                "RBL (3.00)",
+                "RCVD (0.10)",
+                "A_ZERO (0.00)",
+                "B_ZERO (0.00)",
+                "HAM (-1.50)"
+            ]
+        );
+    }
 }
 
 pub trait ConfidenceStore {

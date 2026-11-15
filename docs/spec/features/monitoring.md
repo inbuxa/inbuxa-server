@@ -237,7 +237,7 @@ unchanged.
 - **MON-41.** (#397) The spam filter raises `spam.result` (info level) for
   every message it scores. `Result` holds the verdict (`ham`, `spam`, `reject`
   or `discard`), `Value` the score, and `Details` each rule the message hit
-  with its points, as X-Spam-Result writes them. When one rule rejects or
+  with its points, highest first (X-Spam-Result lists them lowest first). When one rule rejects or
   discards a message by itself, `Details` names only that rule. An inbound
   session's trace therefore shows why its message scored the way it did.
 
