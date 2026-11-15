@@ -256,6 +256,11 @@ fn schedule_dns_tasks(domain: &Domain, old_domain: Option<&Domain>, tasks: &mut 
         && matches!(domain.dkim_management, DkimManagement::Automatic(_))
         && publishes_dkim(domain)
         && old_domain.is_some_and(|old| !publishes_dkim(old));
+    // inbuxa: an algorithm newly ticked on a domain whose keys are already
+    // automatic (DKIM2 next to DKIM1, say) gets its key now, not at the next
+    // rotation, which can be rotateAfter away. One unticked keeps signing
+    // until that rotation, which retires the keys no longer configured.
+    let will_add_algorithm = !will_trigger_dkim && dkim_algorithms_added(domain, old_domain);
     let mut will_trigger_acme = false;
     if let DnsManagement::Automatic(details) = &domain.dns_management {
         let old_records = old_domain.and_then(|old| match &old.dns_management {
@@ -295,7 +300,7 @@ fn schedule_dns_tasks(domain: &Domain, old_domain: Option<&Domain>, tasks: &mut 
     }
 
     // Schedule DKIM key rotation task
-    if will_trigger_dkim || will_schedule_dkim {
+    if will_trigger_dkim || will_schedule_dkim || will_add_algorithm {
         tasks.push(Task::DkimManagement(TaskDomainManagement {
             domain_id: Id::default(),
             status: TaskStatus::now(),
@@ -303,6 +308,21 @@ fn schedule_dns_tasks(domain: &Domain, old_domain: Option<&Domain>, tasks: &mut 
     }
 
     will_trigger_acme
+}
+
+/// inbuxa: whether a save of an automatic-DKIM domain ticked an algorithm it
+/// didn't have before.
+fn dkim_algorithms_added(domain: &Domain, old_domain: Option<&Domain>) -> bool {
+    match (
+        &domain.dkim_management,
+        old_domain.map(|old| &old.dkim_management),
+    ) {
+        (DkimManagement::Automatic(new), Some(DkimManagement::Automatic(old))) => new
+            .algorithms
+            .iter()
+            .any(|algorithm| !old.algorithms.contains(algorithm)),
+        _ => false,
+    }
 }
 
 fn publishes_dkim(domain: &Domain) -> bool {
@@ -347,7 +367,12 @@ pub(crate) async fn validate_dns_server(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use registry::schema::structs::{CertificateManagementProperties, DnsManagementProperties};
+    use registry::schema::{
+        enums::DkimSignatureType,
+        structs::{
+            CertificateManagementProperties, DkimManagementProperties, DnsManagementProperties,
+        },
+    };
 
     fn domain(name: &str, provider: u64, names: &[&str]) -> Domain {
         Domain {
@@ -566,6 +591,61 @@ mod tests {
             dns_tasks(&tasks)[0].update_records.as_slice(),
             &[DnsRecordType::Mx]
         );
+    }
+
+    fn with_algorithms(mut domain: Domain, algorithms: &[DkimSignatureType]) -> Domain {
+        domain.dkim_management = DkimManagement::Automatic(DkimManagementProperties {
+            algorithms: Map::new(algorithms.to_vec()),
+            ..Default::default()
+        });
+        domain
+    }
+
+    #[test]
+    fn newly_ticked_dkim_algorithm_queues_its_key() {
+        // t/271: DKIM2 ticked next to DKIM1 gets its key now, not at the
+        // next rotation
+        let old = with_algorithms(automatic(&[]), &[DkimSignatureType::Dkim1Ed25519Sha256]);
+        let new = with_algorithms(
+            automatic(&[]),
+            &[
+                DkimSignatureType::Dkim1Ed25519Sha256,
+                DkimSignatureType::Dkim2Ed25519Sha256,
+            ],
+        );
+        let (tasks, _) = plan(Some(&old), &new);
+        assert_eq!(tasks.len(), 1);
+        assert!(matches!(tasks[0], Task::DkimManagement(_)));
+        // With DKIM published, still one DKIM task and no DNS task: the DKIM
+        // task publishes the new key itself
+        let old = with_algorithms(
+            automatic(&[DnsRecordType::Dkim]),
+            &[DkimSignatureType::Dkim1RsaSha256],
+        );
+        let new = with_algorithms(
+            automatic(&[DnsRecordType::Dkim]),
+            &[
+                DkimSignatureType::Dkim1RsaSha256,
+                DkimSignatureType::Dkim2RsaSha256,
+            ],
+        );
+        let (tasks, _) = plan(Some(&old), &new);
+        assert_eq!(tasks.len(), 1);
+        assert!(matches!(tasks[0], Task::DkimManagement(_)));
+    }
+
+    #[test]
+    fn unticked_or_reordered_dkim_algorithms_queue_nothing() {
+        let both = [
+            DkimSignatureType::Dkim1Ed25519Sha256,
+            DkimSignatureType::Dkim2Ed25519Sha256,
+        ];
+        let old = with_algorithms(automatic(&[]), &both);
+        let fewer = with_algorithms(automatic(&[]), &[DkimSignatureType::Dkim1Ed25519Sha256]);
+        assert!(plan(Some(&old), &fewer).0.is_empty());
+        let reordered = with_algorithms(automatic(&[]), &[both[1], both[0]]);
+        assert!(plan(Some(&old), &reordered).0.is_empty());
+        assert!(plan(Some(&old), &old.clone()).0.is_empty());
     }
 
     #[test]
