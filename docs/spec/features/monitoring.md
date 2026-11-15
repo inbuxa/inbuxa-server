@@ -224,6 +224,22 @@ unchanged.
   So searching `example.org` finds every trace to or from that domain, as the
   upstream suite expects. With `indexTelemetry` off nothing is indexed, and
   the `text` and `queueId` filters are refused (see "Interfaces").
+- **MON-40.** (#397) A trace has a kind, worked out from its events when it
+  is read, so traces stored earlier have one too. An SMTP session is
+  `submitted` when it holds `auth.success` and `received` otherwise. A
+  delivery attempt is `local` when every `delivery.domain-delivery-start` in
+  it names the `local` route in `Type` (`local`, `mx`, `relay` or
+  `inbuxa-relay`), and `remote` when any names another. A trace from before
+  those types is `local` when it holds a `message-ingest.*` event and no
+  `delivery.connect`, and `remote` otherwise. The inbound list shows
+  `received` and the outbound list `remote` by default. A filter shows the
+  other kind, or both.
+- **MON-41.** (#397) The spam filter raises `spam.result` (info level) for
+  every message it scores. `Result` holds the verdict (`ham`, `spam`, `reject`
+  or `discard`), `Value` the score, and `Details` each rule the message hit
+  with its points, highest first (X-Spam-Result lists them lowest first). When one rule rejects or
+  discards a message by itself, `Details` names only that rule. An inbound
+  session's trace therefore shows why its message scored the way it did.
 
 ### Retention and growth
 
@@ -385,7 +401,9 @@ unchanged.
   - `x:Trace/get` and `/query`. Filters: `text`, `timestamp` (comparison names
     such as `timestampIsGreaterThan`), `queueId`, `event` (the type of the
     trace's opening event: the list views use `smtp.connection-start` and
-    `delivery.attempt-start`). Sort by `timestamp`, newest first by default.
+    `delivery.attempt-start`), `kind` (`received`, `submitted`, `remote`,
+    `local`, or `any` for all; MON-40). Sort by `timestamp`, newest first by
+    default.
     `/set` refuses create and update, and allows destroy (MON-32).
   - `x:Metric/get` and `/query`. Filters: `metric` (one name or a list) and
     the `timestamp` comparisons `timestampIsGreaterThan`,
@@ -549,7 +567,7 @@ they cover tests 10 and 12 (`tracing.rs`), 13 (`metrics.rs`) and 18
 (`alerts.rs`). Tests 1, 3, 5 to 9, 11, 14 to 17, 19 to 21, 23 and 24 pass as
 `tests/src/system/monitoring.rs`.
 
-- **MON-1 to MON-39:** built, with the limits below.
+- **MON-1 to MON-41:** built, with the limits below.
 - **Test 26 (compat)** is written as `monitoring_compat`, ignored, and unrun
   until a copy of INBUXA's data is provided. It checks observed 1, reads the
   old history without an error, and purges it. It deletes history, so only

@@ -305,6 +305,14 @@ impl QueuedMessage {
                 Delivery(DeliveryEvent::DomainDeliveryStart),
                 SpanId = message.span_id,
                 Domain = domain.to_string(),
+                // inbuxa: #397: delivery history tells local deliveries from
+                // remote ones by this
+                Type = match route {
+                    RoutingStrategy::Local => "local",
+                    RoutingStrategy::Mx(_) => "mx",
+                    RoutingStrategy::Relay(_) => "relay",
+                    RoutingStrategy::InbuxaRelay(_) => "inbuxa-relay",
+                },
             );
 
             // Build envelope

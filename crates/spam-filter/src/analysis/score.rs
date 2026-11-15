@@ -22,6 +22,7 @@ use crate::{
 };
 use common::{Server, config::mailstore::spamfilter::SpamFilterAction};
 use std::{fmt::Write, future::Future, vec};
+use trc::SpamEvent;
 
 pub trait SpamFilterAnalyzeScore: Sync + Send {
     fn spam_filter_finalize(
@@ -74,9 +75,21 @@ impl SpamFilterAnalyzeScore for Server {
             let score = match self.core.spam.lists.scores.get(tag) {
                 Some(SpamFilterAction::Allow(score)) => *score,
                 Some(SpamFilterAction::Discard) => {
+                    spam_result_event(
+                        ctx.input.span_id,
+                        "discard",
+                        ctx.result.score,
+                        vec![tag.to_string()],
+                    );
                     return SpamFilterAction::Discard;
                 }
                 Some(SpamFilterAction::Reject) => {
+                    spam_result_event(
+                        ctx.input.span_id,
+                        "reject",
+                        ctx.result.score,
+                        vec![tag.to_string()],
+                    );
                     return SpamFilterAction::Reject;
                 }
                 None | Some(SpamFilterAction::Disabled) => 0.0,
@@ -135,17 +148,33 @@ impl SpamFilterAnalyzeScore for Server {
             }
         }
 
+        results.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap().then_with(|| a.0.cmp(b.0)));
         if self.core.spam.scores.reject_threshold > 0.0
             && final_score >= self.core.spam.scores.reject_threshold
         {
+            spam_result_event(
+                ctx.input.span_id,
+                "reject",
+                final_score,
+                rule_list(&results),
+            );
             SpamFilterAction::Reject
         } else if self.core.spam.scores.discard_threshold > 0.0
             && final_score >= self.core.spam.scores.discard_threshold
         {
+            spam_result_event(
+                ctx.input.span_id,
+                "discard",
+                final_score,
+                rule_list(&results),
+            );
             SpamFilterAction::Discard
         } else {
+            let is_spam = final_score >= self.core.spam.scores.spam_threshold;
+            let class = if is_spam { "spam" } else { "ham" };
+            spam_result_event(ctx.input.span_id, class, final_score, rule_list(&results));
+
             let mut headers = String::with_capacity(header_len + 40);
-            results.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap().then_with(|| a.0.cmp(b.0)));
             headers.push_str("X-Spam-Result: ");
             for (idx, (tag, score)) in results.into_iter().enumerate() {
                 if idx > 0 {
@@ -162,9 +191,6 @@ impl SpamFilterAnalyzeScore for Server {
                     Some(explanation.as_str()).filter(|e| !e.is_empty()),
                 ));
             }
-
-            let is_spam = final_score >= self.core.spam.scores.spam_threshold;
-            let class = if is_spam { "spam" } else { "ham" };
 
             if avg_confidence != 0.0 {
                 let _ = write!(
@@ -267,6 +293,56 @@ impl SpamFilterAnalyzeScore for Server {
 
         // Final score calculation
         self.spam_filter_finalize(ctx).await
+    }
+}
+
+/// inbuxa: #397: the verdict, the score and the rules the message hit, at
+/// info level, so a stored trace shows why a message scored the way it did.
+/// `rules` is the X-Spam-Result list (highest points first), or, when one rule rejects or discards
+/// on its own, that rule's name.
+fn spam_result_event(span_id: u64, verdict: &'static str, score: f32, rules: Vec<String>) {
+    trc::event!(
+        Spam(SpamEvent::Result),
+        SpanId = span_id,
+        Result = verdict,
+        Value = score,
+        Details = rules,
+    );
+}
+
+/// Each rule as X-Spam-Result writes it, `TAG (points)`, but highest points
+/// first, so the rules that moved the score lead (the header lists lowest
+/// first).
+fn rule_list(results: &[(&str, f32)]) -> Vec<String> {
+    let mut rules = results.to_vec();
+    rules.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+    rules
+        .into_iter()
+        .map(|(tag, score)| format!("{tag} ({score:.2})"))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn rule_list_puts_the_highest_points_first() {
+        let results = [
+            ("B_ZERO", 0.0),
+            ("RCVD", 0.1),
+            ("A_ZERO", 0.0),
+            ("HAM", -1.5),
+            ("RBL", 3.0),
+        ];
+        assert_eq!(
+            super::rule_list(&results),
+            [
+                "RBL (3.00)",
+                "RCVD (0.10)",
+                "A_ZERO (0.00)",
+                "B_ZERO (0.00)",
+                "HAM (-1.50)"
+            ]
+        );
     }
 }
 

@@ -224,7 +224,7 @@ pub(crate) async fn metric_query(
 
 // ---- Traces (MON-10 to MON-17, MON-31, MON-32) ----
 
-use common::telemetry::tracers::store::{MaybeTrace, decode_trace};
+use common::telemetry::tracers::store::{MaybeTrace, TraceKind, decode_trace};
 use registry::schema::structs::{Search, Trace, TraceValue};
 use store::{
     IterateParams,
@@ -336,7 +336,7 @@ pub(crate) async fn trace_get(
     }
     let ids = match get.ids.take() {
         Some(ids) => ids,
-        None => trace_ids(server, 0, u64::MAX, false, None)
+        None => trace_ids(server, 0, u64::MAX, false, None, None)
             .await?
             .into_iter()
             .take(server.core.jmap.get_max_objects)
@@ -353,13 +353,14 @@ pub(crate) async fn trace_get(
 }
 
 /// Trace ids in a range, newest first unless `ascending`, optionally only
-/// those whose opening event is `event`.
+/// those whose opening event is `event` and whose kind is `kind`.
 async fn trace_ids(
     server: &common::Server,
     from_id: u64,
     to_id: u64,
     ascending: bool,
     event: Option<EventType>,
+    kind: Option<TraceKind>,
 ) -> trc::Result<Vec<u64>> {
     let from_id = from_id.max(trace_floor(server).await);
     let mut ids = Vec::new();
@@ -387,6 +388,7 @@ async fn trace_ids(
                         .next()
                         .is_some_and(|first| first.event == event)
                 })
+                && kind.is_none_or(|kind| TraceKind::of(&trace) == Some(kind))
             {
                 ids.push(id);
             }
@@ -397,7 +399,8 @@ async fn trace_ids(
     Ok(ids)
 }
 
-/// `x:Trace/query`: `event` (the opening event), `text` and `queueId`
+/// `x:Trace/query`: `event` (the opening event), `kind` (received,
+/// submitted, remote or local; `any` for all, #397), `text` and `queueId`
 /// (through the search index, refused when trace search is off), and the
 /// timestamp comparisons.
 pub(crate) async fn trace_query(
@@ -406,6 +409,7 @@ pub(crate) async fn trace_query(
     assert_server_level(req.access_token)?;
     let (mut from_id, mut to_id) = (0u64, u64::MAX);
     let mut event = None;
+    let mut kind = None;
     let mut search: Vec<SearchFilter> = Vec::new();
     req.request
         .extract_filters(|property, op, value| match property {
@@ -430,6 +434,17 @@ pub(crate) async fn trace_query(
                     event = Some(parsed);
                     true
                 }
+                None => false,
+            },
+            Property::Kind => match value.as_str() {
+                Some("any") => true,
+                Some(value) => match TraceKind::parse(value) {
+                    Some(parsed) => {
+                        kind = Some(parsed);
+                        true
+                    }
+                    None => false,
+                },
                 None => false,
             },
             Property::Text => match value.as_str() {
@@ -477,7 +492,15 @@ pub(crate) async fn trace_query(
             .details("Traces sort by timestamp only"));
     }
 
-    let mut ids = trace_ids(req.server, from_id, to_id, params.sort_ascending, event).await?;
+    let mut ids = trace_ids(
+        req.server,
+        from_id,
+        to_id,
+        params.sort_ascending,
+        event,
+        kind,
+    )
+    .await?;
     if !search.is_empty() {
         let settings = req
             .server

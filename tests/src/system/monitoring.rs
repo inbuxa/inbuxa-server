@@ -168,6 +168,37 @@ pub async fn test(test: &mut TestServer) {
         "test 9: to"
     );
 
+    // #397: the session came from outside and the attempt only filed the
+    // message here, so each list's default leaves out the other kind
+    for (event, kind, expected) in [
+        ("smtp.connection-start", "received", 1),
+        ("smtp.connection-start", "submitted", 0),
+        ("smtp.connection-start", "any", 1),
+        ("delivery.attempt-start", "local", 1),
+        ("delivery.attempt-start", "remote", 0),
+        ("delivery.attempt-start", "any", 1),
+    ] {
+        let response = admin
+            .jmap_method_call(
+                "x:Trace/query",
+                json!({"filter": {"event": event, "kind": kind}}),
+            )
+            .await;
+        let found = response
+            .0
+            .pointer("/methodResponses/0/1/ids")
+            .and_then(|ids| ids.as_array())
+            .map(|ids| ids.len());
+        assert_eq!(found, Some(expected), "#397: {event} {kind}: {response:?}");
+    }
+    let response = admin
+        .jmap_method_call("x:Trace/query", json!({"filter": {"kind": "sideways"}}))
+        .await;
+    assert!(
+        response.0.pointer("/methodResponses/0/1/ids").is_none(),
+        "#397: an unknown kind is refused: {response:?}"
+    );
+
     // MON-16: the queueId filter finds the traces that name a queue id (the
     // session that queued the message and its delivery attempt) through the
     // search index, given as a string or a number (the index column is an
