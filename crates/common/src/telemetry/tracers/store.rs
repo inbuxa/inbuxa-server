@@ -28,7 +28,7 @@ use store::{
     write::{BatchBuilder, SearchIndex, TelemetryClass, ValueClass, now},
 };
 use trc::{
-    AddContext, DeliveryEvent, Event, EventDetails, EventType, Key, Level, SmtpEvent,
+    AddContext, AuthEvent, DeliveryEvent, Event, EventDetails, EventType, Key, Level, SmtpEvent,
     ipc::subscriber::SubscriberBuilder,
 };
 use utils::snowflake::SnowflakeIdGenerator;
@@ -82,6 +82,92 @@ pub fn decode_trace(bytes: &[u8]) -> Option<Trace> {
             ObjectInner::Trace(trace) => Some(trace),
             _ => None,
         })
+}
+
+/// What a stored trace records (#397): an SMTP session from another server
+/// (`received`) or from one of this server's users (`submitted`), and a
+/// delivery attempt that went to another server (`remote`) or only filed the
+/// message in local mailboxes (`local`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TraceKind {
+    Received,
+    Submitted,
+    Remote,
+    Local,
+}
+
+impl TraceKind {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "received" => Some(TraceKind::Received),
+            "submitted" => Some(TraceKind::Submitted),
+            "remote" => Some(TraceKind::Remote),
+            "local" => Some(TraceKind::Local),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            TraceKind::Received => "received",
+            TraceKind::Submitted => "submitted",
+            TraceKind::Remote => "remote",
+            TraceKind::Local => "local",
+        }
+    }
+
+    /// A trace's kind, from its events; `None` for a trace that opens with
+    /// anything else. Worked out when read, so traces stored before #397
+    /// have one too.
+    pub fn of(trace: &Trace) -> Option<Self> {
+        let mut events = trace.events.iter();
+        match events.next()?.event {
+            EventType::Smtp(SmtpEvent::ConnectionStart) => Some(
+                if events.any(|e| e.event == EventType::Auth(AuthEvent::Success)) {
+                    TraceKind::Submitted
+                } else {
+                    TraceKind::Received
+                },
+            ),
+            EventType::Delivery(DeliveryEvent::AttemptStart) => {
+                // Each route names its type on domain-delivery-start (#397)
+                let mut routes = trace
+                    .events
+                    .iter()
+                    .filter(|e| e.event == EventType::Delivery(DeliveryEvent::DomainDeliveryStart))
+                    .filter_map(|e| {
+                        e.key_values.iter().find_map(|kv| match &kv.value {
+                            TraceValue::String(v) if kv.key == Key::Type => Some(v.value.as_str()),
+                            _ => None,
+                        })
+                    })
+                    .peekable();
+                if routes.peek().is_some() {
+                    return Some(if routes.all(|route| route == "local") {
+                        TraceKind::Local
+                    } else {
+                        TraceKind::Remote
+                    });
+                }
+                // Older traces: local when the message was filed in a
+                // mailbox and no other server was connected to
+                let (mut filed, mut connected) = (false, false);
+                for event in trace.events.iter() {
+                    match event.event {
+                        EventType::MessageIngest(_) => filed = true,
+                        EventType::Delivery(DeliveryEvent::Connect) => connected = true,
+                        _ => {}
+                    }
+                }
+                Some(if filed && !connected {
+                    TraceKind::Local
+                } else {
+                    TraceKind::Remote
+                })
+            }
+            _ => None,
+        }
+    }
 }
 
 /// A stored trace as read by key: `None` when it can't be decoded.
@@ -229,4 +315,116 @@ pub(crate) fn spawn_store_tracer(builder: SubscriberBuilder, tracing: Store, dat
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use registry::{schema::structs::TraceEvent, types::datetime::UTCDateTime};
+    use trc::MessageIngestEvent;
+
+    fn event(event: EventType, key_values: &[(Key, &str)]) -> TraceEvent {
+        let mut kvs = registry::types::list::List::default();
+        for (key, value) in key_values {
+            kvs.push(TraceKeyValue {
+                key: *key,
+                value: TraceValue::String(TraceValueString {
+                    value: value.to_string(),
+                }),
+            });
+        }
+        TraceEvent {
+            event,
+            timestamp: UTCDateTime::now(),
+            key_values: kvs,
+        }
+    }
+
+    fn trace(events: Vec<TraceEvent>) -> Trace {
+        let mut trace = Trace::default();
+        for e in events {
+            trace.events.push(e);
+        }
+        trace
+    }
+
+    const SMTP_START: EventType = EventType::Smtp(SmtpEvent::ConnectionStart);
+    const ATTEMPT: EventType = EventType::Delivery(DeliveryEvent::AttemptStart);
+    const DOMAIN: EventType = EventType::Delivery(DeliveryEvent::DomainDeliveryStart);
+    const CONNECT: EventType = EventType::Delivery(DeliveryEvent::Connect);
+    const HAM: EventType = EventType::MessageIngest(MessageIngestEvent::Ham);
+
+    #[test]
+    fn smtp_sessions() {
+        let received = trace(vec![
+            event(SMTP_START, &[]),
+            event(EventType::Smtp(SmtpEvent::MailFrom), &[]),
+        ]);
+        assert_eq!(TraceKind::of(&received), Some(TraceKind::Received));
+        let submitted = trace(vec![
+            event(SMTP_START, &[]),
+            event(EventType::Auth(AuthEvent::Success), &[]),
+            event(EventType::Smtp(SmtpEvent::MailFrom), &[]),
+        ]);
+        assert_eq!(TraceKind::of(&submitted), Some(TraceKind::Submitted));
+    }
+
+    #[test]
+    fn deliveries_by_route() {
+        let local = trace(vec![
+            event(ATTEMPT, &[]),
+            event(
+                DOMAIN,
+                &[(Key::Domain, "example.org"), (Key::Type, "local")],
+            ),
+            event(HAM, &[]),
+        ]);
+        assert_eq!(TraceKind::of(&local), Some(TraceKind::Local));
+        // One remote route makes the attempt remote
+        let mixed = trace(vec![
+            event(ATTEMPT, &[]),
+            event(DOMAIN, &[(Key::Type, "local")]),
+            event(HAM, &[]),
+            event(DOMAIN, &[(Key::Type, "mx")]),
+        ]);
+        assert_eq!(TraceKind::of(&mixed), Some(TraceKind::Remote));
+        let relayed = trace(vec![
+            event(ATTEMPT, &[]),
+            event(DOMAIN, &[(Key::Type, "inbuxa-relay")]),
+        ]);
+        assert_eq!(TraceKind::of(&relayed), Some(TraceKind::Remote));
+    }
+
+    #[test]
+    fn older_deliveries_by_events() {
+        let local = trace(vec![
+            event(ATTEMPT, &[]),
+            event(DOMAIN, &[]),
+            event(HAM, &[]),
+        ]);
+        assert_eq!(TraceKind::of(&local), Some(TraceKind::Local));
+        let remote = trace(vec![
+            event(ATTEMPT, &[]),
+            event(DOMAIN, &[]),
+            event(CONNECT, &[]),
+        ]);
+        assert_eq!(TraceKind::of(&remote), Some(TraceKind::Remote));
+        // Failed before connecting: still a remote delivery
+        let failed = trace(vec![event(ATTEMPT, &[]), event(DOMAIN, &[])]);
+        assert_eq!(TraceKind::of(&failed), Some(TraceKind::Remote));
+    }
+
+    #[test]
+    fn names_round_trip() {
+        for kind in [
+            TraceKind::Received,
+            TraceKind::Submitted,
+            TraceKind::Remote,
+            TraceKind::Local,
+        ] {
+            assert_eq!(TraceKind::parse(kind.as_str()), Some(kind));
+        }
+        assert_eq!(TraceKind::parse("any"), None);
+        assert_eq!(TraceKind::of(&trace(vec![])), None);
+    }
 }

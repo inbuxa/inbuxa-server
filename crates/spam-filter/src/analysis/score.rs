@@ -22,6 +22,7 @@ use crate::{
 };
 use common::{Server, config::mailstore::spamfilter::SpamFilterAction};
 use std::{fmt::Write, future::Future, vec};
+use trc::SpamEvent;
 
 pub trait SpamFilterAnalyzeScore: Sync + Send {
     fn spam_filter_finalize(
@@ -74,9 +75,21 @@ impl SpamFilterAnalyzeScore for Server {
             let score = match self.core.spam.lists.scores.get(tag) {
                 Some(SpamFilterAction::Allow(score)) => *score,
                 Some(SpamFilterAction::Discard) => {
+                    spam_result_event(
+                        ctx.input.span_id,
+                        "discard",
+                        ctx.result.score,
+                        vec![tag.to_string()],
+                    );
                     return SpamFilterAction::Discard;
                 }
                 Some(SpamFilterAction::Reject) => {
+                    spam_result_event(
+                        ctx.input.span_id,
+                        "reject",
+                        ctx.result.score,
+                        vec![tag.to_string()],
+                    );
                     return SpamFilterAction::Reject;
                 }
                 None | Some(SpamFilterAction::Disabled) => 0.0,
@@ -135,17 +148,33 @@ impl SpamFilterAnalyzeScore for Server {
             }
         }
 
+        results.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap().then_with(|| a.0.cmp(b.0)));
         if self.core.spam.scores.reject_threshold > 0.0
             && final_score >= self.core.spam.scores.reject_threshold
         {
+            spam_result_event(
+                ctx.input.span_id,
+                "reject",
+                final_score,
+                rule_list(&results),
+            );
             SpamFilterAction::Reject
         } else if self.core.spam.scores.discard_threshold > 0.0
             && final_score >= self.core.spam.scores.discard_threshold
         {
+            spam_result_event(
+                ctx.input.span_id,
+                "discard",
+                final_score,
+                rule_list(&results),
+            );
             SpamFilterAction::Discard
         } else {
+            let is_spam = final_score >= self.core.spam.scores.spam_threshold;
+            let class = if is_spam { "spam" } else { "ham" };
+            spam_result_event(ctx.input.span_id, class, final_score, rule_list(&results));
+
             let mut headers = String::with_capacity(header_len + 40);
-            results.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap().then_with(|| a.0.cmp(b.0)));
             headers.push_str("X-Spam-Result: ");
             for (idx, (tag, score)) in results.into_iter().enumerate() {
                 if idx > 0 {
@@ -162,9 +191,6 @@ impl SpamFilterAnalyzeScore for Server {
                     Some(explanation.as_str()).filter(|e| !e.is_empty()),
                 ));
             }
-
-            let is_spam = final_score >= self.core.spam.scores.spam_threshold;
-            let class = if is_spam { "spam" } else { "ham" };
 
             if avg_confidence != 0.0 {
                 let _ = write!(
@@ -268,6 +294,28 @@ impl SpamFilterAnalyzeScore for Server {
         // Final score calculation
         self.spam_filter_finalize(ctx).await
     }
+}
+
+/// inbuxa: #397: the verdict, the score and the rules the message hit, at
+/// info level, so a stored trace shows why a message scored the way it did.
+/// `rules` is the X-Spam-Result list, or, when one rule rejects or discards
+/// on its own, that rule's name.
+fn spam_result_event(span_id: u64, verdict: &'static str, score: f32, rules: Vec<String>) {
+    trc::event!(
+        Spam(SpamEvent::Result),
+        SpanId = span_id,
+        Result = verdict,
+        Value = score,
+        Details = rules,
+    );
+}
+
+/// Each rule as X-Spam-Result writes it: `TAG (points)`.
+fn rule_list(results: &[(&str, f32)]) -> Vec<String> {
+    results
+        .iter()
+        .map(|(tag, score)| format!("{tag} ({score:.2})"))
+        .collect()
 }
 
 pub trait ConfidenceStore {

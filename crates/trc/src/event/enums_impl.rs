@@ -582,6 +582,8 @@ impl EventType {
             b"spam.train-sample-added" => EventType::Spam(SpamEvent::TrainSampleAdded),
             b"spam.train-sample-not-found" => EventType::Spam(SpamEvent::TrainSampleNotFound),
             b"spam.classify" => EventType::Spam(SpamEvent::Classify),
+            // inbuxa: #397
+            b"spam.result" => EventType::Spam(SpamEvent::Result),
             b"spam.model-loaded" => EventType::Spam(SpamEvent::ModelLoaded),
             b"spam.model-not-ready" => EventType::Spam(SpamEvent::ModelNotReady),
             b"spam.model-not-found" => EventType::Spam(SpamEvent::ModelNotFound),
@@ -1381,6 +1383,8 @@ impl EventType {
             EventType::Spam(SpamEvent::TrainSampleAdded) => "spam.train-sample-added",
             EventType::Spam(SpamEvent::TrainSampleNotFound) => "spam.train-sample-not-found",
             EventType::Spam(SpamEvent::Classify) => "spam.classify",
+            // inbuxa: #397
+            EventType::Spam(SpamEvent::Result) => "spam.result",
             EventType::Spam(SpamEvent::ModelLoaded) => "spam.model-loaded",
             EventType::Spam(SpamEvent::ModelNotReady) => "spam.model-not-ready",
             EventType::Spam(SpamEvent::ModelNotFound) => "spam.model-not-found",
@@ -2073,6 +2077,8 @@ impl EventType {
             EventType::Spam(SpamEvent::TrainSampleAdded) => 143,
             EventType::Spam(SpamEvent::TrainSampleNotFound) => 491,
             EventType::Spam(SpamEvent::Classify) => 490,
+            // inbuxa: #397
+            EventType::Spam(SpamEvent::Result) => 662,
             EventType::Spam(SpamEvent::ModelLoaded) => 589,
             EventType::Spam(SpamEvent::ModelNotReady) => 496,
             EventType::Spam(SpamEvent::ModelNotFound) => 497,
@@ -2785,6 +2791,8 @@ impl EventType {
             143 => Some(EventType::Spam(SpamEvent::TrainSampleAdded)),
             491 => Some(EventType::Spam(SpamEvent::TrainSampleNotFound)),
             490 => Some(EventType::Spam(SpamEvent::Classify)),
+            // inbuxa: #397
+            662 => Some(EventType::Spam(SpamEvent::Result)),
             589 => Some(EventType::Spam(SpamEvent::ModelLoaded)),
             496 => Some(EventType::Spam(SpamEvent::ModelNotReady)),
             497 => Some(EventType::Spam(SpamEvent::ModelNotFound)),
@@ -3151,6 +3159,8 @@ impl EventType {
             EventType::Spam(SpamEvent::ModelNotReady) => Level::Info,
             EventType::Spam(SpamEvent::ModelNotFound) => Level::Info,
             EventType::Spam(SpamEvent::RulesUpdated) => Level::Info,
+            // inbuxa: #397
+            EventType::Spam(SpamEvent::Result) => Level::Info,
             EventType::Store(StoreEvent::BlobStorePurged) => Level::Info,
             EventType::Store(StoreEvent::DataStorePurged) => Level::Info,
             EventType::TaskManager(TaskManagerEvent::TaskQueued) => Level::Info,
@@ -3984,6 +3994,8 @@ impl EventType {
             EventType::Spam(SpamEvent::TrainSampleAdded) => "New training sample added",
             EventType::Spam(SpamEvent::TrainSampleNotFound) => "Training sample not found",
             EventType::Spam(SpamEvent::Classify) => "Classifying message for spam",
+            // inbuxa: #397
+            EventType::Spam(SpamEvent::Result) => "Spam filter result",
             EventType::Spam(SpamEvent::ModelLoaded) => "Spam classifier model loaded",
             EventType::Spam(SpamEvent::ModelNotReady) => "Spam classifier model not ready",
             EventType::Spam(SpamEvent::ModelNotFound) => "Spam classifier model not found",
@@ -4974,6 +4986,8 @@ impl EventType {
             EventType::Spam(SpamEvent::TrainSampleAdded),
             EventType::Spam(SpamEvent::TrainSampleNotFound),
             EventType::Spam(SpamEvent::Classify),
+            // inbuxa: #397
+            EventType::Spam(SpamEvent::Result),
             EventType::Spam(SpamEvent::ModelLoaded),
             EventType::Spam(SpamEvent::ModelNotReady),
             EventType::Spam(SpamEvent::ModelNotFound),

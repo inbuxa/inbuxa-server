@@ -991,6 +991,8 @@ pub enum Property {
     IntrospectionClientSecret = 938,
     // inbuxa: relay spec, RL-24
     Relays = 939,
+    // inbuxa: #397: a trace's kind, as x:Trace/query filters it
+    Kind = 940,
     RequireClientRegistration = 615,
     RequireScopes = 608,
     RequireTls = 525,
