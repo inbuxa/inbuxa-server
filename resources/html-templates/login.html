@@ -486,7 +486,10 @@
                 target.searchParams.set('code', clientCode);
                 if (oauth.state) target.searchParams.set('state', oauth.state);
                 target.searchParams.set('iss', issuer || url.origin);
-                window.location.assign(target.toString());
+                // Replace, not assign: once used, this page is spent, and an
+                // app that opened it shouldn't find it again behind Back
+                // (inbuxa-server #403).
+                window.location.replace(target.toString());
             }
 
             function handleResponse(resp) {
