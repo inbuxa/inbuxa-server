@@ -13,7 +13,7 @@ use mail_auth::{
         TokioResolver,
         config::{
             CLOUDFLARE, ConnectionConfig, GOOGLE, NameServerConfig, ProtocolConfig, QUAD9,
-            ResolverConfig, ResolverOpts,
+            ResolveHosts, ResolverConfig, ResolverOpts,
         },
         net::runtime::TokioRuntimeProvider,
         system_conf::read_system_conf,
@@ -35,6 +35,20 @@ pub struct Resolvers {
     pub dns: MessageAuthenticator,
     pub dnssec: DnssecResolver,
     pub dnssec_available: bool,
+    /// The same servers, asked without /etc/hosts, for what the world sees
+    /// of a name. In a container /etc/hosts maps the container's own name to
+    /// its private addresses (inbuxa-server#408).
+    pub public: TokioResolver,
+}
+
+/// A resolver on `config` that always asks DNS and never reads /etc/hosts.
+fn public_resolver(config: ResolverConfig, opts: &ResolverOpts) -> TokioResolver {
+    let mut opts = opts.clone();
+    opts.use_hosts_file = ResolveHosts::Never;
+    TokioResolver::builder_with_config(config, TokioRuntimeProvider::default())
+        .with_options(opts)
+        .build()
+        .expect("Failed to build DNS resolver")
 }
 
 #[derive(Clone)]
@@ -161,6 +175,7 @@ impl Resolvers {
             dnssec_available: ensure_dnssec(&resolver_config, &dnssec.resolver).await,
             #[cfg(feature = "test_mode")]
             dnssec_available: true,
+            public: public_resolver(resolver_config.clone(), &opts),
             dns: MessageAuthenticator::new(resolver_config, opts).unwrap(),
             dnssec,
         }
@@ -263,6 +278,7 @@ impl Default for Resolvers {
         opts_dnssec.validate = true;
 
         Self {
+            public: public_resolver(config.clone(), &opts),
             dns: MessageAuthenticator::new(config, opts).expect("Failed to build DNS resolver"),
             dnssec: DnssecResolver {
                 resolver: TokioResolver::builder_with_config(
@@ -284,6 +300,7 @@ impl Clone for Resolvers {
             dns: self.dns.clone(),
             dnssec: self.dnssec.clone(),
             dnssec_available: self.dnssec_available,
+            public: self.public.clone(),
         }
     }
 }

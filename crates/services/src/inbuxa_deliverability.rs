@@ -237,7 +237,45 @@ async fn resolve_name(server: &Server, name: &str, mode: CheckMode) -> Vec<IpAdd
     if let Some(Ok(v6)) = timed(dns.ipv6_lookup(fqdn.as_str(), mode.cache(&cache.dns_ipv6))).await {
         ips.extend(v6.rrset.iter().copied().map(IpAddr::V6));
     }
+    // #408: an address no receiver can see isn't one mail is sent from. In a
+    // container /etc/hosts maps the server's own name to the container's
+    // private addresses, so when that's all there is, ask DNS itself.
+    if !ips.is_empty() && !ips.iter().any(|ip| seen_by_receivers(*ip)) {
+        ips.clear();
+        if let Some(Ok(found)) =
+            timed(server.core.smtp.resolvers.public.lookup_ip(fqdn.as_str())).await
+        {
+            ips.extend(found.iter());
+        }
+    }
+    ips.retain(|ip| seen_by_receivers(*ip));
+    ips.dedup();
     ips
+}
+
+/// Whether a receiving server could see mail come from `ip`: not a private,
+/// shared (CGNAT), loopback, link-local, unique-local or unspecified address.
+fn seen_by_receivers(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => {
+            let [a, b, ..] = ip.octets();
+            !(ip.is_private()
+                || ip.is_loopback()
+                || ip.is_link_local()
+                || ip.is_unspecified()
+                || ip.is_broadcast()
+                || (a == 100 && (64..128).contains(&b)))
+        }
+        IpAddr::V6(ip) => {
+            if let Some(v4) = ip.to_ipv4_mapped() {
+                return seen_by_receivers(IpAddr::V4(v4));
+            }
+            !(ip.is_loopback()
+                || ip.is_unspecified()
+                || ip.is_unique_local()
+                || ip.is_unicast_link_local())
+        }
+    }
 }
 
 /// DL-5: the PTR names, whether one resolves back, and whether that one is
@@ -645,5 +683,32 @@ mod tests {
         let b = slot_for("mx3.example.org", 3);
         assert!(a < 3600 && b < 3600);
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn a_container_s_own_addresses_are_not_sending_addresses() {
+        // #408: the installer's network, as /etc/hosts gives it in the container
+        for ip in [
+            "172.31.253.10",
+            "fd69:6e62:7578::2",
+            "10.0.0.5",
+            "192.168.1.20",
+            "100.64.0.1",
+            "127.0.0.1",
+            "169.254.1.1",
+            "::1",
+            "fe80::1",
+            "::ffff:172.31.253.10",
+        ] {
+            assert!(!seen_by_receivers(ip.parse().unwrap()), "{ip}");
+        }
+        for ip in [
+            "65.21.8.43",
+            "2a01:4f9:c010:1::1",
+            "192.0.2.10",
+            "100.128.0.1",
+        ] {
+            assert!(seen_by_receivers(ip.parse().unwrap()), "{ip}");
+        }
     }
 }

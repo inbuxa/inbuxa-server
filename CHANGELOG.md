@@ -17,7 +17,8 @@ file has no entry for (`tools/release/version.py --changelog`).
 
 ## [27.1-rc.25] - 2026-11-16
 
-A TLS report counts once on the dashboard, however many policies it covers.
+A TLS report counts once on the dashboard, however many policies it covers,
+and Deliverability stops failing SPF for a container's own addresses.
 
 ### Fixed
 - TLS reports: a report logged one incoming-report event per policy, so a
@@ -26,6 +27,13 @@ A TLS report counts once on the dashboard, however many policies it covers.
   logs one event per report, with the totals summed over its policies and
   each policy's figures kept in the event. Thanks to khashmeshab. (#406,
   fixes #402)
+- Deliverability: with no source addresses set, the check tested what the
+  server's name resolves to, and in a container /etc/hosts maps that name
+  to the container's own addresses. On an installer's container install it
+  failed SPF for 172.31.253.10 and fd69:6e62:7578::2, which no receiver ever
+  sees. Private, shared, loopback, link-local and unique-local addresses
+  are left out now, and when those are all the name gave, DNS itself is
+  asked. Thanks to faisal. (fixes #408)
 
 ## [27.1-rc.24] - 2026-11-16
 
