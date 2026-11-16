@@ -15,6 +15,17 @@ https://github.com/inbuxa/inbuxa-server/security/advisories.
 Every version PR adds that version's entry here. CI refuses a version this
 file has no entry for (`tools/release/version.py --changelog`).
 
+## [27.1-rc.24] - 2026-11-16
+
+The sign-in page no longer stays behind in the browser history.
+
+### Fixed
+- Sign-in page: after a successful sign-in the page sent the browser on to
+  the app with `location.assign`, which left it in the history. In the
+  console and webmail installed as apps, Back then landed on a spent
+  sign-in form, and signing in there failed. It now replaces itself.
+  Thanks to khashmeshab. (#404, fixes #403)
+
 ## [27.1-rc.23] - 2026-11-15
 
 Delivery history keeps inbound and outbound mail apart, automatic DKIM makes
