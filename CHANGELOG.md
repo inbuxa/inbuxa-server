@@ -15,6 +15,18 @@ https://github.com/inbuxa/inbuxa-server/security/advisories.
 Every version PR adds that version's entry here. CI refuses a version this
 file has no entry for (`tools/release/version.py --changelog`).
 
+## [27.1-rc.25] - 2026-11-16
+
+A TLS report counts once on the dashboard, however many policies it covers.
+
+### Fixed
+- TLS reports: a report logged one incoming-report event per policy, so a
+  report covering both an MTA-STS and a DANE policy counted as two reports
+  on the dashboard, and as two with warnings when both had failures. It now
+  logs one event per report, with the totals summed over its policies and
+  each policy's figures kept in the event. Thanks to khashmeshab. (#406,
+  fixes #402)
+
 ## [27.1-rc.24] - 2026-11-16
 
 The sign-in page no longer stays behind in the browser history.
