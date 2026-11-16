@@ -11,7 +11,8 @@ use ahash::AHashMap;
 use common::USER_AGENT;
 use mail_auth::report::{
     ActionDisposition, AuthFailureType, DeliveryResult, DmarcResult, Feedback, FeedbackType,
-    Report, tlsrpt::TlsReport,
+    Report,
+    tlsrpt::{Policy, TlsReport},
 };
 use std::{collections::hash_map::Entry, time::SystemTime};
 use store::write::now;
@@ -146,11 +147,30 @@ fn fails_dmarc(records: &[mail_auth::report::Record]) -> bool {
 
 impl LogReport for TlsReport {
     fn log(&self) {
+        // One event per report, not per policy (#402): the dashboard counts
+        // these events as reports, and a report that covers both an MTA-STS
+        // and a DANE policy counted twice. Each policy's figures stay in the
+        // event, for the first five policies as before.
+        let (successes, failures) = tls_totals(&self.policies);
+        let mut domains: Vec<trc::Value> = Vec::new();
+        let mut policies = Vec::new();
+        let mut details = Vec::new();
         for policy in self.policies.iter().take(5) {
-            let mut details = AHashMap::with_capacity(policy.failure_details.len());
+            let domain = policy.policy.policy_domain.as_str();
+            if !domains
+                .iter()
+                .any(|d| matches!(d, trc::Value::String(s) if s.as_str() == domain))
+            {
+                domains.push(trc::Value::String(domain.into()));
+            }
+            policies.push(trc::Value::String(
+                format!("{:?}", policy.policy.policy_type).into(),
+            ));
+
+            let mut failed = AHashMap::with_capacity(policy.failure_details.len());
             for failure in &policy.failure_details {
                 let num_failures = std::cmp::min(1, failure.failed_session_count);
-                match details.entry(failure.result_type) {
+                match failed.entry(failure.result_type) {
                     Entry::Occupied(mut e) => {
                         *e.get_mut() += num_failures;
                     }
@@ -159,26 +179,44 @@ impl LogReport for TlsReport {
                     }
                 }
             }
-
-            trc::event!(
-                IncomingReport(if policy.summary.total_failure > 0 {
-                    IncomingReportEvent::TlsReportWithWarnings
-                } else {
-                    IncomingReportEvent::TlsReport
-                }),
-                RangeFrom =
-                    trc::Value::Timestamp(self.date_range.start_datetime.to_timestamp() as u64),
-                RangeTo = trc::Value::Timestamp(self.date_range.end_datetime.to_timestamp() as u64),
-                Domain = policy.policy.policy_domain.clone(),
-                From = self.contact_info.as_deref().unwrap_or_default().to_string(),
-                Id = self.report_id.clone(),
-                Policy = format!("{:?}", policy.policy.policy_type),
-                TotalSuccesses = policy.summary.total_success,
-                TotalFailures = policy.summary.total_failure,
-                Details = format!("{details:?}"),
-            );
+            details.push(trc::Value::String(
+                format!(
+                    "{domain} {:?}: {} succeeded, {} failed {failed:?}",
+                    policy.policy.policy_type,
+                    policy.summary.total_success,
+                    policy.summary.total_failure
+                )
+                .into(),
+            ));
         }
+
+        trc::event!(
+            IncomingReport(if failures > 0 {
+                IncomingReportEvent::TlsReportWithWarnings
+            } else {
+                IncomingReportEvent::TlsReport
+            }),
+            RangeFrom = trc::Value::Timestamp(self.date_range.start_datetime.to_timestamp() as u64),
+            RangeTo = trc::Value::Timestamp(self.date_range.end_datetime.to_timestamp() as u64),
+            Domain = domains,
+            From = self.contact_info.as_deref().unwrap_or_default().to_string(),
+            Id = self.report_id.clone(),
+            Policy = policies,
+            TotalSuccesses = successes,
+            TotalFailures = failures,
+            Details = details,
+        );
     }
+}
+
+/// A TLS report's successful and failed sessions, over all its policies.
+fn tls_totals(policies: &[Policy]) -> (u64, u64) {
+    policies.iter().fold((0, 0), |(ok, failed), p| {
+        (
+            ok + u64::from(p.summary.total_success),
+            failed + u64::from(p.summary.total_failure),
+        )
+    })
 }
 
 impl LogReport for Feedback<'_> {
@@ -223,8 +261,11 @@ impl LogReport for Feedback<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::fails_dmarc;
-    use mail_auth::report::{ActionDisposition, DmarcResult, Record};
+    use super::{fails_dmarc, tls_totals};
+    use mail_auth::report::{
+        ActionDisposition, DmarcResult, Record,
+        tlsrpt::{Policy, PolicyDetails, PolicyType, Summary},
+    };
 
     fn row(dkim: DmarcResult, spf: DmarcResult) -> Record {
         Record::new()
@@ -266,5 +307,34 @@ mod tests {
         assert!(!fails_dmarc(&[
             row(DmarcResult::Fail, DmarcResult::Fail).with_count(0)
         ]));
+    }
+
+    fn policy(policy_type: PolicyType, ok: u32, failed: u32) -> Policy {
+        Policy {
+            policy: PolicyDetails::new(policy_type, "example.org"),
+            summary: Summary {
+                total_success: ok,
+                total_failure: failed,
+            },
+            failure_details: vec![],
+        }
+    }
+
+    #[test]
+    fn a_tls_report_is_one_report_whatever_its_policies() {
+        // #402: two policies with failures are still one report with warnings
+        let report = [
+            policy(PolicyType::Sts, 10, 2),
+            policy(PolicyType::Tlsa, 7, 1),
+        ];
+        assert_eq!(tls_totals(&report), (17, 3));
+        assert_eq!(
+            tls_totals(&[
+                policy(PolicyType::Sts, 4, 0),
+                policy(PolicyType::Tlsa, 4, 0)
+            ]),
+            (8, 0)
+        );
+        assert_eq!(tls_totals(&[]), (0, 0));
     }
 }
