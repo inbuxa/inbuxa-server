@@ -24,6 +24,8 @@ use quick_xml::{Reader, XmlVersion, events::Event};
 use std::io::{Cursor, Read};
 
 /// How much may be unpacked from one attachment, and from how many entries.
+/// A caller reading several attachments passes what's left of its own
+/// budget, so a message is unpacked once, not once per attachment.
 #[derive(Debug, Clone, Copy)]
 pub struct Limits {
     pub max_unpacked: u64,
@@ -86,7 +88,20 @@ pub fn extract(
     data: &[u8],
     limits: &Limits,
 ) -> Extracted {
-    extract_at(content_type, file_name, data, limits, 0)
+    extract_counted(content_type, file_name, data, limits).0
+}
+
+/// [`extract`], and how many bytes it unpacked from an archive on the way,
+/// whether or not they became text.
+pub fn extract_counted(
+    content_type: &str,
+    file_name: Option<&str>,
+    data: &[u8],
+    limits: &Limits,
+) -> (Extracted, u64) {
+    let mut unpacked = 0;
+    let extracted = extract_at(content_type, file_name, data, limits, 0, &mut unpacked);
+    (extracted, unpacked)
 }
 
 fn extract_at(
@@ -95,6 +110,8 @@ fn extract_at(
     data: &[u8],
     limits: &Limits,
     depth: u8,
+    // What an archive unpacked; one inside an archive isn't opened
+    unpacked: &mut u64,
 ) -> Extracted {
     let content_type = content_type.to_ascii_lowercase();
     let extension = file_name
@@ -121,7 +138,7 @@ fn extract_at(
         if depth > 0 {
             return Extracted::NotInspectable(Why::NestedArchive);
         }
-        return zip(data, limits);
+        return zip(data, limits, unpacked);
     }
     if is_archive(data) {
         return Extracted::NotInspectable(Why::Archive);
@@ -298,7 +315,7 @@ fn strip_html(html: &str) -> String {
 }
 
 /// A ZIP file: an Office document, an OpenDocument, or an archive.
-fn zip(data: &[u8], limits: &Limits) -> Extracted {
+fn zip(data: &[u8], limits: &Limits, unpacked: &mut u64) -> Extracted {
     let Ok(mut archive) = zip::ZipArchive::new(Cursor::new(data)) else {
         return Extracted::NotInspectable(Why::Damaged);
     };
@@ -331,6 +348,7 @@ fn zip(data: &[u8], limits: &Limits) -> Extracted {
                 .read_to_end(&mut bytes)
                 .map_err(|_| Why::Damaged)?;
             if bytes.len() as u64 > budget {
+                budget = 0;
                 return Err(Why::TooLarge);
             }
             budget -= bytes.len() as u64;
@@ -397,7 +415,7 @@ fn zip(data: &[u8], limits: &Limits) -> Extracted {
             // An archive: each file inside, one level deep
             for name in names.iter().filter(|n| !n.ends_with('/')) {
                 let bytes = read(&mut archive, name)?;
-                match extract_at("", Some(name), &bytes, limits, 1) {
+                match extract_at("", Some(name), &bytes, limits, 1, &mut 0) {
                     Extracted::Text(inner) => {
                         text.push_str(&inner);
                         text.push('\n');
@@ -409,6 +427,7 @@ fn zip(data: &[u8], limits: &Limits) -> Extracted {
         }
         Ok(())
     })();
+    *unpacked += limits.max_unpacked - budget;
     match result {
         Ok(()) => Extracted::Text(text),
         Err(why) => Extracted::NotInspectable(why),
@@ -440,7 +459,7 @@ fn package_part(
         text.push('\n');
         return Ok(());
     }
-    match extract_at("", Some(name), &bytes, limits, 1) {
+    match extract_at("", Some(name), &bytes, limits, 1, &mut 0) {
         Extracted::Text(inner) => {
             text.push_str(&inner);
             text.push('\n');
