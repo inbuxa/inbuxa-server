@@ -10,8 +10,14 @@
 //! client is the right-most address in the chain that no trusted proxy
 //! accounts for. Everything to its left was written by the client and can
 //! say anything. Forwarding headers are read only when the connection itself
-//! comes from a trusted proxy.
+//! comes from a trusted proxy, and only the one header that proxy writes: a
+//! proxy appends to its own header and passes any other through as the client
+//! sent it.
+//!
+//! A loopback address in a header is the loopback of whoever wrote it, so it
+//! stands for this host only when every hop after it is loopback too.
 
+use common::config::network::ForwardedHeader;
 use hyper::HeaderMap;
 use hyper::header::FORWARDED;
 use registry::types::ipmask::IpAddrOrMask;
@@ -28,23 +34,36 @@ pub fn forwarded_client(
     peer: IpAddr,
     headers: &HeaderMap,
     trusted: &[IpAddrOrMask],
+    header: ForwardedHeader,
 ) -> Option<IpAddr> {
     if !is_trusted_proxy(trusted, &peer) {
         return None;
     }
 
-    let chain = forwarded_chain(headers).or_else(|| x_forwarded_chain(headers))?;
+    // Never fall back from one header to the other: the one the proxy
+    // doesn't write is entirely the client's.
+    let chain = match header {
+        ForwardedHeader::XForwardedFor => x_forwarded_chain(headers),
+        ForwardedHeader::Forwarded => forwarded_chain(headers),
+    }?;
     let mut client = None;
+    let mut writer = peer.to_canonical();
     for hop in chain.into_iter().rev() {
         // An address that can't be read ends the chain: what's left of it
         // can't be told apart from what the client wrote.
         let Some(ip) = hop else {
             break;
         };
+        // Loopback as written by a proxy on another host is that host's,
+        // not ours: the client is as far as we can vouch for, the writer.
+        if ip.is_loopback() && !writer.is_loopback() {
+            return Some(writer);
+        }
         client = Some(ip);
         if !is_trusted_proxy(trusted, &ip) {
             break;
         }
+        writer = ip;
     }
     client
 }
@@ -124,12 +143,24 @@ mod tests {
             .collect()
     }
 
-    fn client(peer: &str, headers: &[(&'static str, &str)]) -> Option<IpAddr> {
+    fn client_with(
+        header: ForwardedHeader,
+        peer: &str,
+        headers: &[(&'static str, &str)],
+    ) -> Option<IpAddr> {
         let mut map = HeaderMap::new();
         for (name, value) in headers {
             map.append(*name, HeaderValue::from_str(value).unwrap());
         }
-        forwarded_client(peer.parse().unwrap(), &map, &trusted())
+        forwarded_client(peer.parse().unwrap(), &map, &trusted(), header)
+    }
+
+    fn client(peer: &str, headers: &[(&'static str, &str)]) -> Option<IpAddr> {
+        client_with(ForwardedHeader::XForwardedFor, peer, headers)
+    }
+
+    fn client_fwd(peer: &str, headers: &[(&'static str, &str)]) -> Option<IpAddr> {
+        client_with(ForwardedHeader::Forwarded, peer, headers)
     }
 
     fn ip(ip: &str) -> Option<IpAddr> {
@@ -176,7 +207,7 @@ mod tests {
             None
         );
         assert_eq!(
-            client("192.0.2.10", &[("forwarded", "for=203.0.113.7")]),
+            client_fwd("192.0.2.10", &[("forwarded", "for=203.0.113.7")]),
             None
         );
     }
@@ -185,45 +216,83 @@ mod tests {
     fn forwarded_header() {
         let fwd = "forwarded";
         assert_eq!(
-            client(
+            client_fwd(
                 "127.0.0.1",
                 &[(fwd, "for=198.51.100.1, for=203.0.113.7;proto=https")]
             ),
             ip("203.0.113.7")
         );
         assert_eq!(
-            client(
+            client_fwd(
                 "127.0.0.1",
                 &[(fwd, r#"For="[2001:db8::7]:4711", for=10.0.0.5"#)]
             ),
             ip("2001:db8::7")
         );
         assert_eq!(
-            client("127.0.0.1", &[(fwd, "for=203.0.113.7:8080")]),
+            client_fwd("127.0.0.1", &[(fwd, "for=203.0.113.7:8080")]),
             ip("203.0.113.7")
         );
         // An obfuscated hop ends the chain
         assert_eq!(
-            client("127.0.0.1", &[(fwd, "for=_hidden, for=10.0.0.5")]),
+            client_fwd("127.0.0.1", &[(fwd, "for=_hidden, for=10.0.0.5")]),
             ip("10.0.0.5")
         );
-        // Forwarded is preferred; X-Forwarded-For is the fallback
+    }
+
+    #[test]
+    fn only_the_configured_header_is_read() {
+        let fwd = "forwarded";
+        let xff = "x-forwarded-for";
+        // X-Forwarded-For: a Forwarded header can only be the client's
         assert_eq!(
             client(
                 "127.0.0.1",
-                &[
-                    (fwd, "for=203.0.113.7"),
-                    ("x-forwarded-for", "198.51.100.1")
-                ]
+                &[(fwd, "for=192.0.2.66"), (xff, "203.0.113.7")]
             ),
             ip("203.0.113.7")
         );
+        assert_eq!(client("127.0.0.1", &[(fwd, "for=127.0.0.1")]), None);
+        // Forwarded: an X-Forwarded-For header can only be the client's
         assert_eq!(
-            client(
+            client_fwd(
                 "127.0.0.1",
-                &[(fwd, "proto=https"), ("x-forwarded-for", "198.51.100.1")]
+                &[(xff, "192.0.2.66"), (fwd, "for=203.0.113.7")]
             ),
-            ip("198.51.100.1")
+            ip("203.0.113.7")
+        );
+        assert_eq!(client_fwd("127.0.0.1", &[(xff, "127.0.0.1")]), None);
+        assert_eq!(
+            client_fwd("127.0.0.1", &[(fwd, "proto=https"), (xff, "192.0.2.66")]),
+            None
+        );
+    }
+
+    #[test]
+    fn loopback_in_a_header_is_the_writer_s() {
+        let xff = "x-forwarded-for";
+        // A client on the proxy's network can't claim to be this host
+        assert_eq!(
+            client("127.0.0.1", &[(xff, "127.0.0.1, 10.0.0.9")]),
+            ip("10.0.0.9")
+        );
+        assert_eq!(client("10.0.0.2", &[(xff, "127.0.0.1")]), ip("10.0.0.2"));
+        assert_eq!(client("10.0.0.2", &[(xff, "::1")]), ip("10.0.0.2"));
+        assert_eq!(
+            client("127.0.0.1", &[(xff, "::ffff:127.0.0.1, 10.0.0.9")]),
+            ip("10.0.0.9")
+        );
+        // A public client's claim never got that far anyway
+        assert_eq!(
+            client("127.0.0.1", &[(xff, "127.0.0.1, 203.0.113.7")]),
+            ip("203.0.113.7")
+        );
+        // Loopback all the way: a client on this host, through a local proxy
+        assert_eq!(client("127.0.0.1", &[(xff, "127.0.0.1")]), ip("127.0.0.1"));
+        assert_eq!(client("::1", &[(xff, "::1")]), ip("::1"));
+        assert_eq!(
+            client_fwd("10.0.0.2", &[("forwarded", "for=127.0.0.1")]),
+            ip("10.0.0.2")
         );
     }
 }
