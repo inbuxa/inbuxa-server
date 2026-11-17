@@ -1056,6 +1056,38 @@ async fn queries(scim: &ScimTest) {
         "SCIM-50: users first"
     );
 
+    // A filter nested or long enough to overflow the stack is refused, in a
+    // search, a query and a PATCH path, and the server keeps answering
+    scim.client
+        .post(
+            "/Users/.search",
+            json!({"schemas": [MESSAGE_SEARCH_REQUEST], "filter": "(".repeat(500_000)}),
+        )
+        .await
+        .assert_error(400, Some("invalidFilter"));
+    let nested = format!("{}userName eq \"a\"{}", "(".repeat(40), ")".repeat(40));
+    scim.client
+        .get(&query("/Users", &nested))
+        .await
+        .assert_error(400, Some("invalidFilter"));
+    let long = format!("{}userName eq \"a\"", "userName eq \"a\" and ".repeat(500));
+    scim.client
+        .get(&query("/Users", &long))
+        .await
+        .assert_error(400, Some("invalidFilter"));
+    scim.client
+        .patch(
+            &format!("/Groups/{group}"),
+            patch_body(json!([{"op": "remove",
+                "path": format!("members[{}]", "(".repeat(500_000))}])),
+        )
+        .await
+        .assert_error(400, Some("invalidPath"));
+    scim.client
+        .get(&query("/Users", "externalId eq \"FIND-1\""))
+        .await
+        .assert_status(200);
+
     scim.destroy(&format!("/Groups/{group}")).await;
     scim.destroy(&format!("/Users/{id}")).await;
 }
