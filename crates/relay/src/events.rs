@@ -15,14 +15,17 @@ use crate::state::write_atomic;
 use inbuxa_relay_proto::{time, types::RelayEvent};
 use serde_json::{Map, Value};
 use std::{
-    collections::VecDeque,
+    collections::{HashSet, VecDeque},
     fs::{self, OpenOptions},
     io::{self, BufRead, Write},
     path::PathBuf,
 };
 
-/// The most events kept; past it, the oldest go.
+/// The most events kept; past it, the oldest go, down to `KEEP_EVENTS`.
+/// Dropping in batches rewrites the file once a thousand events, not for
+/// every event once the list is full.
 const MAX_EVENTS: usize = 10_000;
+const KEEP_EVENTS: usize = MAX_EVENTS - MAX_EVENTS / 10;
 
 pub struct Events {
     path: PathBuf,
@@ -101,7 +104,7 @@ impl Events {
     }
 
     fn drop_oldest(&mut self) {
-        while self.list.len() > MAX_EVENTS {
+        while self.list.len() > KEEP_EVENTS {
             if let Some((_, event)) = self.list.pop_front() {
                 self.modseq += 1;
                 self.destroyed.push_back((self.modseq, event.id));
@@ -159,9 +162,10 @@ impl Events {
 
     /// The downstream has the events: forget them. Returns those removed.
     pub fn acknowledge(&mut self, ids: &[String]) -> Vec<String> {
+        let ids: HashSet<&str> = ids.iter().map(String::as_str).collect();
         let mut removed = Vec::new();
         self.list.retain(|(_, e)| {
-            if ids.contains(&e.id) {
+            if ids.contains(e.id.as_str()) {
                 removed.push(e.id.clone());
                 false
             } else {
@@ -222,6 +226,43 @@ mod tests {
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].id, b);
         assert_eq!(missing, vec![a]);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Past the cap, events are dropped in batches: the file isn't
+    /// rewritten for every new event.
+    #[test]
+    fn full_list_isnt_rewritten_per_event() {
+        use std::os::unix::fs::MetadataExt;
+        let dir =
+            std::env::temp_dir().join(format!("inbuxa-relay-events-cap-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("events.jsonl");
+
+        let mut ev = Events::open(path.clone()).unwrap();
+        for _ in 0..MAX_EVENTS {
+            ev.record("smtp.session", data([("accepted", json!(0))]));
+        }
+        let mut rewrites = 0;
+        let mut inode = fs::metadata(&path).unwrap().ino();
+        for _ in 0..100 {
+            ev.record("smtp.session", data([("accepted", json!(0))]));
+            let now = fs::metadata(&path).unwrap().ino();
+            if now != inode {
+                rewrites += 1;
+                inode = now;
+            }
+        }
+        assert!(rewrites <= 1, "{rewrites} rewrites for 100 events");
+        assert!(ev.list.len() <= MAX_EVENTS);
+
+        // What is kept survives a restart, and the newest is there.
+        let last = ev.record("smtp.session", data([("accepted", json!(1))]));
+        let kept = ev.list.len();
+        let ev = Events::open(path).unwrap();
+        assert_eq!(ev.list.len(), kept);
+        assert_eq!(ev.list.back().unwrap().1.id, last);
         fs::remove_dir_all(dir).unwrap();
     }
 }
