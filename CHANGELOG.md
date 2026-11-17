@@ -15,6 +15,16 @@ https://github.com/inbuxa/inbuxa-server/security/advisories.
 Every version PR adds that version's entry here. CI refuses a version this
 file has no entry for (`tools/release/version.py --changelog`).
 
+## [27.1-rc.26] - 2026-11-17
+
+The bundled inbuxa-migrate moves to 27.1-rc.15.
+
+### Changed
+- The container image bundles inbuxa-migrate 27.1-rc.15: upstream v1.1.0's
+  dependency updates, and `export` no longer sends a message again on every
+  run when the target keys it differently, as with a message carrying two
+  `Message-ID` headers. (#411)
+
 ## [27.1-rc.25] - 2026-11-16
 
 A TLS report counts once on the dashboard, however many policies it covers,
