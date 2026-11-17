@@ -183,6 +183,8 @@ impl ParseHttp for Server {
                                                 .find(|(k, _)| k == "accept")
                                                 .map(|(_, v)| v.into_owned())
                                         })
+                                        // inbuxa: only a type that can be a header
+                                        .filter(|v| hyper::header::HeaderValue::from_str(v).is_ok())
                                         .unwrap_or("application/octet-stream".to_string()),
                                     blob,
                                 }
@@ -742,6 +744,7 @@ async fn handle_session<T: SessionStream>(inner: Arc<Inner>, session: SessionDat
                         session.remote_ip,
                         req.headers(),
                         &server.core.network.http.trusted_proxies,
+                        server.core.network.http.forwarded_header,
                     ) {
                         trc::event!(
                             Http(trc::HttpEvent::RequestUrl),

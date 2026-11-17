@@ -595,7 +595,7 @@ fn tenant_sees(domains: &AHashSet<String>, message: &Message) -> bool {
     )
 }
 
-fn tenant_sees_archived(domains: &AHashSet<String>, message: &ArchivedMessage) -> bool {
+pub(crate) fn tenant_sees_archived(domains: &AHashSet<String>, message: &ArchivedMessage) -> bool {
     inbuxa_features::tenancy::queue::sees(
         domains,
         message.recipients.iter().map(|rcpt| rcpt.address()),

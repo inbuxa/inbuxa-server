@@ -123,6 +123,12 @@ impl Server {
             // inbuxa: DL-20: the lists and the check are the server's
             Permission::SysDeliverabilityUpdate,
             Permission::SysDeliverabilityCheck,
+            // inbuxa: system Sieve scripts run with the trusted functions,
+            // whose `exec` starts any program as the server's user: no tenant
+            // policy hands that out
+            Permission::SysSieveSystemScriptCreate,
+            Permission::SysSieveSystemScriptUpdate,
+            Permission::SysSieveSystemScriptDestroy,
         ] {
             permissions.disabled.set(permission as usize);
         }

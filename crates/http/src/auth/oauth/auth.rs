@@ -19,7 +19,7 @@ use common::{
             CLIENT_ID_MAX_LEN, DEVICE_CODE_LEN, SUPPORTED_SCOPES, USER_CODE_ALPHABET,
             USER_CODE_LEN,
             client_id::{decode_client_id, scopes_to_mask},
-            registration::redirect_uri_matches,
+            registration::{redirect_uri_matches, validate_redirect_uri},
         },
     },
 };
@@ -232,6 +232,22 @@ impl OAuthApiHandler for Server {
                     None => scope,
                 };
 
+                // inbuxa: with registration not required, a client nobody
+                // registered may only redirect where a web site can't listen:
+                // a loopback address or a private-use scheme (RFC 8252). A
+                // web application registers, so its redirect is checked.
+                let unregistered = stateless_client.is_none()
+                    && !self.core.oauth.require_client_authentication
+                    && !self.is_registered_client(&client_id).await?;
+                if unregistered
+                    && (redirect_uri.starts_with("https://")
+                        || validate_redirect_uri(&redirect_uri).is_err())
+                {
+                    return Err(trc::AuthEvent::Error.into_err().details(
+                        "An unregistered client may only redirect to a loopback address or a private-use scheme.",
+                    ));
+                }
+
                 // Validate Resource Indicators (RFC 8707)
                 for resource in &resource {
                     if !is_known_resource(
@@ -275,7 +291,10 @@ impl OAuthApiHandler for Server {
                         }
                     },
                     None => {
-                        if stateless_client.is_some() {
+                        // inbuxa: a client nobody registered, accepted only
+                        // because registration isn't required, proves itself
+                        // with PKCE too
+                        if stateless_client.is_some() || unregistered {
                             return Err(trc::AuthEvent::Error.into_err().details(
                                 "A PKCE code_challenge with the S256 method is required.",
                             ));
