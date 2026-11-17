@@ -471,7 +471,10 @@ Each requirement has an ID, and tests name the IDs they check.
   (`attr[sub eq "x"]`) inside `filter` is `400 invalidFilter`. Comparison
   follows each attribute's `caseExact` (SCIM-6). A filter that matches
   nothing is `200` with an empty `ListResponse`: that's Entra ID's
-  connection test.
+  connection test. A filter over 8 KiB, or nested (`(`, `not (`, `[`) more
+  than 32 deep, is `400 invalidFilter` before it's parsed further, and so is
+  a PATCH path's filter (`400 invalidPath`): parsing recurses, and a stack
+  overflow would stop the whole server.
 - **SCIM-46.** `active`, `displayName` and `name.formatted` can't be
   answered from an index. They're checked after the indexed part of the
   filter has narrowed the candidates. If more than 200 candidates remain, the

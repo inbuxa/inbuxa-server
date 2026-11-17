@@ -600,3 +600,26 @@ async fn run(
     }
     Ok(ScimResponse::json(200, body))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn longest_filter_is_read_on_a_worker_stack() {
+        // What reads a parsed filter recurses down its `and` chain too; the
+        // longest one a filter can hold stays within a 2 MiB worker stack
+        std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(|| {
+                let (term, last) = ("userName eq \"a\" and ", "userName eq \"a\"");
+                let count = (scim_proto::filter::MAX_LENGTH - last.len()) / term.len();
+                let text = format!("{}{last}", term.repeat(count));
+                let clauses = parse_filter(ResourceKind::User, Some(&text)).unwrap();
+                assert!(clauses.len() > 300);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+}
