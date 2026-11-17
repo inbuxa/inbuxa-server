@@ -370,8 +370,36 @@ enum Next {
 struct DataState {
     rx: DataReceiver,
     incoming: Option<Box<Incoming>>,
+    receiving: Receiving,
     buf: Vec<u8>,
     too_big: bool,
+    /// The spool or its disk filled while the message came in.
+    no_room: bool,
+}
+
+/// A message's bytes while it is received, counted in `App::receiving`
+/// until it is in the spool or dropped.
+struct Receiving {
+    app: Arc<App>,
+    bytes: u64,
+}
+
+impl Receiving {
+    fn add(&mut self, bytes: u64) {
+        self.app.receiving.fetch_add(bytes, Ordering::Relaxed);
+        self.bytes += bytes;
+    }
+
+    fn release(&mut self) {
+        self.app.receiving.fetch_sub(self.bytes, Ordering::Relaxed);
+        self.bytes = 0;
+    }
+}
+
+impl Drop for Receiving {
+    fn drop(&mut self) {
+        self.release();
+    }
 }
 
 impl Session {
@@ -460,6 +488,7 @@ impl Session {
                         if let Some(incoming) = state.incoming.take() {
                             incoming.abort().await;
                         }
+                        state.receiving.release();
                         state.too_big = false;
                         self.reply("451 4.3.0 Temporary failure, try again later");
                         // Discard the rest of the message.
@@ -503,8 +532,13 @@ impl Session {
                         data = Some(DataState {
                             rx: DataReceiver::new(),
                             incoming: Some(incoming),
+                            receiving: Receiving {
+                                app: self.app.clone(),
+                                bytes: 0,
+                            },
                             buf: Vec::with_capacity(64 * 1024),
                             too_big: false,
+                            no_room: false,
                         });
                         // The 354 goes out now; the sender waits for it.
                         if self.flush(&mut stream).await.is_err() {
@@ -539,19 +573,38 @@ impl Session {
             return Ok(());
         }
         if !state.too_big
+            && !state.no_room
             && let Some(incoming) = state.incoming.as_mut()
         {
-            if incoming.size() + ready as u64 > self.settings.max_message_size {
+            let (before, after) = (incoming.size(), incoming.size() + ready as u64);
+            // The cap for every chunk; the disk each MiB.
+            let disk = before >> 20 != after >> 20;
+            if after > self.settings.max_message_size {
                 state.too_big = true;
+            } else if !self.app.spool_has_room(&self.settings, ready as u64, disk) {
+                state.no_room = true;
             } else {
                 incoming.write(&state.buf[..ready]).await?;
+                state.receiving.add(ready as u64);
             }
+        }
+        // No room: what came in so far goes now, and the rest isn't kept.
+        if state.no_room
+            && let Some(incoming) = state.incoming.take()
+        {
+            incoming.abort().await;
+            state.receiving.release();
         }
         state.buf.drain(..ready);
         Ok(())
     }
 
     async fn end_of_data(&mut self, mut state: DataState) {
+        if state.no_room {
+            self.reset();
+            self.reply("452 4.3.1 Insufficient storage, try again later");
+            return;
+        }
         let Some(incoming) = state.incoming.take() else {
             // The spool failed mid-message; the 451 is already out.
             self.reset();
@@ -614,6 +667,7 @@ impl Session {
             .lock()
             .expect("spool")
             .insert(meta, file_len, live);
+        state.receiving.release();
         self.app.inbound_changed();
         self.accepted += 1;
         let verdict = match waiter {
@@ -954,22 +1008,28 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
-    /// The first line the relay sends a new connection.
-    async fn greeting(addr: SocketAddr) -> (TcpStream, String) {
-        let mut tcp = TcpStream::connect(addr).await.unwrap();
+    /// One line from the relay.
+    async fn line<S: AsyncRead + Unpin>(stream: &mut S) -> String {
         let mut line = Vec::new();
         let mut byte = [0u8; 1];
         while !line.ends_with(b"\r\n") {
-            let n = tokio::time::timeout(Duration::from_secs(10), tcp.read(&mut byte))
+            let n = tokio::time::timeout(Duration::from_secs(10), stream.read(&mut byte))
                 .await
-                .expect("a greeting")
+                .expect("a line")
                 .unwrap();
             if n == 0 {
                 break;
             }
             line.push(byte[0]);
         }
-        (tcp, String::from_utf8(line).unwrap())
+        String::from_utf8(line).unwrap()
+    }
+
+    /// The first line the relay sends a new connection.
+    async fn greeting(addr: SocketAddr) -> (TcpStream, String) {
+        let mut tcp = TcpStream::connect(addr).await.unwrap();
+        let line = line(&mut tcp).await;
+        (tcp, line)
     }
 
     /// `maxSmtpSessions` caps sessions from all senders together.
@@ -1009,6 +1069,55 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         assert!(admitted, "a place freed by a closed session");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Mail still being received counts toward `spoolMaxBytes`: two
+    /// messages that each fit can't both be taken when together they
+    /// don't.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mail_being_received_counts_toward_the_spool_cap() {
+        let (_, public) = inbuxa_relay_proto::seal::generate_keypair();
+        let settings = RelaySettings {
+            spool_max_bytes: 1024 * 1024,
+            max_message_size: 1024 * 1024,
+            sealing_key: Some(public),
+            ..relay_settings()
+        };
+        let (dir, app) = test_app("spool-cap", settings);
+        let start = || {
+            let peer: SocketAddr = "192.0.2.1:40000".parse().unwrap();
+            let mut session = Session::new(app.clone(), app.settings().unwrap(), peer, peer);
+            session.helo = Some("client.test".into());
+            session.mail_from = Some(Address::new("a@example.org"));
+            session.rcpt_to = vec![Address::new("b@example.com")];
+            let (server, client) = tokio::io::duplex(8 * 1024);
+            tokio::spawn(async move { session.run(server, None).await });
+            client
+        };
+        let body = format!("{}\r\n", "x".repeat(998)).repeat(700);
+
+        // The first message is mostly in when the second starts.
+        let mut first = start();
+        first.write_all(b"DATA\r\n").await.unwrap();
+        assert!(line(&mut first).await.starts_with("354"));
+        first.write_all(body.as_bytes()).await.unwrap();
+
+        let mut second = start();
+        second.write_all(b"DATA\r\n").await.unwrap();
+        assert!(line(&mut second).await.starts_with("354"));
+        second.write_all(body.as_bytes()).await.unwrap();
+        second.write_all(b".\r\n").await.unwrap();
+        let reply = line(&mut second).await;
+        assert!(reply.starts_with("452 4.3.1"), "the second: {reply}");
+
+        first.write_all(b".\r\n").await.unwrap();
+        let reply = line(&mut first).await;
+        assert!(reply.starts_with("250 "), "the first: {reply}");
+
+        let spooled = app.spool.lock().unwrap().bytes();
+        assert!(spooled <= 1024 * 1024, "{spooled} bytes spooled");
+        assert_eq!(app.spool.lock().unwrap().count(), 1);
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

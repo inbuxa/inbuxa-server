@@ -67,6 +67,8 @@ pub struct App {
     pub limiter: Mutex<Limiter>,
     /// SMTP sessions open now, against `maxSmtpSessions`.
     pub smtp_sessions: AtomicU32,
+    /// Bytes of inbound mail being received, not yet in the spool.
+    pub receiving: AtomicU64,
     pub self_upgrade: bool,
     /// The keys a release must be signed by (RL-29).
     pub release_keys: Vec<[u8; 32]>,
@@ -120,6 +122,7 @@ impl App {
             last_error: Mutex::new(None),
             limiter: Mutex::new(Limiter::default()),
             smtp_sessions: AtomicU32::new(0),
+            receiving: AtomicU64::new(0),
             self_upgrade: std::env::var_os("INBUXA_RELAY_CONTAINER").is_none(),
             release_keys: inbuxa_relay_proto::release::RELEASE_KEYS.to_vec(),
             exe: crate::upgrade::current_exe(),
@@ -269,13 +272,25 @@ impl App {
         }
     }
 
+    /// The spool's bytes, both ways, with the mail being received.
+    fn spool_bytes(&self) -> u64 {
+        self.spool.lock().expect("spool").bytes()
+            + self.outbox.lock().expect("outbox").bytes()
+            + self.receiving.load(Ordering::Relaxed)
+    }
+
     /// Whether the spool is too full for new mail, either way: past 90% of
-    /// the cap.
+    /// the cap, or its disk past 90%.
     pub fn spool_full(&self, settings: &RelaySettings) -> bool {
-        let bytes =
-            self.spool.lock().expect("spool").bytes() + self.outbox.lock().expect("outbox").bytes();
-        bytes.saturating_mul(10) >= settings.spool_max_bytes.saturating_mul(9)
-            || disk_nearly_full(&self.paths.spool_in())
+        self.spool_bytes().saturating_mul(10) >= settings.spool_max_bytes.saturating_mul(9)
+            || disk_nearly_full(&self.paths.spool_in(), 10)
+    }
+
+    /// Whether `more` bytes of a message being received still fit: under
+    /// the cap itself, and, when `disk` asks, with 5% of the disk free.
+    pub fn spool_has_room(&self, settings: &RelaySettings, more: u64, disk: bool) -> bool {
+        self.spool_bytes().saturating_add(more) <= settings.spool_max_bytes
+            && !(disk && disk_nearly_full(&self.paths.spool_in(), 5))
     }
 
     /// Writes `status.json`, for `inbuxa-relay status`.
@@ -286,8 +301,9 @@ impl App {
     }
 }
 
+/// Whether less than `percent_free` of the disk holding `path` is free.
 #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
-fn disk_nearly_full(path: &std::path::Path) -> bool {
+fn disk_nearly_full(path: &std::path::Path, percent_free: u64) -> bool {
     use std::{ffi::CString, os::unix::ffi::OsStrExt};
     unsafe extern "C" {
         fn statvfs(path: *const std::ffi::c_char, buf: *mut std::ffi::c_void) -> i32;
@@ -303,11 +319,11 @@ fn disk_nearly_full(path: &std::path::Path) -> bool {
     // SAFETY: a valid C string, and a buffer larger than struct statvfs.
     let rc = unsafe { statvfs(cpath.as_ptr(), buf.as_mut_ptr().cast()) };
     let (blocks, avail) = (buf[2], buf[4]);
-    rc == 0 && blocks > 0 && avail.saturating_mul(10) < blocks
+    rc == 0 && blocks > 0 && avail.saturating_mul(100) < blocks.saturating_mul(percent_free)
 }
 
 #[cfg(not(all(target_os = "linux", target_pointer_width = "64")))]
-fn disk_nearly_full(_: &std::path::Path) -> bool {
+fn disk_nearly_full(_: &std::path::Path, _: u64) -> bool {
     false
 }
 

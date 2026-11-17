@@ -543,6 +543,9 @@ When no link is up, or after RL-13:
 - When the spool passes 90% of `spoolMaxBytes`, or 90% of its disk, the
   relay answers new inbound mail with `452 4.3.1`, and `Outbound/set` create
   with `overQuota`. Senders retry, and nothing already accepted is dropped.
+  Mail still being received counts toward the spool. A message that would
+  take the spool past `spoolMaxBytes` itself, or its disk past 95%, while it
+  comes in is dropped at once and answered `452 4.3.1` at the end of DATA.
 - **RL-22.** The state directory holds the link key, the pins, the cached
   settings, the recipient set, the SMTP certificate, the spool and the
   unacknowledged events. Everything else is rebuilt at start.
