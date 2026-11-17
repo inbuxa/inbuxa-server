@@ -331,6 +331,11 @@ Each has an ID, and tests name the IDs they check.
   **Built, 2026-11-17.** `crates/http/src/security_headers.rs`, called from
   `request.rs` after the operator's headers. Checked in the system suite's
   OIDC test.
+  The anonymous discovery documents that echo the address they're asked
+  about (the three autoconfig paths, `autodiscover.xml`, `autodiscover.json`
+  and `user-agent-configuration.json`) also carry
+  `Content-Security-Policy: default-src 'none'; sandbox`, so a browser that
+  opens one runs nothing on the server's origin.
   Observed before the change, in INBUXA's production logs from 2026-09-20 to 2026-09-29:
   every HTTPS password sign-in was the operator's own, apart from
   inbuxa-webmail's password sign-in on 2026-09-22, before it moved to OAuth.
