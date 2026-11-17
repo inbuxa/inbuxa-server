@@ -276,7 +276,20 @@ impl HttpResponse {
                         .boxed(),
                 ),
         }
-        .unwrap()
+        .unwrap_or_else(|_| {
+            // inbuxa: a header that isn't a valid header value (a client's
+            // text copied into it) fails the request, not the connection
+            let mut response = hyper::Response::new(
+                Full::new(Bytes::new())
+                    .map_err(|never| match never {})
+                    .boxed(),
+            );
+            *response.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+            response
+                .headers_mut()
+                .insert(header::CONTENT_LENGTH, HeaderValue::from_static("0"));
+            response
+        })
     }
 
     pub fn body(&self) -> &HttpResponseBody {

@@ -394,6 +394,50 @@ pub async fn test(test: &mut TestServer) {
         assert_ne!(status, 200, "PKCE method {method:?} must not be authorized");
     }
 
+    // inbuxa: with registration not required, a client nobody registered
+    // gets a code only with PKCE (S256), and only for a loopback or
+    // private-use redirect (RFC 8252)
+    for require in [false, true] {
+        admin
+            .registry_update_setting(
+                OidcProvider {
+                    require_client_registration: require,
+                    ..Default::default()
+                },
+                &[Property::RequireClientRegistration],
+            )
+            .await;
+        admin.reload_settings().await;
+        if !require {
+            for (redirect, challenge, expected) in [
+                ("com.example.app:/cb", None, false),
+                ("http://127.0.0.1:4711/cb", Some(PKCE_CHALLENGE), true),
+                ("com.example.app:/cb", Some(PKCE_CHALLENGE), true),
+                ("https://app.example.net/cb", Some(PKCE_CHALLENGE), false),
+            ] {
+                let (status, _) = post_login_raw(&LoginRequest::AuthCode {
+                    account_name: "user@example.org".to_string(),
+                    account_secret: "this is a very strong password".to_string(),
+                    mfa_token: None,
+                    client_id: "never-registered-app".to_string(),
+                    redirect_uri: redirect.to_string().into(),
+                    nonce: None,
+                    scope: Some(PROFILE_SCOPE.to_string()),
+                    code_challenge: challenge.map(str::to_string),
+                    code_challenge_method: challenge.map(|_| "S256".to_string()),
+                    state: None,
+                    resource: vec![],
+                })
+                .await;
+                assert_eq!(
+                    status == 200,
+                    expected,
+                    "unregistered client, {redirect}, PKCE {challenge:?}: {status}"
+                );
+            }
+        }
+    }
+
     // Authenticate with the correct password, PKCE (S256), scope and a valid resource indicator
     let response = http
         .post::<LoginResponse>(

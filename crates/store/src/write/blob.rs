@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use super::{BlobOp, Operation, ValueClass, ValueOp, key::DeserializeBigEndian, now};
@@ -20,6 +22,14 @@ use types::{
     blob::BlobClass,
     blob_hash::{BLOB_HASH_LEN, BlobHash},
 };
+
+/// inbuxa: what keeps a blob: an account's document or upload, or a
+/// queued message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlobHolder {
+    Account(u32),
+    QueuedMessage(u64),
+}
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct BlobQuota {
@@ -76,6 +86,62 @@ impl Store {
         };
 
         self.key_exists(key).await
+    }
+
+    /// inbuxa: everything that links `hash`, leaving out expired uploads.
+    pub async fn blob_holders(
+        &self,
+        hash: impl AsRef<BlobHash> + Sync + Send,
+    ) -> trc::Result<Vec<BlobHolder>> {
+        const TEMP_LINK: usize = BLOB_HASH_LEN + U32_LEN + U64_LEN;
+        const DOC_LINK: usize = BLOB_HASH_LEN + U64_LEN + 1;
+        const ID_LINK: usize = BLOB_HASH_LEN + U64_LEN;
+
+        let hash = hash.as_ref();
+        let from_key = ValueKey {
+            account_id: 0,
+            collection: 0,
+            document_id: 0,
+            class: ValueClass::Blob(BlobOp::Commit { hash: hash.clone() }),
+        };
+        let to_key = ValueKey {
+            account_id: u32::MAX,
+            collection: u8::MAX,
+            document_id: u32::MAX,
+            class: ValueClass::Blob(BlobOp::Link {
+                hash: hash.clone(),
+                to: BlobLink::Temporary { until: u64::MAX },
+            }),
+        };
+        let now = now();
+        let mut holders = Vec::new();
+        self.iterate(
+            IterateParams::new(from_key, to_key).ascending().no_values(),
+            |key, _| {
+                if key.get(0..BLOB_HASH_LEN) != Some(hash.as_slice()) {
+                    return Ok(false);
+                }
+                match key.len() {
+                    TEMP_LINK => {
+                        if key.deserialize_be_u64(BLOB_HASH_LEN + U32_LEN)? > now {
+                            holders
+                                .push(BlobHolder::Account(key.deserialize_be_u32(BLOB_HASH_LEN)?));
+                        }
+                    }
+                    DOC_LINK => {
+                        holders.push(BlobHolder::Account(key.deserialize_be_u32(BLOB_HASH_LEN)?))
+                    }
+                    ID_LINK => holders.push(BlobHolder::QueuedMessage(
+                        key.deserialize_be_u64(BLOB_HASH_LEN)?,
+                    )),
+                    _ => {}
+                }
+                Ok(true)
+            },
+        )
+        .await
+        .caused_by(trc::location!())?;
+        Ok(holders)
     }
 
     pub async fn purge_blobs_all_shards(&self, blob_store: BlobStore) -> trc::Result<()> {

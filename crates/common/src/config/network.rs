@@ -79,6 +79,10 @@ pub struct Http {
     /// inbuxa: peers whose X-Forwarded-For / Forwarded headers are believed.
     /// Loopback and private networks, or `INBUXA_HTTP_TRUSTED_PROXIES`.
     pub trusted_proxies: Vec<IpAddrOrMask>,
+    /// inbuxa: the one forwarding header the trusted proxies write.
+    /// `INBUXA_HTTP_FORWARDED_HEADER`, X-Forwarded-For unless it says
+    /// `forwarded`.
+    pub forwarded_header: ForwardedHeader,
     pub redirect_root: Option<String>,
     /// inbuxa: HTTP Basic accepted on every endpoint, not only DAV (contract
     /// C-23). True in bootstrap and recovery mode, or with
@@ -517,6 +521,30 @@ impl Http {
             _ => default_trusted_proxies(),
         };
 
+        // inbuxa: read only the header the proxy writes; it passes any other
+        // through as the client sent it
+        let forwarded_header = match types::branding::env_var("HTTP_FORWARDED_HEADER") {
+            Ok(value) if value.trim().eq_ignore_ascii_case("forwarded") => {
+                ForwardedHeader::Forwarded
+            }
+            Ok(value)
+                if value.trim().is_empty()
+                    || value.trim().eq_ignore_ascii_case("x-forwarded-for") =>
+            {
+                ForwardedHeader::XForwardedFor
+            }
+            Ok(value) => {
+                bp.build_warning(
+                    ObjectType::Http.singleton(),
+                    format!(
+                        "INBUXA_HTTP_FORWARDED_HEADER is {value:?}; expected \"x-forwarded-for\" or \"forwarded\". X-Forwarded-For is read."
+                    ),
+                );
+                ForwardedHeader::XForwardedFor
+            }
+            Err(_) => ForwardedHeader::XForwardedFor,
+        };
+
         if use_permissive_cors {
             http_headers.push((
                 hyper::header::ACCESS_CONTROL_ALLOW_ORIGIN,
@@ -576,10 +604,21 @@ impl Http {
             cors_origins,
             use_forwarded: http.use_x_forwarded,
             trusted_proxies,
+            forwarded_header,
             redirect_root: http.redirect_root,
             basic_auth_everywhere,
         }
     }
+}
+
+/// inbuxa: the forwarding header a trusted proxy writes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ForwardedHeader {
+    /// `X-Forwarded-For` (nginx, Caddy, Traefik, HAProxy `option forwardfor`)
+    #[default]
+    XForwardedFor,
+    /// RFC 7239 `Forwarded` (HAProxy `option forwarded`)
+    Forwarded,
 }
 
 // inbuxa: loopback and the private ranges, where a reverse proxy on the same
