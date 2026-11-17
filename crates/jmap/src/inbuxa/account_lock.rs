@@ -29,6 +29,7 @@ use jmap_proto::{
     types::date::UTCDate,
 };
 use jmap_tools::{Key, Map, Value};
+use registry::{schema::structs::Account, types::EnumImpl};
 use std::{borrow::Cow, str::FromStr};
 use store::write::now;
 use types::id::Id;
@@ -52,23 +53,52 @@ async fn assert_reach(
     server: &Server,
     access_token: &AccessToken,
     account_id: u32,
-) -> Result<(), SetError<P>> {
+) -> trc::Result<Result<(), SetError<P>>> {
     if access_token.is_account_id(account_id) {
-        return Err(SetError::forbidden().with_description("You can't lock your own account."));
+        return Ok(Err(
+            SetError::forbidden().with_description("You can't lock your own account.")
+        ));
     }
     let Ok(account) = server.account(account_id).await else {
-        return Err(SetError::not_found());
+        return Ok(Err(SetError::not_found()));
     };
     if !account.is_user_account() {
-        return Err(SetError::invalid_properties()
+        return Ok(Err(SetError::invalid_properties()
             .with_property(P::AccountId)
-            .with_description("Only a person's account can be locked."));
+            .with_description("Only a person's account can be locked.")));
     }
-    match access_token.tenant_id() {
-        // A tenant administrator reaches its own tenant's accounts only
-        Some(tenant_id) if account.id_tenant != Some(tenant_id) => Err(SetError::not_found()),
-        _ => Ok(()),
+    // A tenant administrator reaches its own tenant's accounts only
+    if let Some(tenant_id) = access_token.tenant_id()
+        && account.id_tenant != Some(tenant_id)
+    {
+        return Ok(Err(SetError::not_found()));
     }
+    // The caller must hold every permission the account has, as for changing
+    // it: a lock hands the account's mail to the delegates
+    let Some(registered) = server
+        .registry()
+        .object::<Account>(Id::from(account_id))
+        .await?
+    else {
+        return Ok(Err(SetError::not_found()));
+    };
+    Ok(server
+        .can_set_permissions(access_token, &registered)
+        .await?
+        .map_err(|missing| {
+            let mut names = missing
+                .iter()
+                .take(5)
+                .map(|p| p.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            if missing.len() > 5 {
+                names.push_str(&format!(" and {} more", missing.len() - 5));
+            }
+            SetError::forbidden().with_description(format!(
+                "That account holds permissions you don't have: {names}."
+            ))
+        }))
 }
 
 /// Reads and checks the delegates asked for (AL-5, AL-6, AL-8).
@@ -346,7 +376,7 @@ pub async fn set(
                 continue;
             }
         };
-        if let Err(error) = assert_reach(server, access_token, account_id).await {
+        if let Err(error) = assert_reach(server, access_token, account_id).await? {
             response.not_created.append(client_id, error);
             continue;
         }
@@ -398,7 +428,7 @@ pub async fn set(
 
     for (id, value) in request.unwrap_update().into_valid() {
         let account_id = id.document_id();
-        if let Err(error) = assert_reach(server, access_token, account_id).await {
+        if let Err(error) = assert_reach(server, access_token, account_id).await? {
             response.not_updated.append(id, error);
             continue;
         }
@@ -457,7 +487,7 @@ pub async fn set(
 
     for id in request.unwrap_destroy().into_valid() {
         let account_id = id.document_id();
-        if let Err(error) = assert_reach(server, access_token, account_id).await {
+        if let Err(error) = assert_reach(server, access_token, account_id).await? {
             response.not_destroyed.append(id, error);
             continue;
         }
