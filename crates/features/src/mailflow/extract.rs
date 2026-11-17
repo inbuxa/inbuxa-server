@@ -7,12 +7,15 @@
 //! The text of an attachment, for the detectors (§2.3), or why there isn't
 //! one.
 //!
-//! Read: text files (plain, CSV, JSON, XML, HTML), Office Open XML (DOCX,
-//! XLSX, PPTX) and OpenDocument (ODT, ODS, ODP) documents, and ZIP archives
-//! one level deep. **Can't be inspected**: encrypted or password-protected
-//! files, PDF (settled answer 2), the older binary Office formats, archives
-//! inside archives, and anything past the limits. Everything else (images,
-//! audio, programs) has no text to read and is neither.
+//! Read: text files (plain, CSV, JSON, XML, HTML, or text sent under
+//! another type or name), Office Open XML (DOCX, XLSX, PPTX) and
+//! OpenDocument (ODT, ODS, ODP) documents with every part they hold, and
+//! ZIP archives one level deep. **Can't be inspected**: encrypted or
+//! password-protected files, PDF (settled answer 2), the older binary Office
+//! formats and objects embedded in documents, archives inside archives,
+//! other archive and compression formats (gzip, 7-Zip, RAR, tar...), and
+//! anything past the limits. Everything else (images, audio, programs) has
+//! no text to read and is neither.
 //!
 //! Office files are ZIP archives of XML, read here with the `zip` and
 //! `quick-xml` crates the server already uses: no outside converter runs.
@@ -52,6 +55,8 @@ pub enum Why {
     Pdf,
     LegacyOffice,
     NestedArchive,
+    /// A compressed file or archive other than ZIP (gzip, 7z, RAR, tar...).
+    Archive,
     TooLarge,
     Damaged,
 }
@@ -63,6 +68,7 @@ impl Why {
             Why::Pdf => "pdf",
             Why::LegacyOffice => "legacy-office",
             Why::NestedArchive => "nested-archive",
+            Why::Archive => "archive",
             Why::TooLarge => "too-large",
             Why::Damaged => "damaged",
         }
@@ -117,7 +123,11 @@ fn extract_at(
         }
         return zip(data, limits);
     }
-    if is_text(&content_type, &extension) {
+    if is_archive(data) {
+        return Extracted::NotInspectable(Why::Archive);
+    }
+    // Text by its declared type or name, or text sent as something else
+    if is_text(&content_type, &extension) || looks_like_text(data) {
         let text = decode_text(data);
         return Extracted::Text(
             if content_type == "text/html" || matches!(extension.as_str(), "html" | "htm") {
@@ -128,6 +138,36 @@ fn extract_at(
         );
     }
     Extracted::NoText
+}
+
+/// A compressed file or an archive this doesn't open: gzip, bzip2, xz,
+/// Zstandard, 7-Zip, RAR, cabinet or tar.
+fn is_archive(data: &[u8]) -> bool {
+    const MAGIC: &[&[u8]] = &[
+        b"\x1f\x8b",
+        b"\xfd7zXZ\x00",
+        b"\x28\xb5\x2f\xfd",
+        b"7z\xbc\xaf\x27\x1c",
+        b"Rar!\x1a\x07",
+        b"MSCF\x00\x00\x00\x00",
+    ];
+    MAGIC.iter().any(|m| data.starts_with(m))
+        || (data.starts_with(b"BZh") && data.get(3).is_some_and(|b| (b'1'..=b'9').contains(b)))
+        || data.get(257..262) == Some(b"ustar")
+}
+
+/// Text without a declared type: a byte order mark, or no control
+/// characters other than white space. Binary formats (pictures, audio,
+/// programs) hold some, and start with their own signature.
+fn looks_like_text(data: &[u8]) -> bool {
+    const PICTURES: &[&[u8]] = &[b"\x89PNG", b"\xff\xd8\xff", b"GIF8"];
+    !data.is_empty()
+        && !PICTURES.iter().any(|m| data.starts_with(m))
+        && (data.starts_with(&[0xFF, 0xFE])
+            || data.starts_with(&[0xFE, 0xFF])
+            || !data
+                .iter()
+                .any(|&b| (b < 0x20 && !matches!(b, b'\t' | b'\n' | b'\r' | 0x0C)) || b == 0x7F))
 }
 
 fn is_text(content_type: &str, extension: &str) -> bool {
@@ -301,12 +341,21 @@ fn zip(data: &[u8], limits: &Limits) -> Extracted {
     let mut text = String::new();
     let result: Result<(), Why> = (|| {
         if has("[Content_Types].xml") {
-            // Office Open XML: the parts that hold what a person wrote
+            // Office Open XML: the parts that hold what a person wrote, and
+            // then every other part, so a file put in the package isn't
+            // skipped for not being one of them
             let mut shared = Vec::new();
             if has("xl/sharedStrings.xml") {
                 shared = xml_strings(&read(&mut archive, "xl/sharedStrings.xml")?, "si");
             }
-            for name in names.iter().filter(|n| ooxml_text_part(n)) {
+            for name in names.iter().filter(|n| !n.ends_with('/')) {
+                if name == "xl/sharedStrings.xml" {
+                    continue;
+                }
+                if !ooxml_text_part(name) {
+                    package_part(&mut archive, &mut read, name, limits, &mut text)?;
+                    continue;
+                }
                 let xml = read(&mut archive, name)?;
                 if name.starts_with("xl/worksheets/") {
                     xlsx_sheet(&xml, &mut text);
@@ -334,6 +383,16 @@ fn zip(data: &[u8], limits: &Limits) -> Extracted {
                     text.push('\n');
                 }
             }
+            // Then every other part, as for Office Open XML
+            for name in names.iter().filter(|n| {
+                !n.ends_with('/')
+                    && !matches!(
+                        n.as_str(),
+                        "mimetype" | "META-INF/manifest.xml" | "content.xml" | "styles.xml"
+                    )
+            }) {
+                package_part(&mut archive, &mut read, name, limits, &mut text)?;
+            }
         } else {
             // An archive: each file inside, one level deep
             for name in names.iter().filter(|n| !n.ends_with('/')) {
@@ -354,6 +413,77 @@ fn zip(data: &[u8], limits: &Limits) -> Extracted {
         Ok(()) => Extracted::Text(text),
         Err(why) => Extracted::NotInspectable(why),
     }
+}
+
+/// A part of an Office or OpenDocument package that isn't one of the
+/// document's own text parts. Pictures where a package keeps them are
+/// skipped; other XML is read a node to a line; anything else is read as
+/// the file it is, so an embedded object or a file added to the package
+/// counts as one an archive holds.
+fn package_part(
+    archive: &mut zip::ZipArchive<Cursor<&[u8]>>,
+    read: &mut impl FnMut(&mut zip::ZipArchive<Cursor<&[u8]>>, &str) -> Result<Vec<u8>, Why>,
+    name: &str,
+    limits: &Limits,
+    text: &mut String,
+) -> Result<(), Why> {
+    if is_picture(name) {
+        return Ok(());
+    }
+    let bytes = read(archive, name)?;
+    let lower = name.to_ascii_lowercase();
+    if [".xml", ".rels", ".rdf", ".vml"]
+        .iter()
+        .any(|ext| lower.ends_with(ext))
+    {
+        xml_nodes(&bytes, text);
+        text.push('\n');
+        return Ok(());
+    }
+    match extract_at("", Some(name), &bytes, limits, 1) {
+        Extracted::Text(inner) => {
+            text.push_str(&inner);
+            text.push('\n');
+            Ok(())
+        }
+        Extracted::NoText => Ok(()),
+        Extracted::NotInspectable(why) => Err(why),
+    }
+}
+
+/// A picture where Office and OpenDocument packages keep them.
+fn is_picture(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    let in_place = [
+        "word/media/",
+        "xl/media/",
+        "ppt/media/",
+        "pictures/",
+        "thumbnails/",
+    ]
+    .iter()
+    .any(|dir| lower.starts_with(dir))
+        || lower.starts_with("docprops/thumbnail.");
+    in_place
+        && lower.rsplit_once('.').is_some_and(|(_, ext)| {
+            matches!(
+                ext,
+                "png"
+                    | "jpg"
+                    | "jpeg"
+                    | "jfif"
+                    | "gif"
+                    | "bmp"
+                    | "tif"
+                    | "tiff"
+                    | "emf"
+                    | "wmf"
+                    | "wdp"
+                    | "svg"
+                    | "webp"
+                    | "ico"
+            )
+        })
 }
 
 fn ooxml_text_part(name: &str) -> bool {
@@ -429,11 +559,54 @@ fn xml_text(xml: &[u8], out: &mut String) {
                 b"tab" | b"s" => out.push(' '),
                 _ => {}
             },
-            Ok(Event::Eof) | Err(_) => break,
+            Ok(Event::Eof) => break,
+            Err(_) => {
+                unparsed(xml, out);
+                break;
+            }
             _ => {}
         }
         buf.clear();
     }
+}
+
+/// Each text node on a line of its own: for package parts that aren't the
+/// document's own text, so values from neighboring elements aren't joined
+/// into one number.
+fn xml_nodes(xml: &[u8], out: &mut String) {
+    let mut reader = Reader::from_reader(xml);
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Text(t)) => {
+                if let Ok(text) = t.xml_content(XmlVersion::Implicit1_0) {
+                    out.push_str(&text);
+                }
+            }
+            Ok(Event::CData(t)) => out.push_str(&String::from_utf8_lossy(&t)),
+            Ok(Event::GeneralRef(entity)) => push_entity(&entity, out),
+            Ok(Event::Start(_) | Event::End(_) | Event::Empty(_)) => {
+                if !out.is_empty() && !out.ends_with('\n') {
+                    out.push('\n');
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(_) => {
+                unparsed(xml, out);
+                break;
+            }
+            _ => {}
+        }
+        buf.clear();
+    }
+}
+
+/// XML that doesn't parse: its text with the tags taken out, so a part
+/// can't hide what it holds by being malformed.
+fn unparsed(xml: &[u8], out: &mut String) {
+    out.push('\n');
+    out.push_str(&strip_html(&decode_text(xml)));
+    out.push('\n');
 }
 
 /// The text of each `item` element (a shared string in XLSX).
@@ -462,7 +635,13 @@ fn xml_strings(xml: &[u8], item: &str) -> Vec<String> {
                     push_entity(&entity, s);
                 }
             }
-            Ok(Event::Eof) | Err(_) => break,
+            Ok(Event::Eof) => break,
+            Err(_) => {
+                let mut rest = String::new();
+                unparsed(xml, &mut rest);
+                items.push(rest);
+                break;
+            }
             _ => {}
         }
         buf.clear();
@@ -502,7 +681,11 @@ fn xlsx_sheet(xml: &[u8], out: &mut String) {
                     out.push_str(&text);
                 }
             }
-            Ok(Event::Eof) | Err(_) => break,
+            Ok(Event::Eof) => break,
+            Err(_) => {
+                unparsed(xml, out);
+                break;
+            }
             _ => {}
         }
         buf.clear();
@@ -669,6 +852,123 @@ mod tests {
         assert_eq!(
             extract("application/zip", None, b"PK\x03\x04garbage", &limits),
             Extracted::NotInspectable(Why::Damaged)
+        );
+    }
+
+    /// An Office or OpenDocument marker doesn't hide the archive's other
+    /// files: they're read, or the file can't be inspected.
+    #[test]
+    fn package_markers_hide_nothing() {
+        let limits = Limits::default();
+        let cards = "4242424242424242\n4000056655665556\n";
+        let marked = zip_of(&[("[Content_Types].xml", ""), ("cards.csv", cards)]);
+        assert!(
+            text_of(extract("application/zip", Some("x.zip"), &marked, &limits))
+                .contains("4000056655665556")
+        );
+        let odf = zip_of(&[
+            ("mimetype", "application/vnd.oasis.opendocument.text"),
+            ("content.xml", "<office:document-content/>"),
+            ("cards.csv", cards),
+        ]);
+        assert!(text_of(extract("", Some("a.odt"), &odf, &limits)).contains("4000056655665556"));
+        // A CSV hidden as another XML part is still read
+        let hidden = zip_of(&[
+            ("[Content_Types].xml", "<Types/>"),
+            ("word/document.xml", "<w:document/>"),
+            ("word/cards.xml", cards),
+        ]);
+        assert!(
+            text_of(extract("", Some("a.docx"), &hidden, &limits)).contains("4000056655665556")
+        );
+        // An embedded object is a file the detectors can't read
+        let mut ole = OLE_MAGIC.to_vec();
+        ole.extend(std::iter::repeat_n(0, 64));
+        let mut zip = ZipWriter::new(Cursor::new(Vec::new()));
+        for (name, body) in [
+            ("[Content_Types].xml", &b"<Types/>"[..]),
+            ("word/document.xml", b"<w:document/>"),
+            ("word/embeddings/oleObject1.bin", &ole),
+        ] {
+            zip.start_file(name, SimpleFileOptions::default()).unwrap();
+            zip.write_all(body).unwrap();
+        }
+        let embedded = zip.finish().unwrap().into_inner();
+        assert_eq!(
+            extract("", Some("a.docx"), &embedded, &limits),
+            Extracted::NotInspectable(Why::LegacyOffice)
+        );
+        // A real document's pictures are still pictures
+        let pictured = zip_of(&[
+            ("[Content_Types].xml", "<Types/>"),
+            ("_rels/.rels", "<Relationships/>"),
+            (
+                "word/document.xml",
+                "<w:document><w:p><w:t>Hello</w:t></w:p></w:document>",
+            ),
+            ("word/media/image1.png", "\u{89}PNG\r\n\u{1a}\n"),
+        ]);
+        assert_eq!(
+            text_of(extract("", Some("a.docx"), &pictured, &limits)).trim(),
+            "Hello"
+        );
+    }
+
+    /// What a file holds decides, not only what it's called: text sent as
+    /// something else is read, and archives this can't open can't be
+    /// inspected.
+    #[test]
+    fn undeclared_text_and_other_archives() {
+        let limits = Limits::default();
+        assert!(
+            text_of(extract(
+                "application/octet-stream",
+                Some("export.bin"),
+                b"name,card\nDana,4242424242424242\n",
+                &limits
+            ))
+            .contains("4242424242424242")
+        );
+        // Latin-1 text: not UTF-8, still text
+        assert!(
+            text_of(extract(
+                "application/octet-stream",
+                Some("export.dat"),
+                b"Jos\xe9,4242424242424242\n",
+                &limits
+            ))
+            .contains("4242424242424242")
+        );
+        for archive in [
+            &b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\x03"[..],
+            b"7z\xbc\xaf\x27\x1c\x00\x04",
+            b"Rar!\x1a\x07\x01\x00",
+            b"\xfd7zXZ\x00\x00\x04",
+            b"BZh91AY&SY",
+            b"\x28\xb5\x2f\xfd\x04\x00",
+        ] {
+            assert_eq!(
+                extract("application/octet-stream", Some("x.bin"), archive, &limits),
+                Extracted::NotInspectable(Why::Archive),
+                "{archive:?}"
+            );
+        }
+        let mut tar = vec![0u8; 512];
+        tar[..9].copy_from_slice(b"cards.csv");
+        tar[257..262].copy_from_slice(b"ustar");
+        assert_eq!(
+            extract("application/x-tar", Some("x.tar"), &tar, &limits),
+            Extracted::NotInspectable(Why::Archive)
+        );
+        // Binary data with no text in it is still nothing to read
+        assert_eq!(
+            extract(
+                "application/octet-stream",
+                Some("x.bin"),
+                b"\x00\x01\x02\x03abc",
+                &limits
+            ),
+            Extracted::NoText
         );
     }
 
