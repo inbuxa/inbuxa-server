@@ -302,6 +302,7 @@ jobs:
       REPO: ${{ github.repository }}
       PACKAGE_TOKEN: ${{ secrets.PACKAGE_TOKEN }}
       TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
     steps:
       - name: take the binaries out of the image
         run: |
@@ -319,6 +320,22 @@ jobs:
           done
           sha256sum inbuxa-linux-*.tar.gz > SHA256SUMS
           cat SHA256SUMS
+      # Sign SHA256SUMS with the suite's minisign key, so a download can be
+      # verified against the public key the docs publish. No key (as on a
+      # fork, or before the key is added) leaves the release unsigned.
+      - name: sign SHA256SUMS with minisign
+        run: |
+          set -euo pipefail
+          if [ -z "${MINISIGN_SECRET_KEY:-}" ]; then
+            echo "::warning::MINISIGN_SECRET_KEY is not set; this release will be unsigned"
+            exit 0
+          fi
+          apk add --no-cache -q minisign
+          umask 077
+          key="$(mktemp)"; printf '%s\n' "$MINISIGN_SECRET_KEY" > "$key"
+          minisign -S -s "$key" -m /out/SHA256SUMS -t "inbuxa $TAG"
+          rm -f "$key"
+          echo "signed /out/SHA256SUMS -> /out/SHA256SUMS.minisig"
       - name: attach them to the release
         run: |
           set -euo pipefail
@@ -335,7 +352,10 @@ jobs:
           rel = get(f"/releases/tags/{tag}")
           assets = {a["name"]: a["id"] for a in get(f"/releases/{rel['id']}/assets")}
 
-          for path in ["/out/inbuxa-linux-amd64.tar.gz", "/out/inbuxa-linux-arm64.tar.gz", "/out/SHA256SUMS"]:
+          for path in ["/out/inbuxa-linux-amd64.tar.gz", "/out/inbuxa-linux-arm64.tar.gz",
+                       "/out/SHA256SUMS", "/out/SHA256SUMS.minisig"]:
+              if not pathlib.Path(path).exists():
+                  continue   # SHA256SUMS.minisig is absent only on an unsigned release
               name = os.path.basename(path)
               # A re-run of a tag replaces its assets rather than leaving two
               # files with the same name and different contents.
