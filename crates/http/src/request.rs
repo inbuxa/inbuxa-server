@@ -840,6 +840,10 @@ async fn handle_session<T: SessionStream>(inner: Arc<Inner>, session: SessionDat
                         }
                     }
 
+                    // inbuxa: L-2: anti-framing on pages, nosniff, and HSTS
+                    // on TLS, unless the answer or the operator set them
+                    crate::security_headers::add_security_headers(response.headers_mut(), is_tls);
+
                     // inbuxa: echo an allowed front end's origin, never `*`
                     // (contract C-14). Responses that already set their own
                     // CORS headers, such as public discovery metadata, keep
