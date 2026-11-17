@@ -1459,10 +1459,12 @@ async fn imap_tls_auth(sasl: &str) -> String {
     }
 }
 
-/// inbuxa: L-2, R-13. The sign-in pages can't be framed. The test listener
+/// inbuxa: L-2, R-13. The sign-in pages can't be framed, and the documents
+/// that echo a request's address are never run as a page. The test listener
 /// is TLS, so every answer carries HSTS too.
 async fn assert_security_headers() {
     const BASE: &str = "https://127.0.0.1:8899";
+    const SANDBOX: &str = "default-src 'none'; sandbox";
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .danger_accept_invalid_certs(true)
@@ -1492,6 +1494,69 @@ async fn assert_security_headers() {
         ] {
             assert_eq!(header(&response, name), value, "{path}: {name}");
         }
+    }
+
+    // Discovery documents that echo the address they were asked about
+    let address = "%3Cb%3Ez%3C%2Fb%3E%40example.org";
+    let autodiscover = concat!(
+        "<?xml version=\"1.0\" encoding=\"utf-8\"?>",
+        "<Autodiscover xmlns=\"http://schemas.microsoft.com/exchange/autodiscover/outlook/requestschema/2006\">",
+        "<Request><EMailAddress>a@example.org</EMailAddress>",
+        "<AcceptableResponseSchema>http://schemas.microsoft.com/exchange/autodiscover/outlook/responseschema/2006a</AcceptableResponseSchema>",
+        "</Request></Autodiscover>"
+    );
+    for (path, post) in [
+        (
+            format!("/mail/config-v1.1.xml?emailaddress={address}"),
+            None,
+        ),
+        (
+            format!("/.well-known/autoconfig/mail/config-v1.1.xml?emailaddress={address}"),
+            None,
+        ),
+        (
+            format!("/.well-known/mail-v1.xml?emailaddress={address}"),
+            None,
+        ),
+        (
+            "/autodiscover/autodiscover.json?Email=a@example.org&Protocol=AutodiscoverV1"
+                .to_string(),
+            None,
+        ),
+        (
+            "/autodiscover/autodiscover.json?Email=a@example.org&Protocol=nothing".to_string(),
+            None,
+        ),
+        (
+            "/autodiscover/autodiscover.xml".to_string(),
+            Some(autodiscover),
+        ),
+    ] {
+        let url = format!("{BASE}{path}");
+        let response = match post {
+            Some(body) => client.post(url).body(body).send().await.unwrap(),
+            None => client.get(url).send().await.unwrap(),
+        };
+        assert!(
+            [200, 400].contains(&response.status().as_u16()),
+            "{path}: {}",
+            response.status()
+        );
+        assert_eq!(
+            header(&response, "content-security-policy"),
+            SANDBOX,
+            "{path}"
+        );
+        assert_eq!(
+            header(&response, "x-content-type-options"),
+            "nosniff",
+            "{path}"
+        );
+        assert_eq!(
+            header(&response, "strict-transport-security"),
+            "max-age=15552000",
+            "{path}"
+        );
     }
 
     // Anything else: nosniff and HSTS, but the page-only headers stay off

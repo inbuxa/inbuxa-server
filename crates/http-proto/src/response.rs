@@ -199,6 +199,17 @@ impl HttpResponse {
         self
     }
 
+    /// inbuxa: for an anonymous document that echoes what it was asked
+    /// (autoconfig, autodiscover): never sniffed as, or run as, a page on
+    /// this origin, whatever ends up in it (R-13).
+    pub fn with_sandbox_policy(self) -> Self {
+        self.with_header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+            .with_header(
+                header::CONTENT_SECURITY_POLICY,
+                "default-src 'none'; sandbox",
+            )
+    }
+
     pub fn with_location<V>(mut self, location: V) -> Self
     where
         V: TryInto<HeaderValue>,
