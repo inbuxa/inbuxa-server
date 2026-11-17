@@ -687,6 +687,24 @@ pub async fn test(test: &mut TestServer) {
     assert_eq!(admin.download_any_blob(&outside).await.status, 200);
     assert_eq!(admin.download_any_blob(&inside).await.status, 200);
 
+    // A download type that can't be a header value: the default, not a panic
+    let response = p_user
+        .http_get_raw(
+            &format!(
+                "{}/jmap/download/{}/{inside}/a.bin?accept=text%2Fplain%0D%0AX-Evil%3A%201",
+                p_user.base_url(),
+                p_user.id_string()
+            ),
+            None,
+        )
+        .await;
+    assert_eq!(response.status, 200, "download with a bad accept");
+    assert_eq!(
+        response.headers.get("content-type").unwrap(),
+        "application/octet-stream"
+    );
+    assert!(response.headers.get("x-evil").is_none());
+
     // Acceptance test 11: lowering a tenant's roles reaches a signed-in
     // administrator on its next request (MT-16)
     assert!(p_admin.can_list_accounts().await, "test 11");

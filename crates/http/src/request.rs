@@ -183,6 +183,8 @@ impl ParseHttp for Server {
                                                 .find(|(k, _)| k == "accept")
                                                 .map(|(_, v)| v.into_owned())
                                         })
+                                        // inbuxa: only a type that can be a header
+                                        .filter(|v| hyper::header::HeaderValue::from_str(v).is_ok())
                                         .unwrap_or("application/octet-stream".to_string()),
                                     blob,
                                 }
