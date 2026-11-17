@@ -40,9 +40,9 @@ RUN mv "/build/target/$(cat /target.txt)/release" "/output"
 # release pinned by its checksums
 FROM --platform=$BUILDPLATFORM mirror.gcr.io/library/debian:trixie-slim AS migrate
 ARG TARGETPLATFORM
-ARG MIGRATE_VERSION=27.1-rc.14
-ARG MIGRATE_SHA256_AMD64=b6f17c9fd08987d8b76fa6bff21391c18bb1ed9cc13bdcf0ea21dcf33591f477
-ARG MIGRATE_SHA256_ARM64=dfd2b5c9d0be44a6996f68f75e1f94fac84a4da2470c9cdf1a607185fdce80cb
+ARG MIGRATE_VERSION=27.1-rc.15
+ARG MIGRATE_SHA256_AMD64=74d747cf544333aef56cf4c63a7985bec5f5b2dd049c71eb0b5bf2f0801c7d08
+ARG MIGRATE_SHA256_ARM64=508e4191e0c6ad51f2eadd64399536a805a473d84a5f721e7ae695f916c2db52
 RUN export DEBIAN_FRONTEND=noninteractive && \
     apt-get update && \
     apt-get install -yq --no-install-recommends ca-certificates curl && \
