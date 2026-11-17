@@ -46,6 +46,11 @@ pub trait ClientRegistrationHandler: Sync + Send {
         session: HttpSessionData,
     ) -> impl Future<Output = trc::Result<HttpResponse>> + Send;
 
+    fn is_registered_client(
+        &self,
+        client_id: &str,
+    ) -> impl Future<Output = trc::Result<bool>> + Send;
+
     fn validate_client_registration(
         &self,
         client_id: &str,
@@ -214,6 +219,19 @@ impl ClientRegistrationHandler for Server {
         )
         .no_cache()
         .into_http_response())
+    }
+
+    /// inbuxa: whether `client_id` is an `x:OAuthClient`.
+    async fn is_registered_client(&self, client_id: &str) -> trc::Result<bool> {
+        Ok(self
+            .registry()
+            .primary_key(
+                ObjectType::OAuthClient.into(),
+                Property::ClientId,
+                client_id.as_bytes().to_vec(),
+            )
+            .await?
+            .is_some())
     }
 
     async fn validate_client_registration(
