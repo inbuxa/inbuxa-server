@@ -48,7 +48,8 @@ fn br_check(digits: &[u32], weights: &[u32]) -> u32 {
 }
 
 /// `111.444.777-35`, or eleven bare digits.
-static CPF: LazyLock<Regex> = LazyLock::new(|| re(r"\b\d{3}(\.?)\d{3}(\.?)\d{3}(-?)\d{2}\b"));
+static CPF: LazyLock<Regex> =
+    LazyLock::new(|| re(r"\b[0-9]{3}(\.?)[0-9]{3}(\.?)[0-9]{3}(-?)[0-9]{2}\b"));
 
 pub fn cpf_valid(n: &str) -> bool {
     let d = digit_values(n);
@@ -82,7 +83,7 @@ fn br_cpf(text: &str, findings: &mut Findings) {
 
 /// `11.222.333/0001-81`, or fourteen bare digits.
 static CNPJ: LazyLock<Regex> =
-    LazyLock::new(|| re(r"\b\d{2}(\.?)\d{3}(\.?)\d{3}(/?)\d{4}(-?)\d{2}\b"));
+    LazyLock::new(|| re(r"\b[0-9]{2}(\.?)[0-9]{3}(\.?)[0-9]{3}(/?)[0-9]{4}(-?)[0-9]{2}\b"));
 
 pub fn cnpj_valid(n: &str) -> bool {
     let d = digit_values(n);
@@ -112,7 +113,9 @@ fn br_cnpj(text: &str, findings: &mut Findings) {
 /// Four letters, the birth date, sex (H, M or X), the state, three
 /// consonants, a character that tells the century apart, the check digit.
 static CURP: LazyLock<Regex> = LazyLock::new(|| {
-    re(r"(?i)\b[A-Z]{4}(\d{2})(\d{2})(\d{2})[HMX][A-Z]{2}[B-DF-HJ-NP-TV-Z]{3}[A-Z0-9]\d\b")
+    re(
+        r"(?i)\b(?-u:[A-Z]{4}([0-9]{2})([0-9]{2})([0-9]{2})[HMX][A-Z]{2}[B-DF-HJ-NP-TV-Z]{3}[A-Z0-9][0-9])\b",
+    )
 });
 
 /// RENAPO's check: each character's place in `0-9 A-N Ñ O-Z`, weighted 18

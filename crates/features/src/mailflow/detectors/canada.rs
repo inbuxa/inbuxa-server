@@ -20,7 +20,7 @@ pub static DETECTORS: &[Detector] = &[Detector::new(
 
 /// `NNN NNN NNN` or `NNN-NNN-NNN` stands alone; nine bare digits need a word.
 static SIN: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\b(\d{3})([ -]?)(\d{3})([ -]?)(\d{3})\b").expect("detector pattern")
+    Regex::new(r"\b([0-9]{3})([ -]?)([0-9]{3})([ -]?)([0-9]{3})\b").expect("detector pattern")
 });
 
 const SIN_WORDS: &[&str] = &[

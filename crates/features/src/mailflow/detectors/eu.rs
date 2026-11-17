@@ -128,7 +128,8 @@ fn num(s: &str) -> u32 {
 // --- Germany --------------------------------------------------------------
 
 /// Eleven digits, written `86 095 742 719` on the BZSt's letters.
-static DE_TAX: LazyLock<Regex> = LazyLock::new(|| re(r"\b\d{2}( ?)\d{3}( ?)\d{3}( ?)\d{3}\b"));
+static DE_TAX: LazyLock<Regex> =
+    LazyLock::new(|| re(r"\b[0-9]{2}( ?)[0-9]{3}( ?)[0-9]{3}( ?)[0-9]{3}\b"));
 
 /// ISO 7064 MOD 11,10; no leading zero; in the first ten digits one digit
 /// appears two or three times and every other at most once.
@@ -185,7 +186,7 @@ fn de_tax_id(text: &str, findings: &mut Findings) {
 /// The ID card's document number: a letter from the card's alphabet, eight
 /// more characters from it, then the check digit.
 static DE_ID: LazyLock<Regex> =
-    LazyLock::new(|| re(r"\b[CFGHJKLMNPRTVWXYZ][CFGHJKLMNPRTVWXYZ0-9]{8}\d\b"));
+    LazyLock::new(|| re(r"\b[CFGHJKLMNPRTVWXYZ][CFGHJKLMNPRTVWXYZ0-9]{8}[0-9]\b"));
 
 /// ICAO 9303 check digit: weights 7, 3, 1; letters A=10 … Z=35.
 pub fn icao_check(chars: &str, check: u32) -> bool {
@@ -212,7 +213,9 @@ fn de_id_card(text: &str, findings: &mut Findings) {
 /// Sex, year, month, department (with Corsica's 2A and 2B), commune, order,
 /// then the two-digit key, spaces allowed between groups.
 static FR_NIR: LazyLock<Regex> = LazyLock::new(|| {
-    re(r"\b([1-478]) ?(\d{2}) ?(\d{2}) ?(\d{2}|2[AB]) ?(\d{3}) ?(\d{3}) ?(\d{2})\b")
+    re(
+        r"\b([1-478]) ?([0-9]{2}) ?([0-9]{2}) ?([0-9]{2}|2[AB]) ?([0-9]{3}) ?([0-9]{3}) ?([0-9]{2})\b",
+    )
 });
 
 fn fr_nir(text: &str, findings: &mut Findings) {
@@ -244,7 +247,8 @@ fn fr_nir(text: &str, findings: &mut Findings) {
 
 // --- Spain ----------------------------------------------------------------
 
-static ES_ID: LazyLock<Regex> = LazyLock::new(|| re(r"(?i)\b([XYZ]?)[ -]?(\d{7,8})[ -]?([A-Z])\b"));
+static ES_ID: LazyLock<Regex> =
+    LazyLock::new(|| re(r"(?i)\b(?-u:([XYZ]?)[ -]?([0-9]{7,8})[ -]?([A-Z]))\b"));
 
 const DNI_LETTERS: &[u8] = b"TRWAGMYFPDXBNJZSQVHLCKE";
 
@@ -274,7 +278,7 @@ fn es_dni_nie(text: &str, findings: &mut Findings) {
 static IT_CF: LazyLock<Regex> = LazyLock::new(|| {
     let d = "[0-9LMNPQRSTUV]";
     re(&format!(
-        r"(?i)\b[A-Z]{{6}}{d}{{2}}[ABCDEHLMPRST]{d}{{2}}[A-Z]{d}{{3}}[A-Z]\b"
+        r"(?i)\b(?-u:[A-Z]{{6}}{d}{{2}}[ABCDEHLMPRST]{d}{{2}}[A-Z]{d}{{3}}[A-Z])\b"
     ))
 });
 
@@ -301,6 +305,13 @@ pub fn codice_fiscale_valid(cf: &str) -> bool {
         }
     };
     let bytes = cf.as_bytes();
+    if bytes.len() != 16
+        || !bytes
+            .iter()
+            .all(|c| c.is_ascii_digit() || c.is_ascii_uppercase())
+    {
+        return false;
+    }
     let sum: u32 = bytes[..15]
         .iter()
         .enumerate()
@@ -327,11 +338,15 @@ fn it_codice_fiscale(text: &str, findings: &mut Findings) {
 // --- Netherlands ----------------------------------------------------------
 
 /// Nine digits, sometimes written `1112.22.333`.
-static NL_BSN: LazyLock<Regex> = LazyLock::new(|| re(r"\b(\d{4})(\.?)(\d{2})(\.?)(\d{3})\b"));
+static NL_BSN: LazyLock<Regex> =
+    LazyLock::new(|| re(r"\b([0-9]{4})(\.?)([0-9]{2})(\.?)([0-9]{3})\b"));
 
 /// The eleven test: weights 9 down to 2, and −1 for the last digit.
 pub fn bsn_valid(n: &str) -> bool {
     let d = digit_values(n);
+    if d.len() != 9 {
+        return false;
+    }
     let sum: i64 = d[..8]
         .iter()
         .zip((2..=9).rev())
@@ -364,7 +379,7 @@ fn nl_bsn(text: &str, findings: &mut Findings) {
 
 /// `YY.MM.DD-XXX.CC` or eleven digits.
 static BE_NN: LazyLock<Regex> =
-    LazyLock::new(|| re(r"\b(\d{2})\.?(\d{2})\.?(\d{2})-?(\d{3})\.?(\d{2})\b"));
+    LazyLock::new(|| re(r"\b([0-9]{2})\.?([0-9]{2})\.?([0-9]{2})-?([0-9]{3})\.?([0-9]{2})\b"));
 
 fn be_national_number(text: &str, findings: &mut Findings) {
     for c in BE_NN.captures_iter(text) {
@@ -385,12 +400,15 @@ fn be_national_number(text: &str, findings: &mut Findings) {
 
 // --- Poland ---------------------------------------------------------------
 
-static ELEVEN: LazyLock<Regex> = LazyLock::new(|| re(r"\b\d{11}\b"));
+static ELEVEN: LazyLock<Regex> = LazyLock::new(|| re(r"\b[0-9]{11}\b"));
 
 /// Weights 1, 3, 7, 9 repeating; the birth date encodes the century in the
 /// month (+80 for the 1800s, +20 for the 2000s, and so on).
 pub fn pesel_valid(n: &str) -> bool {
     let d = digit_values(n);
+    if d.len() != 11 {
+        return false;
+    }
     let sum: u32 = d[..10]
         .iter()
         .zip([1, 3, 7, 9].iter().cycle())
@@ -422,7 +440,7 @@ fn pl_pesel(text: &str, findings: &mut Findings) {
 
 /// `YYMMDD-NNNN`, `YYYYMMDD-NNNN` (`+` after 100), or the bare digits.
 static SE_PNR: LazyLock<Regex> =
-    LazyLock::new(|| re(r"\b(?:\d{2})?(\d{2})(\d{2})(\d{2})([-+]?)(\d{4})\b"));
+    LazyLock::new(|| re(r"\b(?:[0-9]{2})?([0-9]{2})([0-9]{2})([0-9]{2})([-+]?)([0-9]{4})\b"));
 
 const SE_WORDS: &[&str] = &[
     "personnummer",
@@ -451,7 +469,8 @@ fn se_personnummer(text: &str, findings: &mut Findings) {
 
 // --- Denmark --------------------------------------------------------------
 
-static DK_CPR: LazyLock<Regex> = LazyLock::new(|| re(r"\b(\d{2})(\d{2})(\d{2})-?(\d{4})\b"));
+static DK_CPR: LazyLock<Regex> =
+    LazyLock::new(|| re(r"\b([0-9]{2})([0-9]{2})([0-9]{2})-?([0-9]{4})\b"));
 
 const CPR_WORDS: &[&str] = &["cpr", "cpr-nr", "cpr nr", "cpr-nummer", "personnummer"];
 
@@ -468,8 +487,9 @@ fn dk_cpr(text: &str, findings: &mut Findings) {
 
 // --- Finland --------------------------------------------------------------
 
-static FI_HETU: LazyLock<Regex> =
-    LazyLock::new(|| re(r"(?i)\b(\d{2})(\d{2})(\d{2})[-+ABCDEFYXWVU](\d{3})([0-9A-Y])\b"));
+static FI_HETU: LazyLock<Regex> = LazyLock::new(|| {
+    re(r"(?i)\b(?-u:([0-9]{2})([0-9]{2})([0-9]{2})[-+ABCDEFYXWVU]([0-9]{3})([0-9A-Y]))\b")
+});
 
 const HETU_CHECK: &[u8] = b"0123456789ABCDEFHJKLMNPRSTUVWXY";
 
@@ -488,7 +508,7 @@ fn fi_hetu(text: &str, findings: &mut Findings) {
 
 // --- Ireland --------------------------------------------------------------
 
-static IE_PPS: LazyLock<Regex> = LazyLock::new(|| re(r"(?i)\b(\d{7})([A-W])([ABHW]?)\b"));
+static IE_PPS: LazyLock<Regex> = LazyLock::new(|| re(r"(?i)\b(?-u:([0-9]{7})([A-W])([ABHW]?))\b"));
 
 const PPS_CHECK: &[u8] = b"WABCDEFGHIJKLMNOPQRSTUV";
 
@@ -515,11 +535,14 @@ fn ie_pps(text: &str, findings: &mut Findings) {
 
 // --- Portugal -------------------------------------------------------------
 
-static NINE: LazyLock<Regex> = LazyLock::new(|| re(r"\b\d{9}\b"));
+static NINE: LazyLock<Regex> = LazyLock::new(|| re(r"\b[0-9]{9}\b"));
 
 /// Mod 11 over weights 9 down to 2; a check of 10 or 11 becomes 0.
 pub fn nif_valid(n: &str) -> bool {
     let d = digit_values(n);
+    if d.len() != 9 {
+        return false;
+    }
     let sum: u32 = d[..8].iter().zip((2..=9).rev()).map(|(a, w)| a * w).sum();
     let check = match 11 - sum % 11 {
         10 | 11 => 0,
@@ -546,7 +569,8 @@ fn pt_nif(text: &str, findings: &mut Findings) {
 // --- Austria --------------------------------------------------------------
 
 /// A serial and check digit, then the birth date: `1237 010180`.
-static AT_SVNR: LazyLock<Regex> = LazyLock::new(|| re(r"\b(\d{3})(\d)( ?)(\d{2})(\d{2})(\d{2})\b"));
+static AT_SVNR: LazyLock<Regex> =
+    LazyLock::new(|| re(r"\b([0-9]{3})([0-9])( ?)([0-9]{2})([0-9]{2})([0-9]{2})\b"));
 
 const SVNR_WORDS: &[&str] = &[
     "sozialversicherungsnummer",
@@ -567,7 +591,8 @@ fn at_svnr(text: &str, findings: &mut Findings) {
             .map(|(a, w)| a * w)
             .sum();
         let written = &c[3] == " ";
-        if d[0] != 0
+        if d.len() == 10
+            && d[0] != 0
             && sum % 11 == d[3]
             && valid_short_date(num(&c[6]), num(&c[5]), num(&c[4]))
             && (written || word_near(text, whole.start(), whole.end(), SVNR_WORDS))

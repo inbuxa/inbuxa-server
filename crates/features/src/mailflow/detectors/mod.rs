@@ -267,6 +267,66 @@ mod tests {
         }
     }
 
+    /// Digits from other scripts (Arabic-Indic, Persian, Devanagari,
+    /// Bengali, fullwidth) and letters that fold to ASCII ones (`ſ`, the
+    /// Kelvin sign) are text a sender may well write. No detector may panic
+    /// on them, alone or mixed with ASCII digits.
+    #[test]
+    fn other_scripts_never_panic() {
+        let zeros = ['\u{660}', '\u{6F0}', '\u{966}', '\u{9E6}', '\u{FF10}'];
+        let mut samples = Vec::new();
+        for zero in zeros {
+            let digit = |i: usize| char::from_u32(zero as u32 + (i as u32 + 2) % 10).unwrap();
+            for len in 6..=20 {
+                let run: String = (0..len).map(digit).collect();
+                // Every other digit ASCII, so the run is neither script
+                let mixed: String = (0..len)
+                    .map(|i| {
+                        if i % 2 == 0 {
+                            digit(i)
+                        } else {
+                            char::from(b'0' + ((i + 2) % 10) as u8)
+                        }
+                    })
+                    .collect();
+                for prefix in ["", "A", "S", "AB", "ſ", "\u{212A}"] {
+                    samples.push(format!("{prefix}{run}"));
+                    samples.push(format!("{prefix}{mixed}"));
+                }
+            }
+            let four: String = (0..4).map(digit).collect();
+            samples.push(format!("{four} {four} {four}"));
+            samples.push(format!("{four} {four} {four} {four}"));
+        }
+        for letters in ["ſſſſſſ", "\u{212A}\u{212A}\u{212A}\u{212A}\u{212A}\u{212A}"] {
+            samples.push(format!("{letters}00A00A000A"));
+            samples.push(format!("{letters}80A01A501U"));
+        }
+        samples.push("ſ1234567A".into());
+        samples.push("\u{212A}1234567A".into());
+        samples.push("11010519491231002ſ".into());
+        // A valid date, other digits around it
+        samples.push("11010519491231\u{660}\u{661}\u{662}X".into());
+        samples.push("1\u{661}\u{662}\u{663}\u{664}\u{665}19491231002X".into());
+
+        let mut panicked = Vec::new();
+        for detector in all() {
+            for sample in &samples {
+                for text in [
+                    sample.clone(),
+                    format!("id number {sample}"),
+                    format!("my number aadhaar bsn pesel nif svnr {sample} ok"),
+                ] {
+                    if std::panic::catch_unwind(|| detector.count(&text)).is_err() {
+                        panicked.push(format!("{} on {text:?}", detector.id));
+                        break;
+                    }
+                }
+            }
+        }
+        assert!(panicked.is_empty(), "panicked: {panicked:#?}");
+    }
+
     #[test]
     fn ids_are_unique() {
         let mut seen = AHashSet::new();
