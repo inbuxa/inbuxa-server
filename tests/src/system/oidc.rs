@@ -176,6 +176,9 @@ pub async fn test(test: &mut TestServer) {
         "unescaped address in autoconfig: {xml}"
     );
 
+    // inbuxa: L-2, R-13: what the sign-in pages and discovery documents send
+    assert_security_headers().await;
+
     // OAuth Public Clients profile: the authorization server metadata must advertise the
     // mandatory properties (RFC 8414 + draft-ietf-mailmaint-oauth-public).
     assert!(
@@ -1454,4 +1457,54 @@ async fn imap_tls_auth(sasl: &str) -> String {
             return line;
         }
     }
+}
+
+/// inbuxa: L-2, R-13. The sign-in pages can't be framed. The test listener
+/// is TLS, so every answer carries HSTS too.
+async fn assert_security_headers() {
+    const BASE: &str = "https://127.0.0.1:8899";
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .danger_accept_invalid_certs(true)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    let header = |response: &reqwest::Response, name: &str| {
+        response
+            .headers()
+            .get_all(name)
+            .iter()
+            .map(|value| value.to_str().unwrap().to_string())
+            .collect::<Vec<_>>()
+            .join(" | ")
+    };
+
+    // The sign-in and device pages (the OAuth authorization endpoint)
+    for path in ["/login", "/device"] {
+        let response = client.get(format!("{BASE}{path}")).send().await.unwrap();
+        assert_eq!(response.status().as_u16(), 200, "{path}");
+        for (name, value) in [
+            ("x-frame-options", "DENY"),
+            ("content-security-policy", "frame-ancestors 'none'"),
+            ("x-content-type-options", "nosniff"),
+            ("referrer-policy", "strict-origin-when-cross-origin"),
+            ("strict-transport-security", "max-age=15552000"),
+        ] {
+            assert_eq!(header(&response, name), value, "{path}: {name}");
+        }
+    }
+
+    // Anything else: nosniff and HSTS, but the page-only headers stay off
+    let response = client
+        .get(format!("{BASE}/.well-known/oauth-authorization-server"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 200);
+    assert_eq!(header(&response, "x-content-type-options"), "nosniff");
+    assert_eq!(
+        header(&response, "strict-transport-security"),
+        "max-age=15552000"
+    );
+    assert_eq!(header(&response, "x-frame-options"), "");
 }
