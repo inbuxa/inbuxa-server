@@ -22,7 +22,7 @@ use inbuxa_relay_proto::{
 };
 use std::{
     collections::HashMap,
-    net::IpAddr,
+    net::{IpAddr, Ipv6Addr},
     sync::{
         Arc, Mutex, RwLock,
         atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
@@ -65,6 +65,8 @@ pub struct App {
     pub started_at: u64,
     pub last_error: Mutex<Option<String>>,
     pub limiter: Mutex<Limiter>,
+    /// SMTP sessions open now, against `maxSmtpSessions`.
+    pub smtp_sessions: AtomicU32,
     pub self_upgrade: bool,
     /// The keys a release must be signed by (RL-29).
     pub release_keys: Vec<[u8; 32]>,
@@ -117,6 +119,7 @@ impl App {
             started_at: time::now(),
             last_error: Mutex::new(None),
             limiter: Mutex::new(Limiter::default()),
+            smtp_sessions: AtomicU32::new(0),
             self_upgrade: std::env::var_os("INBUXA_RELAY_CONTAINER").is_none(),
             release_keys: inbuxa_relay_proto::release::RELEASE_KEYS.to_vec(),
             exe: crate::upgrade::current_exe(),
@@ -309,6 +312,7 @@ fn disk_nearly_full(_: &std::path::Path) -> bool {
 }
 
 /// Per-IP limits at the door (spec "At the door, always", step 1).
+/// An IPv6 sender is its /64: one host can have every address in it.
 #[derive(Default)]
 pub struct Limiter {
     ips: HashMap<IpAddr, IpCount>,
@@ -322,10 +326,19 @@ struct IpCount {
     open: u32,
 }
 
+/// What `ip` is counted as: its /64 for IPv6, and the IPv4 address for an
+/// IPv4-mapped one.
+fn sender(ip: IpAddr) -> IpAddr {
+    match ip.to_canonical() {
+        IpAddr::V6(v6) => IpAddr::V6(Ipv6Addr::from(u128::from(v6) & !u128::from(u64::MAX))),
+        v4 => v4,
+    }
+}
+
 impl Limiter {
     fn entry(&mut self, ip: IpAddr, now: u64) -> &mut IpCount {
         let minute = now / 60;
-        let count = self.ips.entry(ip).or_default();
+        let count = self.ips.entry(sender(ip)).or_default();
         if count.minute != minute {
             count.minute = minute;
             count.connections = 0;
@@ -348,7 +361,7 @@ impl Limiter {
     }
 
     pub fn disconnect(&mut self, ip: IpAddr) {
-        if let Some(count) = self.ips.get_mut(&ip) {
+        if let Some(count) = self.ips.get_mut(&sender(ip)) {
             count.open = count.open.saturating_sub(1);
         }
     }
@@ -400,5 +413,37 @@ mod tests {
         assert!(!l.message(ip, &s, 60));
         l.sweep(200);
         assert!(l.ips.contains_key(&ip), "still open");
+    }
+
+    /// An IPv6 /64 is one sender, and an IPv4-mapped address is
+    /// the IPv4 address.
+    #[test]
+    fn ipv6_counts_by_64() {
+        let s = RelaySettings {
+            rate_limits: RateLimits {
+                connections_per_minute: 100,
+                messages_per_minute: 100,
+                concurrent_sessions: 2,
+            },
+            ..Default::default()
+        };
+        let ip = |text: &str| text.parse::<IpAddr>().unwrap();
+        let mut l = Limiter::default();
+        assert!(l.connect(ip("2001:db8:1:2::1"), &s, 0));
+        assert!(l.connect(ip("2001:db8:1:2:ffff::9"), &s, 0));
+        assert!(
+            !l.connect(ip("2001:db8:1:2::77"), &s, 0),
+            "a third address in the same /64"
+        );
+        assert!(l.connect(ip("2001:db8:1:3::1"), &s, 0), "another /64");
+        l.disconnect(ip("2001:db8:1:2:ffff::9"));
+        assert!(l.connect(ip("2001:db8:1:2::77"), &s, 0));
+
+        assert!(l.connect(ip("192.0.2.7"), &s, 0));
+        assert!(l.connect(ip("::ffff:192.0.2.7"), &s, 0));
+        assert!(
+            !l.connect(ip("192.0.2.7"), &s, 0),
+            "the mapped address is the same sender"
+        );
     }
 }
