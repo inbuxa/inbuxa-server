@@ -11,6 +11,58 @@ https://github.com/inbuxa/inbuxa-server/security/advisories.
 Every version PR adds that version's entry here. CI refuses a version this
 file has no entry for (`tools/release/changelog-check.py`).
 
+## [2026.11.17] - 2026-11-17
+
+2 security fixes from a private review of the server (1 medium, 1 low), four
+hardening changes, and two DNS fixes from 27.1. All versions up to and
+including 2026.11.11, and 27.1-rc.1 to 27.1-rc.26, are affected. The same
+fixes are in 27.1-rc.27 for the 27.1 series.
+
+### Security
+Medium
+- HTTP: behind a reverse proxy, a client could choose its own address. With
+  forwarding headers trusted, the server read RFC 7239 `Forwarded` before
+  `X-Forwarded-For`, so a proxy that writes only `X-Forwarded-For` passed a
+  client's own `Forwarded` header through. It now reads one header,
+  `X-Forwarded-For` unless `INBUXA_HTTP_FORWARDED_HEADER=forwarded`, and a
+  loopback address in it counts as this host only when every hop after it
+  is loopback too. (GHSA-hxp3-8c95-4q5v, #414)
+
+Low
+- Multi-tenant: a tenant administrator could download any blob by its hash.
+  Inside a tenant, `fetchAnyBlob` now reaches only blobs the tenant holds:
+  linked by one of its accounts, or in a queued message the tenant sees.
+  Tenant queue downloads keep working. (GHSA-x596-5p95-2rm3, #414)
+
+Hardening
+- TLS: rustls-webpki 0.103.17, webpki-roots 1.0.12 and webpki-root-certs
+  1.0.12 stop trusting the distrusted emSign intermediates
+  (RUSTSEC-2026-0381, RUSTSEC-2026-0382, RUSTSEC-2026-0383).
+- Tenants: no tenant policy grants writing system Sieve scripts, which can
+  run programs as the server's user.
+- OAuth: with `requireClientRegistration` off (it's on by default), a client
+  nobody registered must use PKCE (S256) and may only redirect to a loopback
+  address or a private-use scheme (RFC 8252).
+- Downloads: a requested type that isn't a valid header value falls back to
+  `application/octet-stream`, and a response with a bad header value is a
+  500 instead of a dropped connection.
+
+These came from a private security review; thanks to its author.
+
+### Fixed
+- Deliverability: Check now skips the DNS caches, so a check right after a
+  DNS change shows the new state. (#388, from #387)
+- Automatic DNS: adding a record type to `publishRecords` on a domain already
+  set to Automatic now publishes it. (#390, from #389)
+
+### Upgrading
+- If your reverse proxy sends only RFC 7239 `Forwarded`, set
+  `INBUXA_HTTP_FORWARDED_HEADER=forwarded`; otherwise client addresses read
+  as the proxy's. nginx, Caddy and Traefik send `X-Forwarded-For` and need
+  nothing.
+- With `requireClientRegistration` off, a web application signing in by
+  OAuth has to be registered now.
+
 ## [2026.11.11] - 2026-11-11
 
 1 security fix from our own review of the server (high), covering two gaps in
