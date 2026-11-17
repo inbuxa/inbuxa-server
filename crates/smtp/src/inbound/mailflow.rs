@@ -396,7 +396,13 @@ impl<T: SessionStream> Session<T> {
                                 text,
                                 html,
                                 position,
-                            } => rewrite::add_disclaimer(now, text, html.as_deref(), *position),
+                            } => rewrite::add_disclaimer(
+                                now,
+                                text,
+                                html.as_deref(),
+                                *position,
+                                outgoing,
+                            ),
                             RuleAction::AddHeader { name, value } => {
                                 Some(rewrite::add_header(now, name, value))
                             }
