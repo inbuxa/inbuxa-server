@@ -742,6 +742,7 @@ async fn handle_session<T: SessionStream>(inner: Arc<Inner>, session: SessionDat
                         session.remote_ip,
                         req.headers(),
                         &server.core.network.http.trusted_proxies,
+                        server.core.network.http.forwarded_header,
                     ) {
                         trc::event!(
                             Http(trc::HttpEvent::RequestUrl),
