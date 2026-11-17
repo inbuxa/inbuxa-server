@@ -213,6 +213,10 @@ Each requirement has an ID, and tests name the IDs they check.
   in a tenant it would break MT-1. A tenant administrator manages its own
   people's accounts and masks through its administrative permissions
   instead.
+  **Decision** (2026-11-17): `sysSieveSystemScriptCreate`, `…Update` and
+  `…Destroy` never take effect inside a tenant either. System Sieve scripts
+  run with the trusted functions, whose `exec` starts programs as the
+  server's user, so no tenant policy may hand them out.
 - **MT-16.** Changing a tenant's roles, permissions or quotas takes effect for
   its people without a restart and without them signing in again. The next
   request is judged by the new rules. **Decision**, a deliberate improvement:

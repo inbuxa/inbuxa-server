@@ -568,6 +568,57 @@ pub async fn test(test: &mut TestServer) {
         "forbidden",
         "MT-1: no reach into another account's mail"
     );
+    // System Sieve scripts can run programs as the server's user: no tenant
+    // policy, Merge or Replace, hands out writing them
+    let system_sieve = vec![
+        Permission::SysSieveSystemScriptCreate,
+        Permission::SysSieveSystemScriptUpdate,
+        Permission::SysSieveSystemScriptDestroy,
+    ];
+    admin
+        .registry_update_object(
+            ObjectType::Account,
+            p_user.id(),
+            json!({
+                Property::Permissions: Permissions::Merge(PermissionsList {
+                    enabled_permissions: Map::new(system_sieve.clone()),
+                    disabled_permissions: Map::default(),
+                })
+            }),
+        )
+        .await;
+    for policy in [
+        Permissions::Merge(PermissionsList {
+            enabled_permissions: Map::new(system_sieve.clone()),
+            disabled_permissions: Map::default(),
+        }),
+        Permissions::Replace(PermissionsList {
+            enabled_permissions: Map::new(system_sieve.clone()),
+            disabled_permissions: Map::default(),
+        }),
+    ] {
+        admin
+            .registry_update_object(
+                ObjectType::Tenant,
+                p_id,
+                json!({ Property::Permissions: policy }),
+            )
+            .await;
+        let token = test.permissions_of(p_user.id()).await;
+        for permission in &system_sieve {
+            assert!(
+                !token.has_permission(*permission),
+                "system Sieve: {permission:?} granted inside a tenant"
+            );
+        }
+    }
+    admin
+        .registry_update_object(
+            ObjectType::Account,
+            p_user.id(),
+            json!({ Property::Permissions: Permissions::Inherit }),
+        )
+        .await;
     admin
         .registry_update_object(
             ObjectType::Tenant,
