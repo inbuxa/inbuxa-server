@@ -12,9 +12,11 @@ use email::cache::email::MessageCacheAccess;
 use email::message::metadata::MessageMetadata;
 use groupware::cache::GroupwareCache;
 use registry::schema::enums::Permission;
+use smtp::queue::Message;
+use smtp::queue::spool::SmtpSpool;
 use std::future::Future;
 use store::ValueKey;
-use store::write::{AlignedBytes, Archive};
+use store::write::{AlignedBytes, Archive, blob::BlobHolder};
 use trc::AddContext;
 use types::acl::Acl;
 use types::blob::{BlobClass, BlobId};
@@ -103,61 +105,122 @@ impl BlobDownload for Server {
         blob_id: &BlobId,
         access_token: &AccessToken,
     ) -> trc::Result<bool> {
-        Ok(
-            (blob_id.class.is_superuser() && access_token.has_permission(Permission::FetchAnyBlob))
-                || (self
-                    .store()
-                    .blob_has_access(&blob_id.hash, &blob_id.class)
-                    .await
-                    .caused_by(trc::location!())?
-                    && match &blob_id.class {
-                        BlobClass::Linked {
-                            account_id,
-                            collection,
-                            document_id,
-                        } => {
-                            if access_token.reads_as_owner(*account_id) {
-                                // inbuxa: AU-1.6: another account's blob
-                                self.audit_foreign_access(access_token, *account_id, true)
-                                    .await;
-                                true
-                            } else {
-                                match Collection::from(*collection) {
-                                    Collection::Email => self
-                                        .get_cached_messages(*account_id)
-                                        .await
-                                        .caused_by(trc::location!())?
-                                        .shared_messages(access_token, Acl::ReadItems)
-                                        .contains(*document_id),
-                                    collection @ (Collection::FileNode
-                                    | Collection::ContactCard
-                                    | Collection::CalendarEvent) => self
-                                        .fetch_dav_resources(
-                                            access_token.account_id(),
-                                            *account_id,
-                                            SyncCollection::from(collection),
-                                        )
-                                        .await
-                                        .caused_by(trc::location!())?
-                                        // inbuxa: a calendar event's blob holds all of
-                                        // it, so a sharee gets none of a private or
-                                        // confidential event or one that hides its
-                                        // attendees
-                                        .shared_events(
-                                            access_token,
-                                            [Acl::ReadItems],
-                                            true,
-                                            EVENT_VIEW_PRIVATE | EVENT_VIEW_HIDE_ATTENDEES,
-                                        )
-                                        .contains(*document_id),
-                                    _ => false,
-                                }
+        Ok((blob_id.class.is_superuser()
+            && access_token.has_permission(Permission::FetchAnyBlob)
+            && self
+                .tenant_holds_blob(blob_id, access_token)
+                .await
+                .caused_by(trc::location!())?)
+            || (self
+                .store()
+                .blob_has_access(&blob_id.hash, &blob_id.class)
+                .await
+                .caused_by(trc::location!())?
+                && match &blob_id.class {
+                    BlobClass::Linked {
+                        account_id,
+                        collection,
+                        document_id,
+                    } => {
+                        if access_token.reads_as_owner(*account_id) {
+                            // inbuxa: AU-1.6: another account's blob
+                            self.audit_foreign_access(access_token, *account_id, true)
+                                .await;
+                            true
+                        } else {
+                            match Collection::from(*collection) {
+                                Collection::Email => self
+                                    .get_cached_messages(*account_id)
+                                    .await
+                                    .caused_by(trc::location!())?
+                                    .shared_messages(access_token, Acl::ReadItems)
+                                    .contains(*document_id),
+                                collection @ (Collection::FileNode
+                                | Collection::ContactCard
+                                | Collection::CalendarEvent) => self
+                                    .fetch_dav_resources(
+                                        access_token.account_id(),
+                                        *account_id,
+                                        SyncCollection::from(collection),
+                                    )
+                                    .await
+                                    .caused_by(trc::location!())?
+                                    // inbuxa: a calendar event's blob holds all of
+                                    // it, so a sharee gets none of a private or
+                                    // confidential event or one that hides its
+                                    // attendees
+                                    .shared_events(
+                                        access_token,
+                                        [Acl::ReadItems],
+                                        true,
+                                        EVENT_VIEW_PRIVATE | EVENT_VIEW_HIDE_ATTENDEES,
+                                    )
+                                    .contains(*document_id),
+                                _ => false,
                             }
                         }
-                        BlobClass::Reserved { account_id, .. } => {
-                            access_token.is_member(*account_id)
-                        }
-                    }),
-        )
+                    }
+                    BlobClass::Reserved { account_id, .. } => access_token.is_member(*account_id),
+                }))
     }
+}
+
+impl TenantBlobAccess for Server {
+    /// inbuxa: a superuser-class blob id names a blob by its hash alone, so
+    /// inside a tenant it reaches only blobs the tenant holds: one of its
+    /// accounts links the blob, or it is a queued message the tenant sees
+    /// (MT-5). Server-level administrators reach any blob.
+    async fn tenant_holds_blob(
+        &self,
+        blob_id: &BlobId,
+        access_token: &AccessToken,
+    ) -> trc::Result<bool> {
+        let Some(tenant_id) = access_token.tenant_id() else {
+            return Ok(true);
+        };
+        let mut tenant_domains = None;
+        for holder in self.store().blob_holders(&blob_id.hash).await? {
+            match holder {
+                BlobHolder::Account(account_id) => {
+                    if self
+                        .try_account(account_id)
+                        .await?
+                        .is_some_and(|account| account.tenant_id() == Some(tenant_id))
+                    {
+                        return Ok(true);
+                    }
+                }
+                BlobHolder::QueuedMessage(queue_id) => {
+                    let Some(archive) = self.read_message_archive(queue_id).await? else {
+                        continue;
+                    };
+                    let domains = match &tenant_domains {
+                        Some(domains) => domains,
+                        None => tenant_domains.insert(
+                            inbuxa_features::tenancy::queue::tenant_domains(
+                                self.registry(),
+                                tenant_id,
+                            )
+                            .await?,
+                        ),
+                    };
+                    if crate::registry::mapping::queued_message::tenant_sees_archived(
+                        domains,
+                        archive.unarchive::<Message>()?,
+                    ) {
+                        return Ok(true);
+                    }
+                }
+            }
+        }
+        Ok(false)
+    }
+}
+
+trait TenantBlobAccess: Sync + Send {
+    fn tenant_holds_blob(
+        &self,
+        blob_id: &BlobId,
+        access_token: &AccessToken,
+    ) -> impl Future<Output = trc::Result<bool>> + Send;
 }

@@ -217,6 +217,12 @@ Each requirement has an ID, and tests name the IDs they check.
   `…Destroy` never take effect inside a tenant either. System Sieve scripts
   run with the trusted functions, whose `exec` starts programs as the
   server's user, so no tenant policy may hand them out.
+  **Decision** (2026-11-17): `fetchAnyBlob` stays in the default tenant role,
+  because a tenant administrator downloads queued messages with it. A
+  superuser-class blob id names a blob by its hash alone, so inside a tenant
+  it reaches only a blob the tenant holds: one an account of the tenant
+  links, or a queued message the tenant sees (MT-5). Server-level
+  administrators reach any blob.
 - **MT-16.** Changing a tenant's roles, permissions or quotas takes effect for
   its people without a restart and without them signing in again. The next
   request is judged by the new rules. **Decision**, a deliberate improvement:
