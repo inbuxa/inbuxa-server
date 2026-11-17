@@ -40,8 +40,9 @@ fn re(pattern: &str) -> Regex {
 }
 
 /// Two letters, six digits (often in pairs), a suffix A–D.
-static NINO: LazyLock<Regex> =
-    LazyLock::new(|| re(r"(?i)\b([A-Z])([A-Z]) ?(\d{2}) ?(\d{2}) ?(\d{2}) ?([A-D])\b"));
+static NINO: LazyLock<Regex> = LazyLock::new(|| {
+    re(r"(?i)\b(?-u:([A-Z])([A-Z]) ?([0-9]{2}) ?([0-9]{2}) ?([0-9]{2}) ?([A-D]))\b")
+});
 
 /// HMRC's rules: D, F, I, Q, U and V are never used; O never second; and
 /// BG, GB, KN, NK, NT, TN and ZZ are never allocated.
@@ -71,7 +72,8 @@ fn nino(text: &str, findings: &mut Findings) {
 }
 
 /// `NNN NNN NNNN` stands alone; ten bare digits need a word.
-static NHS: LazyLock<Regex> = LazyLock::new(|| re(r"\b(\d{3})([ -]?)(\d{3})([ -]?)(\d{4})\b"));
+static NHS: LazyLock<Regex> =
+    LazyLock::new(|| re(r"\b([0-9]{3})([ -]?)([0-9]{3})([ -]?)([0-9]{4})\b"));
 
 /// Mod 11: weights 10 down to 2 over the first nine digits; the check digit
 /// is 11 minus the remainder (11 becomes 0; 10 is never issued).
@@ -98,7 +100,7 @@ fn nhs(text: &str, findings: &mut Findings) {
     }
 }
 
-static UTR: LazyLock<Regex> = LazyLock::new(|| re(r"\b\d{5} ?\d{5}\b"));
+static UTR: LazyLock<Regex> = LazyLock::new(|| re(r"\b[0-9]{5} ?[0-9]{5}\b"));
 
 const UTR_WORDS: &[&str] = &[
     "utr",

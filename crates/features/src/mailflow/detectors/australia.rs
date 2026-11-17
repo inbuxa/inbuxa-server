@@ -33,7 +33,7 @@ fn re(pattern: &str) -> Regex {
 }
 
 /// `NNN NNN NNN` stands alone; bare digits (eight or nine) need a word.
-static TFN: LazyLock<Regex> = LazyLock::new(|| re(r"\b(\d{3})( ?)(\d{3})( ?)(\d{2,3})\b"));
+static TFN: LazyLock<Regex> = LazyLock::new(|| re(r"\b([0-9]{3})( ?)([0-9]{3})( ?)([0-9]{2,3})\b"));
 
 /// Weighted sum mod 11, with the ATO's weights for 9- and 8-digit numbers.
 pub fn tfn_valid(n: &str) -> bool {
@@ -66,7 +66,7 @@ fn tfn(text: &str, findings: &mut Findings) {
 /// `NNNN NNNNN N` (and an optional issue number) stands alone; bare digits
 /// need a word.
 static MEDICARE: LazyLock<Regex> =
-    LazyLock::new(|| re(r"\b([2-6]\d{3})( ?)(\d{5})( ?)(\d)(?:[ -]?\d)?\b"));
+    LazyLock::new(|| re(r"\b([2-6][0-9]{3})( ?)([0-9]{5})( ?)([0-9])(?:[ -]?[0-9])?\b"));
 
 /// The ninth digit is the weighted sum (1, 3, 7, 9, 1, 3, 7, 9) of the first
 /// eight, mod 10.

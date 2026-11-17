@@ -22,7 +22,8 @@ pub static DETECTORS: &[Detector] = &[Detector::new(
 /// check digit. The date and the two fixed digits make it strong enough to
 /// count alone.
 static ZA_ID: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\b(\d{2})(\d{2})(\d{2})\d{4}[012][89]\d\b").expect("detector pattern")
+    Regex::new(r"\b([0-9]{2})([0-9]{2})([0-9]{2})[0-9]{4}[012][89][0-9]\b")
+        .expect("detector pattern")
 });
 
 fn za_id(text: &str, findings: &mut Findings) {
