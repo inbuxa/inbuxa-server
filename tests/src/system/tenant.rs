@@ -38,7 +38,10 @@ use serde_json::{Value, json};
 use std::str::FromStr;
 use store::write::{BatchBuilder, ValueClass};
 use trc::{Collector, MetricType};
-use types::id::Id;
+use types::{
+    blob::{BlobClass, BlobId},
+    id::Id,
+};
 use utils::map::vec_map::VecMap;
 
 const SECRET_T_ADMIN: &str = "tenant t administrator passphrase";
@@ -680,6 +683,29 @@ pub async fn test(test: &mut TestServer) {
         "test 10"
     );
 
+    // A tenant administrator's FetchAnyBlob reaches its own tenant's blobs
+    // only: a superuser-class blob id names a blob by its hash alone
+    assert!(
+        test.permissions_of(p_admin.id())
+            .await
+            .has_permission(Permission::FetchAnyBlob),
+        "the default tenant role keeps FetchAnyBlob"
+    );
+    let outside = s_user.upload_blob(b"server-level secret 7781").await;
+    let inside = p_user.upload_blob(b"tenant P attachment 7781").await;
+    for (blob, expected, what) in [(&outside, 404, "outside"), (&inside, 200, "inside")] {
+        let response = p_admin.download_any_blob(blob).await;
+        assert_eq!(
+            response.status,
+            expected,
+            "FetchAnyBlob, a blob {what} the tenant: {}",
+            String::from_utf8_lossy(&response.body)
+        );
+    }
+    // Server-level administrators keep reaching every blob
+    assert_eq!(admin.download_any_blob(&outside).await.status, 200);
+    assert_eq!(admin.download_any_blob(&inside).await.status, 200);
+
     // Acceptance test 11: lowering a tenant's roles reaches a signed-in
     // administrator on its next request (MT-16)
     assert!(p_admin.can_list_accounts().await, "test 11");
@@ -841,9 +867,15 @@ pub async fn test(test: &mut TestServer) {
         )
         .await;
     // The message is accepted and queued, and local delivery refuses it
-    // for now, so it waits in the queue (MT-19a)
-    lmtp.ingest("someone@remote.example.org", &["d3@d.example.org"], message)
-        .await;
+    // for now, so it waits in the queue (MT-19a). Its body differs, at the
+    // same size, so the queue alone holds its blob.
+    let queued_message = message.replace("0123456789", "9876543210");
+    lmtp.ingest(
+        "someone@remote.example.org",
+        &["d3@d.example.org"],
+        &queued_message,
+    )
+    .await;
     let mut reason = String::new();
     for _ in 0..20 {
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
@@ -882,6 +914,28 @@ pub async fn test(test: &mut TestServer) {
             .is_empty(),
         "MT-5"
     );
+    // The recipient's tenant administrator downloads the queued message by
+    // the blob id the queue gives it; another tenant's can't
+    let blob_id = d_admin
+        .registry_get_many(ObjectType::QueuedMessage, queued.clone())
+        .await
+        .list()[0]["blobId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    for (account, expected) in [(&d_admin, 200), (&t_admin, 404)] {
+        let response = account
+            .http_get_raw(
+                &format!(
+                    "{}/jmap/download/{}/{blob_id}/queued.eml",
+                    account.base_url(),
+                    account.id_string()
+                ),
+                None,
+            )
+            .await;
+        assert_eq!(response.status, expected, "queued message download");
+    }
     admin
         .registry_destroy(ObjectType::QueuedMessage, queued)
         .await;
@@ -1090,6 +1144,44 @@ pub async fn tenant_tests() {
 fn sorted(mut ids: Vec<Id>) -> Vec<Id> {
     ids.sort_unstable();
     ids
+}
+
+impl Account {
+    /// Uploads `data`, returning its blob id.
+    async fn upload_blob(&self, data: &[u8]) -> String {
+        let response = self
+            .http_post_raw(
+                &format!("{}/jmap/upload/{}/", self.base_url(), self.id_string()),
+                "application/octet-stream",
+                data.to_vec(),
+            )
+            .await;
+        assert_eq!(
+            response.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&response.body)
+        );
+        serde_json::from_slice::<Value>(&response.body).unwrap()["blobId"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    /// Downloads `blob_id`'s blob by its hash alone (a superuser-class id).
+    async fn download_any_blob(&self, blob_id: &str) -> crate::utils::jmap::RawResponse {
+        let hash = BlobId::from_base32(blob_id).unwrap().hash;
+        let any = BlobId::new(hash, BlobClass::default());
+        self.http_get_raw(
+            &format!(
+                "{}/jmap/download/{}/{any}/blob.bin",
+                self.base_url(),
+                self.id_string()
+            ),
+            None,
+        )
+        .await
+    }
 }
 
 impl TestServer {
