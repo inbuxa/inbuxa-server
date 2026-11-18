@@ -6,6 +6,7 @@
  * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
+use crate::queue::is_xtext_value;
 use crate::{
     core::{Session, SessionAddress},
     scripts::ScriptResult,
@@ -54,6 +55,26 @@ impl<T: SessionStream> Session<T> {
 
             return self
                 .write(b"503 5.5.1 You must authenticate first.\r\n")
+                .await;
+        } else if let Some(param) = [("ENVID", &from.env_id), ("AUTH", &from.auth)]
+            .into_iter()
+            .find_map(|(name, value)| {
+                value
+                    .as_deref()
+                    .is_some_and(|value| !is_xtext_value(value))
+                    .then_some(name)
+            })
+        {
+            // inbuxa: xtext decodes "+0D+0A" to a line break; a value has to
+            // be printable ASCII (RFC 3461, Section 4)
+            trc::event!(
+                Smtp(SmtpEvent::InvalidParameter),
+                SpanId = self.data.session_id,
+                Details = param,
+            );
+
+            return self
+                .write(format!("501 5.5.4 Invalid {param} parameter.\r\n").as_bytes())
                 .await;
         } else if self.data.iprev.is_none() && self.params.iprev.verify() {
             let time = Instant::now();

@@ -14,6 +14,7 @@ use compact_str::ToCompactString;
 use registry::schema::enums::ExpressionVariable;
 use smtp_proto::Response;
 use std::{
+    borrow::Cow,
     fmt::Display,
     net::{IpAddr, Ipv4Addr},
     time::{Duration, Instant, SystemTime},
@@ -677,6 +678,49 @@ pub fn is_smtp_path(address: &str) -> bool {
         && !address
             .bytes()
             .any(|byte| byte.is_ascii_control() || matches!(byte, b' ' | b'<' | b'>'))
+}
+
+// inbuxa: whether a decoded ENVID, ORCPT or AUTH= value is what xtext can
+// carry (RFC 3461, Section 4): printable US-ASCII, no space or control. The
+// parser decodes "+0D+0A" to a line break, so this is checked after it.
+pub fn is_xtext_value(value: &str) -> bool {
+    value.bytes().all(|byte| (0x21..=0x7e).contains(&byte))
+}
+
+// inbuxa: a decoded value as xtext (RFC 3461, Section 4), as it goes into a
+// MAIL FROM line or a DSN field. Anything but printable US-ASCII, '+' and
+// '=' becomes "+XX", so the value can't end the line it is written on.
+pub fn xtext(value: &str) -> Cow<'_, str> {
+    let is_plain = |byte: u8| (0x21..=0x7e).contains(&byte) && byte != b'+' && byte != b'=';
+    if value.bytes().all(is_plain) {
+        return Cow::Borrowed(value);
+    }
+    let mut encoded = String::with_capacity(value.len() + 8);
+    for byte in value.bytes() {
+        if is_plain(byte) {
+            encoded.push(byte as char);
+        } else {
+            encoded.push_str(&format!("+{byte:02X}"));
+        }
+    }
+    Cow::Owned(encoded)
+}
+
+#[cfg(test)]
+mod xtext_tests {
+    use super::{is_xtext_value, xtext};
+
+    #[test]
+    fn xtext_values_are_printable_ascii() {
+        assert!(is_xtext_value("abc+123=<x@example.org>"));
+        for value in ["", "x\r\nRSET", "x y", "x\0", "jörg"] {
+            assert_eq!(is_xtext_value(value), value.is_empty(), "{value:?}");
+        }
+        assert_eq!(xtext("abc123"), "abc123");
+        assert_eq!(xtext("a+b=c"), "a+2Bb+3Dc");
+        assert_eq!(xtext("x\r\nRSET y"), "x+0D+0ARSET+20y");
+        assert_eq!(xtext("ö"), "+C3+B6");
+    }
 }
 
 #[cfg(test)]
