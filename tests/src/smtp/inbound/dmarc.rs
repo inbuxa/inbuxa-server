@@ -506,4 +506,33 @@ async fn dmarc() {
             "550 5.7.1",
         )
         .await;
+
+    // Up to ten author domains are each checked; a From header naming more
+    // fails DMARC without any lookups and is rejected in strict mode
+    let from = (1..=10)
+        .map(|i| format!("a@d{i}.example"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    session
+        .send_message(
+            "joe@test.net",
+            &["jdoe@localdomain.org"],
+            &format!("From: {from}\r\nTo: jdoe@localdomain.org\r\nSubject: test\r\n\r\ntest"),
+            "250",
+        )
+        .await;
+    test.consume_message().await;
+    let from = (1..=11)
+        .map(|i| format!("a@d{i}.example"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    session
+        .send_message(
+            "joe@test.net",
+            &["jdoe@localdomain.org"],
+            &format!("From: {from}\r\nTo: jdoe@localdomain.org\r\nSubject: test\r\n\r\ntest"),
+            "550 5.7.1",
+        )
+        .await;
+    test.assert_no_events();
 }
