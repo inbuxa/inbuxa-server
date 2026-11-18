@@ -27,6 +27,14 @@ const MAX_NESTED_ENCODED: usize = 3;
 // this deep.
 pub const MAX_NESTED_MESSAGES: usize = 20;
 
+// inbuxa: the most header fields kept for one part, and for one message
+// with all its parts and nested messages. Each field parses into a struct
+// of over a hundred bytes and can be as short as four, so a 100 MB header
+// block took gigabytes. Fields past either limit are read past and left
+// out of the parsed message (the raw message keeps them).
+pub const MAX_HEADERS_PER_PART: usize = 10_000;
+pub const MAX_HEADERS_PER_MESSAGE: usize = 262_144;
+
 #[derive(Debug, PartialEq, Default)]
 enum MimeType {
     MultipartMixed,
@@ -120,7 +128,13 @@ impl MessageParser {
     /// if no headers are found None is returned.
     ///
     pub fn parse<'x>(&self, raw_message: &'x (impl AsRef<[u8]> + ?Sized)) -> Option<Message<'x>> {
-        self.parse_(raw_message.as_ref(), MAX_NESTED_ENCODED, false)
+        let mut headers_left = MAX_HEADERS_PER_MESSAGE;
+        self.parse_(
+            raw_message.as_ref(),
+            MAX_NESTED_ENCODED,
+            false,
+            &mut headers_left,
+        )
     }
 
     /// Parses a byte slice containing the RFC5322 raw message and returns a
@@ -129,7 +143,13 @@ impl MessageParser {
         &self,
         raw_message: &'x (impl AsRef<[u8]> + ?Sized),
     ) -> Option<Message<'x>> {
-        self.parse_(raw_message.as_ref(), MAX_NESTED_ENCODED, true)
+        let mut headers_left = MAX_HEADERS_PER_MESSAGE;
+        self.parse_(
+            raw_message.as_ref(),
+            MAX_NESTED_ENCODED,
+            true,
+            &mut headers_left,
+        )
     }
 
     fn parse_<'x>(
@@ -137,6 +157,7 @@ impl MessageParser {
         raw_message: &'x [u8],
         depth: usize,
         skip_body: bool,
+        headers_left: &mut usize,
     ) -> Option<Message<'x>> {
         let mut stream = MessageStream::new(raw_message);
 
@@ -151,7 +172,13 @@ impl MessageParser {
         'outer: loop {
             // Parse headers
             state.offset_header = stream.offset();
-            if !stream.parse_headers(self, &mut part_headers) {
+            let headers_complete = stream.parse_headers(
+                self,
+                &mut part_headers,
+                MAX_HEADERS_PER_PART.min(*headers_left),
+            );
+            *headers_left = headers_left.saturating_sub(part_headers.len());
+            if !headers_complete {
                 break;
             }
             state.offset_body = stream.offset();
@@ -376,7 +403,7 @@ impl MessageParser {
                 message.attachments.push(message.parts.len() as u32);
 
                 if depth != 0 {
-                    if let Some(nested_message) = self.parse_(bytes.as_ref(), depth - 1, false) {
+                    if let Some(nested_message) = self.parse_(bytes.as_ref(), depth - 1, false, headers_left) {
                         PartType::Message(Message {
                             html_body: nested_message.html_body,
                             text_body: nested_message.text_body,

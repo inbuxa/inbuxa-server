@@ -21,6 +21,9 @@ use utils::HexEncode;
 const MIN_LINE_LENGTH: usize = 8;
 const ATOMIC_NUM_LINES: usize = 4;
 const DIGEST_SPEC: &[(usize, usize)] = &[(20, 3), (60, 3)];
+// inbuxa: Pyzor's own clients pick thread ids in this range; ids below
+// 1024 are reserved
+const MIN_THREAD_ID: u16 = 1024;
 
 #[derive(Default, Debug, PartialEq, Eq)]
 pub(crate) struct PyzorResponse {
@@ -91,14 +94,34 @@ async fn pyzor_send_message(
     timeout: Duration,
     message: &str,
 ) -> std::io::Result<PyzorResponse> {
-    let socket = UdpSocket::bind("0.0.0.0:0").await?;
-    tokio::time::timeout(timeout, socket.send_to(message.as_bytes(), addr)).await??;
+    // inbuxa: the socket is connected, so the kernel drops datagrams from
+    // anyone but the server, and a reply counts only if it carries the
+    // request's thread id. Before, the first datagram from any host that
+    // reached the port was taken as the verdict, so anyone could mark
+    // inbound mail as listed.
+    let socket = UdpSocket::bind(if addr.is_ipv4() {
+        "0.0.0.0:0"
+    } else {
+        "[::]:0"
+    })
+    .await?;
+    socket.connect(addr).await?;
+    let thread = message_thread(message).ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "Request without a thread")
+    })?;
+
+    let deadline = tokio::time::Instant::now() + timeout;
+    tokio::time::timeout_at(deadline, socket.send(message.as_bytes())).await??;
 
     let mut buffer = vec![0u8; 1024];
-    let (size, _) = tokio::time::timeout(timeout, socket.recv_from(&mut buffer)).await??;
-
-    let raw_response = std::str::from_utf8(&buffer[..size])
-        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
+    let raw_response = loop {
+        let size = tokio::time::timeout_at(deadline, socket.recv(&mut buffer)).await??;
+        let raw_response = std::str::from_utf8(&buffer[..size])
+            .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
+        if message_thread(raw_response) == Some(thread) {
+            break raw_response;
+        }
+    };
     let mut response = PyzorResponse {
         code: u32::MAX,
         count: u64::MAX,
@@ -140,6 +163,15 @@ async fn pyzor_send_message(
             format!("Invalid response: {raw_response}"),
         ))
     }
+}
+
+// inbuxa: the Thread value of a Pyzor request or reply
+fn message_thread(message: &str) -> Option<&str> {
+    message.lines().find_map(|line| {
+        line.split_once(':')
+            .filter(|(k, _)| k.trim().eq_ignore_ascii_case("thread"))
+            .map(|(_, v)| v.trim())
+    })
 }
 
 trait PyzorWrite {
@@ -188,10 +220,12 @@ impl PyzorCheck for Message<'_> {
             .duration_since(SystemTime::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs());
 
+        // inbuxa: a random thread id, not one derived from the time, so
+        // a forged reply can't guess it
         pyzor_create_message(
             self,
             time,
-            (time & 0xFFFF) as u16 ^ ((time >> 16) & 0xFFFF) as u16,
+            store::rand::random_range(MIN_THREAD_ID..=u16::MAX),
         )
     }
 }
@@ -477,6 +511,98 @@ mod test {
                 wl_count: 0
             }
         );
+    }
+
+    // inbuxa: a stand-in Pyzor server on localhost that answers one request.
+    // Before its own reply, `forger` (a second socket on another port, like
+    // an off-path host spraying the client's port) and the server itself
+    // send a reply for another thread, both saying the message is listed.
+    async fn pyzor_exchange(forger: bool, wrong_thread: bool) -> PyzorResponse {
+        let server = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr = server.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            let mut buf = vec![0u8; 1024];
+            let (size, client) = server.recv_from(&mut buf).await.unwrap();
+            let request = std::str::from_utf8(&buf[..size]).unwrap().to_string();
+            let thread = super::message_thread(&request).unwrap().to_string();
+            let listed = |thread: &str| {
+                format!(
+                    "Code: 200\nDiag: OK\nPV: 2.1\nThread: {thread}\nCount: 1000000\nWL-Count: 0\n"
+                )
+            };
+            if forger {
+                let forger = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+                forger
+                    .send_to(listed(&thread).as_bytes(), client)
+                    .await
+                    .unwrap();
+            }
+            if wrong_thread {
+                let other = if thread == "1024" { "1025" } else { "1024" };
+                server
+                    .send_to(listed(other).as_bytes(), client)
+                    .await
+                    .unwrap();
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let reply =
+                format!("Code: 200\nDiag: OK\nPV: 2.1\nThread: {thread}\nCount: 0\nWL-Count: 0\n");
+            server.send_to(reply.as_bytes(), client).await.unwrap();
+        });
+        let request = pyzor_create_message(
+            &MessageParser::new().parse(HTML_TEXT_STYLE_SCRIPT).unwrap(),
+            1697468672,
+            49005,
+        )
+        .unwrap();
+        let response = pyzor_send_message(addr, Duration::from_secs(5), &request)
+            .await
+            .unwrap();
+        task.await.unwrap();
+        response
+    }
+
+    // inbuxa: only the server's reply to this request counts
+    #[tokio::test]
+    async fn pyzor_reply_from_another_host_is_ignored() {
+        assert_eq!(
+            pyzor_exchange(true, false).await,
+            PyzorResponse {
+                code: 200,
+                count: 0,
+                wl_count: 0
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn pyzor_reply_for_another_thread_is_ignored() {
+        assert_eq!(
+            pyzor_exchange(false, true).await,
+            PyzorResponse {
+                code: 200,
+                count: 0,
+                wl_count: 0
+            }
+        );
+    }
+
+    // inbuxa: thread ids are random, not taken from the clock
+    #[test]
+    fn pyzor_thread_ids_are_random() {
+        use super::PyzorCheck;
+        let message = MessageParser::new().parse(HTML_TEXT_STYLE_SCRIPT).unwrap();
+        let threads = (0..32)
+            .map(|_| {
+                let request = message.pyzor_check_message().unwrap();
+                super::message_thread(&request)
+                    .unwrap()
+                    .parse::<u16>()
+                    .unwrap()
+            })
+            .collect::<std::collections::HashSet<_>>();
+        assert!(threads.iter().all(|&t| t >= super::MIN_THREAD_ID));
+        assert!(threads.len() > 1, "thread ids repeat: {threads:?}");
     }
 
     #[test]

@@ -84,6 +84,14 @@ impl<T: SessionStream> Session<T> {
             return (&b"552 5.3.4 Message has too many MIME parts.\r\n"[..]).into();
         }
 
+        // inbuxa: past its limits the parser leaves header fields out, and
+        // the server would then judge the message by fewer fields than a
+        // mail client that reads the raw message sees, so such a message is
+        // refused
+        if !fits_header_limits(&parsed_message) {
+            return (&b"552 5.3.4 Message has too many header fields.\r\n"[..]).into();
+        }
+
         // inbuxa: MA-S3: a shared mailbox's people send only as it over SMTP
         // too, so the answer comes back to the mailbox
         if let Some(address) = self.shared_mailbox_foreign_address(&parsed_message).await {
@@ -1319,12 +1327,13 @@ fn parse_dkim2_dsn<'x, 'r>(
         }
     }
 
-    if !returned.is_empty() {
-        Some(Dkim2Dsn::new(
-            raw,
-            AuthenticatedMessage::parse(returned)?,
-            returned_full,
-        ))
+    // inbuxa: mail-auth parses the returned headers on its own, keeping every
+    // field, and a text/rfc822-headers part isn't covered by the parser's
+    // limits, so one with too many fields isn't looked at
+    if !returned.is_empty() && raw_header_fields(returned) <= MAX_PART_HEADER_FIELDS {
+        let mut returned = AuthenticatedMessage::parse(returned)?;
+        limit_signature_work(&mut returned);
+        Some(Dkim2Dsn::new(raw, returned, returned_full))
     } else {
         None
     }
@@ -1333,6 +1342,49 @@ fn parse_dkim2_dsn<'x, 'r>(
 // inbuxa: the most author domains a From header may name for DMARC to
 // check each of them
 const MAX_DMARC_AUTHOR_DOMAINS: usize = 10;
+
+// inbuxa: the most header fields one part of a message received over SMTP
+// may have. Real mail has tens, a long relay history a few hundred.
+pub const MAX_PART_HEADER_FIELDS: usize = 1_000;
+
+// inbuxa: the header fields of a raw message, counted up to the blank line
+// that ends them, and only to one past MAX_PART_HEADER_FIELDS
+fn raw_header_fields(raw: &[u8]) -> usize {
+    let mut fields = 0;
+    for line in raw.split(|&ch| ch == b'\n') {
+        match line {
+            b"" | b"\r" => break,
+            [b' ' | b'\t', ..] => {}
+            _ => {
+                fields += 1;
+                if fields > MAX_PART_HEADER_FIELDS {
+                    break;
+                }
+            }
+        }
+    }
+    fields
+}
+
+// inbuxa: whether no part of the message, nested messages included, has
+// more than MAX_PART_HEADER_FIELDS header fields and the parser kept every
+// field (it keeps 10,000 per part and MAX_HEADERS_PER_MESSAGE in all)
+pub fn fits_header_limits(message: &mail_parser::Message<'_>) -> bool {
+    let mut total = 0usize;
+    let mut stack = vec![message];
+    while let Some(message) = stack.pop() {
+        for part in &message.parts {
+            if part.headers.len() > MAX_PART_HEADER_FIELDS {
+                return false;
+            }
+            total += part.headers.len();
+            if let mail_parser::PartType::Message(nested) = &part.body {
+                stack.push(nested);
+            }
+        }
+    }
+    total < mail_parser::parsers::message::MAX_HEADERS_PER_MESSAGE
+}
 
 // inbuxa: the most DKIM-Signature fields checked in one message, the most
 // h= entries in a DKIM or ARC signature, and the most header fields a
@@ -1344,10 +1396,20 @@ pub const MAX_DKIM_SIGNATURES: usize = 10;
 pub const MAX_SIGNED_HEADERS: usize = 128;
 pub const MAX_SIGNED_MESSAGE_HEADERS: usize = 1_000;
 
+// inbuxa: the most values (selector and signature pairs) in one DKIM2
+// signature's s= list, the most ARC sets or DKIM2 signatures and message
+// instances in a chain (mail-auth allows 50), and the longest ARC or DKIM2
+// header field. Each s= value is a key lookup and a check over all the
+// chain's earlier fields, the list itself included, so the work grew with
+// the square of the list: 32,000 values (3.4 MB) took 9 seconds.
+pub const MAX_DKIM2_SIGNATURE_VALUES: usize = 4;
+pub const MAX_SIGNATURE_CHAIN: usize = 20;
+pub const MAX_SIGNATURE_HEADER_BYTES: usize = 64 * 1024;
+
 // inbuxa: leaves out the DKIM signatures past the limits above, which are
 // then not checked at all (RFC 6376, Section 6.1, lets a verifier limit the
-// signatures it checks), and marks an ARC chain with a set past them as
-// broken.
+// signatures it checks), leaves out a DKIM2 chain past them (the message
+// then has no DKIM2 result), and marks an ARC chain past them as broken.
 pub fn limit_signature_work(message: &mut AuthenticatedMessage<'_>) {
     if message.headers.len() > MAX_SIGNED_MESSAGE_HEADERS {
         message.dkim_headers.clear();
@@ -1358,12 +1420,35 @@ pub fn limit_signature_work(message: &mut AuthenticatedMessage<'_>) {
             .retain(|header| header.header.h.len() <= MAX_SIGNED_HEADERS);
     }
 
+    if message.dkim2_signatures.len() > MAX_SIGNATURE_CHAIN
+        || message.dkim2_instances.len() > MAX_SIGNATURE_CHAIN
+        || message.dkim2_signatures.iter().any(|header| {
+            header.header.s.len() > MAX_DKIM2_SIGNATURE_VALUES
+                || header.value.len() > MAX_SIGNATURE_HEADER_BYTES
+        })
+        || message
+            .dkim2_instances
+            .iter()
+            .any(|header| header.value.len() > MAX_SIGNATURE_HEADER_BYTES)
+    {
+        message.dkim2_signatures.clear();
+        message.dkim2_instances.clear();
+    }
+
     if !message.ams_headers.is_empty()
         && (message.headers.len() > MAX_SIGNED_MESSAGE_HEADERS
+            || message.ams_headers.len() > MAX_SIGNATURE_CHAIN
             || message
                 .ams_headers
                 .iter()
-                .any(|header| header.header.h.len() > MAX_SIGNED_HEADERS))
+                .any(|header| header.header.h.len() > MAX_SIGNED_HEADERS)
+            || message
+                .ams_headers
+                .iter()
+                .map(|header| header.value)
+                .chain(message.as_headers.iter().map(|header| header.value))
+                .chain(message.aar_headers.iter().map(|header| header.value))
+                .any(|value| value.len() > MAX_SIGNATURE_HEADER_BYTES))
     {
         message.has_arc_errors = true;
         message.errors.push(Header {
@@ -1412,7 +1497,10 @@ fn dmarc_strictness(output: &DmarcOutput) -> (u8, u8, u8) {
 
 #[cfg(test)]
 mod tests {
-    use super::{dmarc_author_domains, limit_signature_work};
+    use super::{
+        MAX_PART_HEADER_FIELDS, dmarc_author_domains, fits_header_limits, limit_signature_work,
+        parse_dkim2_dsn,
+    };
     use mail_auth::AuthenticatedMessage;
 
     fn message_from(addresses: &[String]) -> Vec<u8> {
@@ -1480,5 +1568,153 @@ mod tests {
         let mut message = AuthenticatedMessage::parse(raw.as_bytes()).unwrap();
         limit_signature_work(&mut message);
         assert!(!message.has_arc_errors);
+    }
+
+    // inbuxa: a part may have up to MAX_PART_HEADER_FIELDS header fields,
+    // nested messages included, and a message whose fields the parser left
+    // out doesn't fit either
+    #[test]
+    fn header_field_limits() {
+        let fields = |n: usize| (0..n).map(|i| format!("X-{i}: x\r\n")).collect::<String>();
+        let parse = |raw: &str| {
+            let message = mail_parser::MessageParser::new().parse(raw).unwrap();
+            fits_header_limits(&message)
+        };
+        let top = |n: usize| format!("{}\r\ntest\r\n", fields(n));
+        assert!(parse(&top(MAX_PART_HEADER_FIELDS)));
+        assert!(!parse(&top(MAX_PART_HEADER_FIELDS + 1)));
+        assert!(!parse(&top(50_000)));
+
+        let nested = |n: usize| {
+            format!(
+                concat!(
+                    "From: a@example.org\r\nContent-Type: multipart/mixed; boundary=b\r\n\r\n",
+                    "--b\r\nContent-Type: message/rfc822\r\n\r\n{}\r\ntest\r\n--b--\r\n"
+                ),
+                fields(n)
+            )
+        };
+        assert!(parse(&nested(MAX_PART_HEADER_FIELDS)));
+        assert!(!parse(&nested(MAX_PART_HEADER_FIELDS + 1)));
+
+        // 300 parts of 1,000 fields each: the parser keeps 262,144 of them
+        let mut raw = String::from(
+            "From: a@example.org\r\nContent-Type: multipart/mixed; boundary=b\r\n\r\n",
+        );
+        for _ in 0..300 {
+            raw.push_str("--b\r\n");
+            raw.push_str(&fields(MAX_PART_HEADER_FIELDS));
+            raw.push_str("\r\nx\r\n");
+        }
+        raw.push_str("--b--\r\n");
+        assert!(!parse(&raw));
+    }
+
+    // inbuxa: the headers a DSN returns as text/rfc822-headers are parsed
+    // for DKIM2 only up to MAX_PART_HEADER_FIELDS fields
+    #[test]
+    fn dkim2_dsn_returned_headers_are_limited() {
+        let dsn = |n: usize| {
+            let mut raw = String::from(concat!(
+                "From: postmaster@example.org\r\n",
+                "Content-Type: multipart/report; report-type=delivery-status; boundary=b\r\n\r\n",
+                "--b\r\nContent-Type: text/rfc822-headers\r\n\r\n",
+                "From: a@example.org\r\n"
+            ));
+            for i in 1..n {
+                raw.push_str(&format!("X-{i}: x\r\n"));
+            }
+            raw.push_str("\r\n--b--\r\n");
+            raw
+        };
+        for (n, looked_at) in [
+            (MAX_PART_HEADER_FIELDS, true),
+            (MAX_PART_HEADER_FIELDS + 1, false),
+        ] {
+            let raw = dsn(n);
+            let parsed = mail_parser::MessageParser::new().parse(&raw).unwrap();
+            let auth = AuthenticatedMessage::parse(raw.as_bytes()).unwrap();
+            assert_eq!(
+                parse_dkim2_dsn(&parsed, &auth, raw.as_bytes()).is_some(),
+                looked_at,
+                "{n} fields"
+            );
+        }
+    }
+
+    // inbuxa: a DKIM2 chain with a signature of more than four s= values,
+    // more than MAX_SIGNATURE_CHAIN links or a field over
+    // MAX_SIGNATURE_HEADER_BYTES is left out, and an ARC chain past those
+    // limits is marked broken
+    #[test]
+    fn signature_chain_limits() {
+        use super::{MAX_DKIM2_SIGNATURE_VALUES, MAX_SIGNATURE_CHAIN};
+        use mail_auth::{
+            common::crypto::Ed25519Key,
+            dkim2::{Dkim2Signer, Hop},
+        };
+
+        let pkcs8 = Ed25519Key::generate_pkcs8().unwrap();
+        let key = || Ed25519Key::from_pkcs8_maybe_unchecked_der(&pkcs8).unwrap();
+        let base = "From: a@example.org\r\nSubject: test\r\n\r\ntest\r\n".to_string();
+        let sign = |message: &str, values: usize, rcpts: usize| {
+            let mut signer = Dkim2Signer::from_key(key())
+                .domain("example.org")
+                .selector("s");
+            for _ in 1..values {
+                signer = signer.additional_key(key(), "s");
+            }
+            let rcpt_to = (0..rcpts)
+                .map(|i| format!("r{i}@example.net"))
+                .collect::<Vec<_>>();
+            let signed = signer
+                .sign(message.as_bytes(), Hop::real("a@example.org", rcpt_to))
+                .unwrap();
+            format!("{}{message}", signed.to_header())
+        };
+        let kept = |raw: &str| {
+            let mut message = AuthenticatedMessage::parse(raw.as_bytes()).unwrap();
+            assert!(!message.dkim2_signatures.is_empty());
+            limit_signature_work(&mut message);
+            !message.dkim2_signatures.is_empty()
+        };
+
+        assert!(kept(&sign(&base, MAX_DKIM2_SIGNATURE_VALUES, 1)));
+        assert!(!kept(&sign(&base, MAX_DKIM2_SIGNATURE_VALUES + 1, 1)));
+        assert!(kept(&sign(&base, 1, 1_000)));
+        assert!(!kept(&sign(&base, 1, 3_000)));
+        let mut chain = base.clone();
+        for _ in 0..MAX_SIGNATURE_CHAIN {
+            chain = sign(&chain, 1, 1);
+        }
+        assert!(kept(&chain));
+        assert!(!kept(&sign(&chain, 1, 1)));
+
+        let arc = |sets: usize, results: usize| {
+            let mut raw = String::new();
+            for i in (1..=sets).rev() {
+                raw.push_str(&format!(
+                    concat!(
+                        "ARC-Seal: i={i}; a=rsa-sha256; cv={cv}; d=example.org; s=s; t=1; b=AAAA\r\n",
+                        "ARC-Message-Signature: i={i}; a=rsa-sha256; c=relaxed/relaxed; ",
+                        "d=example.org; s=s; t=1; h=from; bh=AAAA; b=AAAA\r\n",
+                        "ARC-Authentication-Results: i={i}; example.org; spf=pass{pad}\r\n"
+                    ),
+                    i = i,
+                    cv = if i == 1 { "none" } else { "pass" },
+                    pad = " ".repeat(results),
+                ));
+            }
+            raw.push_str("From: a@example.org\r\nSubject: test\r\n\r\ntest\r\n");
+            let mut message = AuthenticatedMessage::parse(raw.as_bytes()).unwrap();
+            assert_eq!(message.ams_headers.len(), sets);
+            assert!(!message.has_arc_errors);
+            limit_signature_work(&mut message);
+            message.has_arc_errors
+        };
+        assert!(!arc(MAX_SIGNATURE_CHAIN, 0));
+        assert!(arc(MAX_SIGNATURE_CHAIN + 1, 0));
+        assert!(!arc(1, 1_000));
+        assert!(arc(1, 70_000));
     }
 }

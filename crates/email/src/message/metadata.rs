@@ -1470,6 +1470,110 @@ mod tests {
         );
     }
 
+    // inbuxa: every header field of every part, nested messages included
+    fn header_fields(message: &Message<'_>) -> usize {
+        let mut total = 0;
+        let mut stack = vec![message];
+        while let Some(message) = stack.pop() {
+            for part in &message.parts {
+                total += part.headers.len();
+                if let PartType::Message(nested) = &part.body {
+                    stack.push(nested);
+                }
+            }
+        }
+        total
+    }
+
+    // inbuxa: header fields weren't limited, and each one as short as four
+    // bytes parsed into a struct of over a hundred, so a 100 MB header block
+    // took gigabytes. A part keeps at most 10,000 fields and a message at
+    // most 262,144, nested messages (encoded ones too) included.
+    #[test]
+    fn header_fields_are_capped() {
+        use mail_parser::parsers::message::{MAX_HEADERS_PER_MESSAGE, MAX_HEADERS_PER_PART};
+
+        // One part with 50,000 fields: the first 10,000 are kept, and the
+        // body still starts after the blank line
+        let mut raw = String::from("From: a@example.org\r\n");
+        for i in 0..50_000 {
+            raw.push_str(&format!("X-{i}: x\r\n"));
+        }
+        raw.push_str("Subject: last\r\n\r\nthe body\r\n");
+        let message = MessageParser::new().parse(&raw).unwrap();
+        let fields = message.root_part().headers.len();
+        assert!(
+            fields <= MAX_HEADERS_PER_PART,
+            "{fields} header fields kept for one part"
+        );
+        assert_eq!(fields, MAX_HEADERS_PER_PART);
+        assert_eq!(message.subject(), None);
+        assert_eq!(message.body_text(0).as_deref(), Some("the body\r\n"));
+        let message = MessageParser::new().parse_headers(&raw).unwrap();
+        assert_eq!(message.root_part().headers.len(), MAX_HEADERS_PER_PART);
+
+        // 100 parts of 5,000 fields each
+        let mut raw = String::from(
+            "From: a@example.org\r\nContent-Type: multipart/mixed; boundary=b\r\n\r\n",
+        );
+        for _ in 0..100 {
+            raw.push_str("--b\r\n");
+            for i in 0..5_000 {
+                raw.push_str(&format!("X-{i}: x\r\n"));
+            }
+            raw.push_str("\r\nx\r\n");
+        }
+        raw.push_str("--b--\r\n");
+        let message = MessageParser::new().parse(&raw).unwrap();
+        let fields = header_fields(&message);
+        assert!(
+            fields <= MAX_HEADERS_PER_MESSAGE,
+            "{fields} header fields kept for one message"
+        );
+        assert_eq!(message.parts.len(), 101);
+
+        // 60 base64-encoded nested messages of 5,000 fields each, every one
+        // parsed on its own
+        let mut nested = String::from("From: a@example.org\r\n");
+        for i in 0..5_000 {
+            nested.push_str(&format!("X-{i}: x\r\n"));
+        }
+        nested.push_str("\r\nnested\r\n");
+        let nested = String::from_utf8(
+            mail_builder::encoders::base64::Base64Encoder::new()
+                .wrap_lines()
+                .encode(nested.as_bytes())
+                .unwrap(),
+        )
+        .unwrap();
+        let mut raw = String::from(
+            "From: a@example.org\r\nContent-Type: multipart/mixed; boundary=b\r\n\r\n",
+        );
+        for _ in 0..60 {
+            raw.push_str(concat!(
+                "--b\r\nContent-Type: message/rfc822\r\n",
+                "Content-Transfer-Encoding: base64\r\n\r\n"
+            ));
+            raw.push_str(&nested);
+            raw.push_str("\r\n");
+        }
+        raw.push_str("--b--\r\n");
+        let message = MessageParser::new().parse(&raw).unwrap();
+        let fields = header_fields(&message);
+        assert!(
+            fields <= MAX_HEADERS_PER_MESSAGE,
+            "{fields} header fields kept for one message"
+        );
+        assert!(
+            message
+                .parts
+                .iter()
+                .filter(|part| matches!(part.body, PartType::Message(_)))
+                .count()
+                > 50
+        );
+    }
+
     // inbuxa: part ids and nested message ids are stored as u16, and a
     // message of more than 65,535 parts had them wrap, so the root multipart
     // listed itself among its parts
