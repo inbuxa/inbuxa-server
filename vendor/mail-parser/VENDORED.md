@@ -19,13 +19,27 @@ changes below.
 
 ## Changes
 
-None yet.
+Every changed file carries a Coffey Labs notice in its header.
+
+- `src/parsers/message.rs`: message/rfc822 (and message/global) parts
+  without a Content-Transfer-Encoding nest at most `MAX_NESTED_MESSAGES`
+  (20) deep in one parse. A part deeper than that is kept as an attachment
+  (`PartType::Binary`, its raw bytes) and not parsed. Upstream limited only
+  encoded nested messages (`MAX_NESTED_ENCODED`, 3); unencoded ones nested to
+  any depth, each a `Message` inside its parent, and dropping the tree took
+  a stack frame per level. A 1.6 MB message nested 50,000 deep overflowed a
+  2 MiB thread stack in a release build and aborted the server, once when
+  SMTP finished with it and again on every attempt to deliver it to a
+  mailbox with a Sieve script. With both limits no tree is more than 80
+  deep. The `deeply_nested_messages_drop_on_a_small_stack` test in
+  `crates/email` covers it.
 
 ## Updating
 
 When the server's `Cargo.lock` moves mail-parser to a new version, Cargo
 stops using this copy and only warns that the patch went unused, so check
-`Cargo.lock` has no `mail-parser` entry with a `source` line. Re-vendor the new
+`Cargo.lock` has no `mail-parser` entry with a `source` line; the test
+above also fails once a version without the limit is in use. Re-vendor the new
 version from `~/.cargo/registry/src/*/mail-parser-*`, leaving out what's
 listed above, repeat the changes, and update the version here and in the root
 `Cargo.toml` comment.
