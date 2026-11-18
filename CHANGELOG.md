@@ -11,6 +11,49 @@ https://github.com/inbuxa/inbuxa-server/security/advisories.
 Every version PR adds that version's entry here. CI refuses a version this
 file has no entry for (`tools/release/changelog-check.py`).
 
+## [2026.11.18.1] - 2026-11-18
+
+6 security fixes from our own review of the suite (4 high, 2 medium).
+Versions up to and including 2026.11.18, and 27.1-rc.1 to 27.1-rc.28, are
+affected. The same fixes are in 27.1-rc.29 for the 27.1 series.
+
+### Security
+High
+- SMTP: one unauthenticated message could exhaust the server's memory
+  through the DMARC check. A From header listing many addresses in
+  different domains copied the whole message once per domain. Author
+  domains are now deduplicated and checked without a copy; a From naming
+  more than ten different domains fails DMARC with no lookups, and with
+  strict DMARC verification is refused with `550 5.7.1`.
+  (GHSA-jpf9-fq33-x6m6, #432)
+- IMAP and ManageSieve: empty quoted strings (`""`) didn't count toward the
+  request size limit, so a client could grow memory without bound before
+  signing in. They now count like any other argument.
+  (GHSA-5f9w-xjcx-j9h2, #432)
+- Sieve: `replace` or `enclose` inside `foreverypart` crashed delivery on a
+  message with nested parts, and enough such messages stopped local
+  delivery for the whole node. `replace` now renumbers the remaining parts
+  and the loop goes on over them; `enclose` ends the loop it runs in.
+  (GHSA-jvv9-5xq7-64f5, #432)
+- HTTP: a client that stopped sending its body or reading its answer held
+  a listener slot forever. Such requests and connections are now dropped
+  after 60 seconds without progress. (GHSA-p33r-wr8j-hmw3, #432)
+
+Medium
+- SMTP: a signed-in user could inject SMTP commands and DSN header fields
+  through an encoded line break in ENVID or ORCPT. ENVID, ORCPT and MAIL
+  FROM `AUTH=` values that decode to anything but printable ASCII are now
+  refused with `501 5.5.4`, and ENVID and ORCPT go out as xtext.
+  (GHSA-c332-jfj8-p9w6, #432)
+- SMTP: on a listener offering AUTH without requiring it, AUTH after MAIL
+  FROM made a transaction authenticated after its sender was checked
+  anonymously. AUTH during a mail transaction is now refused with
+  `503 5.5.1` (RFC 4954). (GHSA-7xrh-5v6g-hg45, #432)
+
+### Upgrading
+- A client that sends AUTH after MAIL FROM must RSET first.
+- A From header naming more than ten different domains now fails DMARC.
+
 ## [2026.11.18] - 2026-11-18
 
 7 security fixes from our own review of the suite (5 medium, 2 low) and two
