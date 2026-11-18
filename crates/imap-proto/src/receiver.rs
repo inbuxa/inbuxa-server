@@ -133,6 +133,15 @@ impl<T: CommandParser> Receiver<T> {
             }
             self.request.tokens.push(Token::Argument(self.buf.take()));
         } else if in_quote {
+            // inbuxa: an empty quoted string counts its two quotes, or a
+            // line of "" would buffer tokens without ever reaching the limit
+            self.current_request_size += 2;
+            if self.current_request_size > self.max_request_size {
+                return Err(self.error_reset(format_compact!(
+                    "Request exceeds maximum limit of {} bytes.",
+                    self.max_request_size
+                )));
+            }
             self.request.tokens.push(Token::Nil);
         }
         Ok(())
@@ -653,7 +662,7 @@ mod tests {
 
     use crate::Command;
 
-    use super::{Error, Receiver, Request, Token};
+    use super::{Error, PRE_AUTH_MAX_REQUEST_SIZE, Receiver, Request, State, Token};
 
     #[test]
     fn receiver_parse_ok() {
@@ -1193,6 +1202,33 @@ mod tests {
                 }],
                 "connection did not resync for {:#?}",
                 frames
+            );
+        }
+    }
+
+    // inbuxa: empty quoted strings count toward the request size, so a line of
+    // nothing but "" is refused once it passes the limit, before or after the tag
+    #[test]
+    fn receiver_counts_empty_quoted_strings() {
+        for (start_state, prefix) in [
+            (None, "a LOGIN "),
+            (Some(State::Command { is_uid: false }), "CAPABILITY "),
+        ] {
+            let mut receiver =
+                Receiver::<Command>::with_max_request_size(PRE_AUTH_MAX_REQUEST_SIZE);
+            if let Some(state) = start_state {
+                receiver = receiver.with_start_state(state);
+            }
+            assert!(matches!(
+                receiver.parse(&mut prefix.as_bytes().iter()),
+                Err(Error::NeedsMoreData)
+            ));
+            let quotes = "\"\"".repeat(100_000);
+            let result = receiver.parse(&mut quotes.as_bytes().iter());
+            assert!(
+                matches!(result, Err(Error::Error { .. })),
+                "{} empty quoted strings were buffered without an error",
+                receiver.request.tokens.len()
             );
         }
     }
