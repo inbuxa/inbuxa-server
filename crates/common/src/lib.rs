@@ -148,6 +148,8 @@ pub const KV_PORT_REACHABILITY: u8 = 200;
 // inbuxa: device-flow codes live apart from authorization codes, so neither
 // grant can redeem the other's code.
 pub const KV_OAUTH_DEVICE: u8 = 201;
+// inbuxa: K-S4: revoked OAuth tokens, one list per account
+pub const KV_OAUTH_REVOKED: u8 = 202;
 
 #[derive(Clone)]
 pub struct Server {

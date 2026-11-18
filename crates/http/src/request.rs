@@ -447,6 +447,13 @@ impl ParseHttp for Server {
 
                     return self.handle_token_request(&mut req, session).await;
                 }
+                // inbuxa: K-S4: RFC 7009
+                ("revoke", &Method::POST) => {
+                    self.is_http_anonymous_request_allowed(session.remote_ip)
+                        .await?;
+
+                    return self.handle_token_revoke(&mut req, session.session_id).await;
+                }
                 ("introspect", &Method::POST) => {
                     // Authenticate request
                     let (_in_flight, _) = self.authenticate_headers(&req, &session).await?;

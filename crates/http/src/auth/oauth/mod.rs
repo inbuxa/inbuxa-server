@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use http_proto::{HttpRequest, request::fetch_body};
@@ -171,6 +173,11 @@ pub enum ErrorType {
     AccessDenied,
     #[serde(rename = "expired_token")]
     ExpiredToken,
+    // inbuxa: K-S4: RFC 7009 section 2.2.1
+    #[serde(rename = "unsupported_token_type")]
+    UnsupportedTokenType,
+    #[serde(rename = "temporarily_unavailable")]
+    TemporarilyUnavailable,
 }
 
 impl TokenResponse {

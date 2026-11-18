@@ -57,6 +57,9 @@ pub struct OAuthMetadata {
     pub device_authorization_endpoint: String,
     pub registration_endpoint: String,
     pub introspection_endpoint: String,
+    // inbuxa: K-S4: RFC 7009, advertised as RFC 8414 describes
+    pub revocation_endpoint: String,
+    pub revocation_endpoint_auth_methods_supported: &'static [&'static str],
     pub grant_types_supported: &'static [&'static str],
     pub response_types_supported: &'static [&'static str],
     pub scopes_supported: &'static [&'static str],
@@ -583,6 +586,12 @@ impl OAuthApiHandler for Server {
             token_endpoint: format!("{base_url}/auth/token"),
             device_authorization_endpoint: format!("{base_url}/auth/device"),
             introspection_endpoint: format!("{base_url}/auth/introspect"),
+            revocation_endpoint: format!("{base_url}/auth/revoke"),
+            revocation_endpoint_auth_methods_supported: &[
+                "none",
+                "client_secret_post",
+                "client_secret_basic",
+            ],
             registration_endpoint: format!("{base_url}/auth/register"),
             grant_types_supported: &[
                 "authorization_code",

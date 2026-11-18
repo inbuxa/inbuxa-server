@@ -57,6 +57,8 @@ pub struct OAuthMetadata {
     pub device_authorization_endpoint: String,
     pub registration_endpoint: String,
     pub introspection_endpoint: String,
+    pub revocation_endpoint: String,
+    pub revocation_endpoint_auth_methods_supported: Vec<String>,
     pub grant_types_supported: Vec<String>,
     pub response_types_supported: Vec<String>,
     pub scopes_supported: Vec<String>,
@@ -882,7 +884,133 @@ pub async fn test(test: &mut TestServer) {
         &params,
     )
     .await;
-    unwrap_token_response(granted);
+    let (revoke_access, revoke_refresh, _) = unwrap_token_response(granted);
+    let revoke_refresh = revoke_refresh.expect("offline_access grants a refresh token");
+
+    // ------------------------
+    // inbuxa: K-S4: token revocation (RFC 7009)
+    // ------------------------
+    assert_eq!(
+        metadata.revocation_endpoint,
+        "https://127.0.0.1:8899/auth/revoke"
+    );
+    assert!(
+        metadata
+            .revocation_endpoint_auth_methods_supported
+            .contains(&"client_secret_basic".to_string())
+    );
+    let revoke_form = |token: &str, client_id: Option<&str>, secret: Option<&str>| {
+        let mut form = AHashMap::from_iter([("token".to_string(), token.to_string())]);
+        if let Some(client_id) = client_id {
+            form.insert("client_id".to_string(), client_id.to_string());
+        }
+        if let Some(secret) = secret {
+            form.insert("client_secret".to_string(), secret.to_string());
+        }
+        form
+    };
+
+    // A confidential client's token is revoked only with its secret, and
+    // never by another client
+    for (client_id, secret, why) in [
+        (None, None, "no secret"),
+        (Some(confidential_id.as_str()), None, "no secret"),
+        (
+            Some(confidential_id.as_str()),
+            Some("not-the-secret"),
+            "a wrong secret",
+        ),
+        (Some(client_id.as_str()), None, "another client"),
+    ] {
+        assert_eq!(
+            post_status(
+                &metadata.revocation_endpoint,
+                &revoke_form(&revoke_access, client_id, secret)
+            )
+            .await
+            .0,
+            401,
+            "revoked with {why}"
+        );
+    }
+    // (Access tokens here live 5 seconds, so each check uses the server
+    // itself rather than another token that may have expired)
+    assert_authorized("https://127.0.0.1:8899", &revoke_access).await;
+
+    // Revoked with the secret in the body: refused from then on
+    assert_eq!(
+        post_status(
+            &metadata.revocation_endpoint,
+            &revoke_form(
+                &revoke_access,
+                Some(&confidential_id),
+                Some(&confidential_secret)
+            )
+        )
+        .await,
+        (200, Bytes::new())
+    );
+    assert_unauthorized("https://127.0.0.1:8899", &revoke_access).await;
+    // Again, and a token that was never valid: both answered as revoked
+    for revoked in [revoke_access.as_str(), "sw1.not-a-token"] {
+        assert_eq!(
+            post_status(
+                &metadata.revocation_endpoint,
+                &revoke_form(revoked, Some(&confidential_id), Some(&confidential_secret))
+            )
+            .await
+            .0,
+            200
+        );
+    }
+    // No token at all is a bad request
+    assert_eq!(
+        post_status(&metadata.revocation_endpoint, &AHashMap::new())
+            .await
+            .0,
+        400
+    );
+
+    // Revoking the access token left its refresh token working
+    let refresh_form = AHashMap::from_iter([
+        ("grant_type".to_string(), "refresh_token".to_string()),
+        ("refresh_token".to_string(), revoke_refresh.clone()),
+    ]);
+    let (refreshed, _, _) = unwrap_token_response(
+        post_form_basic(
+            &metadata.token_endpoint,
+            &confidential_id,
+            &confidential_secret,
+            &refresh_form,
+        )
+        .await,
+    );
+    assert_authorized("https://127.0.0.1:8899", &refreshed).await;
+
+    // A refresh token revoked with client_secret_basic mints nothing more
+    assert_eq!(
+        post_form_basic_status(
+            &metadata.revocation_endpoint,
+            &confidential_id,
+            &confidential_secret,
+            &revoke_form(&revoke_refresh, None, None),
+        )
+        .await,
+        200
+    );
+    assert_eq!(
+        post_form_basic::<TokenResponse>(
+            &metadata.token_endpoint,
+            &confidential_id,
+            &confidential_secret,
+            &refresh_form,
+        )
+        .await,
+        TokenResponse::Error {
+            error: ErrorType::InvalidGrant
+        },
+        "a revoked refresh token was redeemed"
+    );
 
     // A confidential client created through the management API must have its
     // secret hashed before storage; authenticating with the plaintext secret
@@ -1252,6 +1380,43 @@ async fn post_json_raw(url: &str, body: &impl Serialize) -> (u16, serde_json::Va
     (status, value)
 }
 
+/// inbuxa: K-S4: the status and body of a form POST.
+async fn post_status(url: &str, params: &AHashMap<String, String>) -> (u16, Bytes) {
+    let response = reqwest::Client::builder()
+        .timeout(Duration::from_millis(500))
+        .danger_accept_invalid_certs(true)
+        .build()
+        .unwrap_or_default()
+        .post(url)
+        .form(params)
+        .send()
+        .await
+        .unwrap();
+    let status = response.status().as_u16();
+    (status, response.bytes().await.unwrap())
+}
+
+async fn post_form_basic_status(
+    url: &str,
+    username: &str,
+    password: &str,
+    params: &AHashMap<String, String>,
+) -> u16 {
+    reqwest::Client::builder()
+        .timeout(Duration::from_millis(500))
+        .danger_accept_invalid_certs(true)
+        .build()
+        .unwrap_or_default()
+        .post(url)
+        .basic_auth(username, Some(password))
+        .form(params)
+        .send()
+        .await
+        .unwrap()
+        .status()
+        .as_u16()
+}
+
 async fn post_login_raw(body: &impl Serialize) -> (u16, serde_json::Value) {
     post_json_raw("https://127.0.0.1:8899/api/auth", body).await
 }
@@ -1284,6 +1449,19 @@ async fn get_bytes(url: &str) -> Bytes {
 
 async fn get<T: DeserializeOwned>(url: &str) -> T {
     serde_json::from_slice(&get_bytes(url).await).unwrap()
+}
+
+/// inbuxa: K-S4: the token signs in to JMAP.
+async fn assert_authorized(base_url: &str, token: &str) {
+    if let Err(err) = Client::new()
+        .credentials(Credentials::bearer(token))
+        .accept_invalid_certs(true)
+        .follow_redirects(["127.0.0.1"])
+        .connect(base_url)
+        .await
+    {
+        panic!("expected the token to sign in, got {err:?}");
+    }
 }
 
 async fn assert_unauthorized(base_url: &str, token: &str) {

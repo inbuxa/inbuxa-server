@@ -17,7 +17,11 @@ use base64::{
 };
 use common::{
     KV_OAUTH, KV_OAUTH_DEVICE, Server,
-    auth::oauth::{GrantType, oidc::StandardClaims},
+    auth::oauth::{
+        GrantType,
+        oidc::StandardClaims,
+        revoke::{RevokeOutcome, oauth_token_id},
+    },
 };
 use http_proto::*;
 use hyper::StatusCode;
@@ -37,6 +41,13 @@ pub trait TokenHandler: Sync + Send {
     ) -> impl Future<Output = trc::Result<HttpResponse>> + Send;
 
     fn handle_token_introspect(
+        &self,
+        req: &mut HttpRequest,
+        session_id: u64,
+    ) -> impl Future<Output = trc::Result<HttpResponse>> + Send;
+
+    // inbuxa: K-S4
+    fn handle_token_revoke(
         &self,
         req: &mut HttpRequest,
         session_id: u64,
@@ -331,6 +342,85 @@ impl TokenHandler for Server {
             .map(|response| JsonResponse::new(response).no_cache().into_http_response())
     }
 
+    /// inbuxa: K-S4: RFC 7009. A token that doesn't validate is answered as
+    /// revoked, as the RFC asks; a valid one is refused from then on, on
+    /// every node, until it would have expired. A token issued to a client
+    /// is revoked only by that client, with its secret if it has one.
+    async fn handle_token_revoke(
+        &self,
+        req: &mut HttpRequest,
+        session_id: u64,
+    ) -> trc::Result<HttpResponse> {
+        let params = FormData::from_request(req, MAX_POST_LEN, session_id).await?;
+        let (client_id, client_secret) = client_credentials(req, &params);
+        let Some(token) = params.get("token").filter(|token| !token.is_empty()) else {
+            return Ok(revoke_error(
+                StatusCode::BAD_REQUEST,
+                ErrorType::InvalidRequest,
+            ));
+        };
+
+        let info = match self.validate_access_token(None, token).await {
+            Ok(info) => info,
+            Err(err)
+                if matches!(
+                    err.event_type(),
+                    trc::EventType::Auth(trc::AuthEvent::Error)
+                        | trc::EventType::Auth(trc::AuthEvent::TokenExpired)
+                ) =>
+            {
+                return Ok(HttpResponse::new(StatusCode::OK));
+            }
+            Err(err) => return Err(err),
+        };
+        if !matches!(
+            info.grant_type,
+            GrantType::AccessToken | GrantType::RefreshToken
+        ) {
+            return Ok(revoke_error(
+                StatusCode::BAD_REQUEST,
+                ErrorType::UnsupportedTokenType,
+            ));
+        }
+
+        // AU-5: the token names the client it was issued to. As with a
+        // refresh, naming no client stands for the token's own, and a
+        // confidential one authenticates
+        if let Some(issued_to) = info.claims.as_deref().filter(|c| !c.is_empty()) {
+            if client_id.as_deref().is_some_and(|id| id != issued_to)
+                || self
+                    .verify_client_secret(issued_to, client_secret.as_deref())
+                    .await?
+                    .is_some()
+            {
+                return Ok(revoke_error(
+                    StatusCode::UNAUTHORIZED,
+                    ErrorType::InvalidClient,
+                ));
+            }
+        }
+
+        match self
+            .revoke_oauth_token(info.account_id, oauth_token_id(token), info.expiry)
+            .await?
+        {
+            RevokeOutcome::Revoked | RevokeOutcome::AlreadyRevoked => {
+                Ok(HttpResponse::new(StatusCode::OK))
+            }
+            RevokeOutcome::Full => {
+                trc::event!(
+                    Auth(trc::AuthEvent::Error),
+                    AccountId = info.account_id,
+                    Reason = "Too many revoked tokens held for this account",
+                );
+                Ok(revoke_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    ErrorType::TemporarilyUnavailable,
+                ))
+            }
+        }
+    }
+
     async fn issue_token(
         &self,
         account_id: u32,
@@ -402,6 +492,12 @@ impl TokenHandler for Server {
             scope,
         })
     }
+}
+
+fn revoke_error(status: StatusCode, error: ErrorType) -> HttpResponse {
+    JsonResponse::with_status(status, TokenResponse::error(error))
+        .no_cache()
+        .into_http_response()
 }
 
 fn client_credentials<'x>(

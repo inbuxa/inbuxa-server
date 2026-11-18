@@ -28,6 +28,16 @@ Observed in the source at `v0.16.22` and against a running inbuxa-server on
   which INBUXA Admin uses to find the endpoints.
 - **There's no revocation endpoint.** Tokens are stateless and sealed, so a
   token can only be invalidated by changing the account's password.
+  *27.1 adds one* (K-S4): `/auth/revoke` (RFC 7009), listed as
+  `revocation_endpoint` in both discovery documents. A revoked access or
+  refresh token is refused on every node until it would have expired. Each
+  account keeps a list of revoked tokens in the in-memory store; the list is
+  cached with the account and the cache entry is dropped cluster-wide on a
+  revocation. A token issued to a client is revoked only by that client
+  (with its secret, if it has one). A token that doesn't validate is
+  answered `200`, as the RFC asks. Revoking a refresh token doesn't revoke
+  the access tokens it minted, since nothing links them; a client revokes
+  both.
 - **Clients aren't required to be registered, by default.**
   `x:OidcProvider.requireClientRegistration` defaults to `false`. With it off,
   any `client_id` with any redirect URI is accepted (HTTP ones only with PKCE).

@@ -158,6 +158,8 @@ pub struct AccessTokenInner {
     pub(crate) shared_mailbox: bool,
     // inbuxa: AL-5: locked accounts handed to this one
     pub(crate) delegations: Box<[Delegation]>,
+    // inbuxa: K-S4: this account's revoked OAuth tokens, sorted (RFC 7009)
+    pub(crate) revoked_tokens: Box<[u128]>,
 }
 
 /// inbuxa: a locked account this one may open, and how (AL-5, AL-6).
