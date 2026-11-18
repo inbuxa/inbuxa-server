@@ -14,7 +14,7 @@ use crate::{
         crypto::EncryptionFlags,
         delivery::VerifiedSender,
         index::{IndexMessage, extractors::VisitText},
-        metadata::{MessageData, MessageMetadata},
+        metadata::{MessageData, MessageMetadata, fits_stored_metadata},
     },
 };
 use common::{Server, auth::AccessToken};
@@ -163,6 +163,16 @@ impl EmailIngest for Server {
                 .ctx(trc::Key::Code, 550)
                 .ctx(trc::Key::Reason, "Failed to parse e-mail message.")
         })?;
+
+        // inbuxa: a message whose part ids don't fit the stored structure is
+        // refused
+        if !fits_stored_metadata(&message) {
+            return Err(
+                trc::EventType::MessageIngest(trc::MessageIngestEvent::Error)
+                    .ctx(trc::Key::Code, 550)
+                    .ctx(trc::Key::Reason, "Message has too many MIME parts."),
+            );
+        }
 
         // Obtain message references and thread name
         let mut message_id = None;

@@ -748,6 +748,74 @@ async fn antispam() {
         assert!(spam_ctx.result.tags.contains("RCPT_IN_SUBJECT"));
         assert!(elapsed < Duration::from_secs(2), "{elapsed:?}");
     }
+
+    // inbuxa: every text and HTML part used to be tokenized in full, one
+    // token of a couple of hundred bytes per punctuation mark, so a large
+    // message needed gigabytes. The filter now tokenizes at most 25,000
+    // tokens of each part (the Subject is one) and 100,000 per message, and
+    // parses at most 1 MiB of HTML per message.
+    if filter_test
+        .as_ref()
+        .is_none_or(|s| s.eq_ignore_ascii_case("tokens"))
+    {
+        println!("===== tokens (many) =====");
+        let message = format!(
+            concat!(
+                "From: a@example.org\r\nTo: b@example.org\r\nSubject: {subject}\r\n",
+                "Content-Type: multipart/mixed; boundary=b\r\n\r\n",
+                "--b\r\nContent-Type: text/plain\r\n\r\nsee https://example.org/ {text}\r\n",
+                "--b\r\nContent-Type: text/html\r\n\r\n{html}\r\n",
+                "--b\r\nContent-Type: text/plain\r\n\r\n{text}\r\n",
+                "--b\r\nContent-Type: text/plain\r\n\r\n{text}\r\n",
+                "--b\r\nContent-Type: text/plain\r\n\r\n{text}\r\n",
+                "--b--\r\n"
+            ),
+            subject = "! ".repeat(50_000),
+            text = "!".repeat(1_000_000),
+            html = "<a>".repeat(1_000_000),
+        );
+        let parsed_message = MessageParser::new().parse(&message).unwrap();
+        let session = test.new_mta_session();
+        let spam_input = session.build_spam_input(&parsed_message, &[], None, None, None, None);
+        let spam_ctx = test.server.spam_filter_init(spam_input);
+        let mut tokens = spam_ctx.output.subject_tokens.len();
+        let mut html_tokens = 0;
+        let mut found_url = false;
+        for part in &spam_ctx.output.text_parts {
+            match part {
+                spam_filter::TextPart::Plain { tokens: t, .. } => {
+                    found_url |= t
+                        .iter()
+                        .any(|t| matches!(t, nlp::tokenizers::types::TokenType::Url(_)));
+                    tokens += t.len();
+                }
+                spam_filter::TextPart::Html {
+                    tokens: t,
+                    html_tokens: h,
+                    ..
+                } => {
+                    tokens += t.len();
+                    html_tokens += h.len();
+                }
+                spam_filter::TextPart::None => {}
+            }
+        }
+        println!(
+            "{tokens} tokens of {} bytes each, {html_tokens} HTML tokens",
+            std::mem::size_of::<
+                nlp::tokenizers::types::TokenType<
+                    std::borrow::Cow<'_, str>,
+                    spam_filter::Email,
+                    spam_filter::analysis::url::UrlParts<'_>,
+                    spam_filter::IpParts,
+                >,
+            >()
+        );
+        assert!(found_url, "the start of the first part was not analyzed");
+        assert!(spam_ctx.output.subject_tokens.len() <= 25_000);
+        assert!(tokens <= 100_000, "{tokens} tokens");
+        assert!(html_tokens <= (1 << 20) / 3, "{html_tokens} HTML tokens");
+    }
 }
 
 async fn classifier_features(server: &Server, contents: String) {

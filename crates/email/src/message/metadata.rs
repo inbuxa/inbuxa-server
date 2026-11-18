@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::mailbox::{ArchivedUidMailbox, UidMailbox};
@@ -505,11 +507,39 @@ impl ArchivedMessageMetadataPart {
     }
 }
 
+// inbuxa: the most parts one message, and the most nested messages a whole
+// message, can have to be stored: their ids are stored as u16. Past them the
+// ids wrapped, so a part could list itself and the walks over it never ended.
+pub const MAX_STORED_PARTS: usize = u16::MAX as usize;
+pub const MAX_STORED_NESTED_MESSAGES: usize = u16::MAX as usize;
+
+// inbuxa: whether every part id and nested message id of the message fits the
+// stored structure
+pub fn fits_stored_metadata(message: &mail_parser::Message<'_>) -> bool {
+    let mut messages = vec![message];
+    let mut nested_messages = 0;
+    while let Some(message) = messages.pop() {
+        if message.parts.len() > MAX_STORED_PARTS {
+            return false;
+        }
+        for part in &message.parts {
+            if let PartType::Message(nested) = &part.body {
+                nested_messages += 1;
+                if nested_messages > MAX_STORED_NESTED_MESSAGES {
+                    return false;
+                }
+                messages.push(nested);
+            }
+        }
+    }
+    true
+}
+
 pub fn build_metadata_contents(
     message: mail_parser::Message<'_>,
 ) -> Box<[MessageMetadataContents]> {
     let mut messages = VecDeque::from([message]);
-    let mut message_id = 0;
+    let mut message_id: u16 = 0;
     let mut contents = Vec::new();
 
     while let Some(message) = messages.pop_front() {
@@ -523,16 +553,26 @@ pub fn build_metadata_contents(
                 PartType::InlineBinary(contents) => {
                     (contents.len(), MetadataPartType::InlineBinary)
                 }
+                // inbuxa: ids that don't fit a u16 are left out, never
+                // wrapped (ingest refuses such messages first)
                 PartType::Message(message) => {
                     let message_len = message.root_part().raw_len();
-                    messages.push_back(message);
-                    message_id += 1;
-
-                    (message_len as usize, MetadataPartType::Message(message_id))
+                    if let Some(next_id) = message_id.checked_add(1) {
+                        messages.push_back(message);
+                        message_id = next_id;
+                        (message_len as usize, MetadataPartType::Message(message_id))
+                    } else {
+                        (message_len as usize, MetadataPartType::Binary)
+                    }
                 }
                 PartType::Multipart(parts) => (
                     0,
-                    MetadataPartType::Multipart(parts.into_iter().map(|p| p as u16).collect()),
+                    MetadataPartType::Multipart(
+                        parts
+                            .into_iter()
+                            .filter_map(|p| u16::try_from(p).ok())
+                            .collect(),
+                    ),
                 ),
             };
 
@@ -595,13 +635,42 @@ pub fn build_metadata_contents(
             });
         }
         contents.push(MessageMetadataContents {
-            html_body: message.html_body.into_iter().map(|c| c as u16).collect(),
-            text_body: message.text_body.into_iter().map(|c| c as u16).collect(),
-            attachments: message.attachments.into_iter().map(|c| c as u16).collect(),
+            html_body: message
+                .html_body
+                .into_iter()
+                .filter_map(|c| u16::try_from(c).ok())
+                .collect(),
+            text_body: message
+                .text_body
+                .into_iter()
+                .filter_map(|c| u16::try_from(c).ok())
+                .collect(),
+            attachments: message
+                .attachments
+                .into_iter()
+                .filter_map(|c| u16::try_from(c).ok())
+                .collect(),
             parts: parts.into_boxed_slice(),
         });
     }
     contents.into_boxed_slice()
+}
+
+impl ArchivedMessageMetadataContents {
+    // inbuxa: the parts a textBody, htmlBody or attachments list names. Those
+    // are never multiparts; one stored with wrapped ids could name the root
+    // multipart once for each entry, so such ids are left out.
+    pub fn listed_part_ids<'x>(
+        &'x self,
+        list: &'x ArchivedBox<[u16_le]>,
+    ) -> impl Iterator<Item = u32> + 'x {
+        list.iter().map(|id| u16::from(id) as u32).filter(|&id| {
+            self.parts
+                .as_ref()
+                .get(id as usize)
+                .is_some_and(|part| part.sub_parts().is_none())
+        })
+    }
 }
 
 impl ArchivedMessageMetadataPart {
@@ -1315,6 +1384,117 @@ impl From<&ArchivedMetadataContentType> for ContentType<'static> {
                     })
                     .collect(),
             ),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use mail_parser::{Message, MessageParser, PartType};
+    use std::process::Command;
+
+    const CHILD: &str = "INBUXA_TEST_DEEP_MESSAGE_CHILD";
+
+    fn deep_message(levels: usize) -> Vec<u8> {
+        let mut raw = b"From: a@example.org\r\nContent-Type: message/rfc822\r\n\r\n".to_vec();
+        for _ in 0..levels {
+            raw.extend_from_slice(b"Content-Type: message/rfc822\r\n\r\n");
+        }
+        raw.extend_from_slice(b"Subject: x\r\n\r\nx\r\n");
+        raw
+    }
+
+    // How deep the messages nest, and whether the innermost one keeps the
+    // rest as an attachment
+    fn nesting_depth(message: &Message<'_>) -> (usize, bool) {
+        let mut depth = 0;
+        let mut message = message;
+        while let Some(nested) = message.parts.iter().find_map(|part| match &part.body {
+            PartType::Message(nested) => Some(nested),
+            _ => None,
+        }) {
+            depth += 1;
+            message = nested;
+        }
+        let rest_kept = message.parts.iter().any(|part| {
+            matches!(&part.body, PartType::Binary(rest) if rest.starts_with(b"Content-Type: message/rfc822"))
+        });
+        (depth, rest_kept)
+    }
+
+    // Runs `test` in a child process, on a thread with the 2 MiB stack the
+    // server's worker threads have, so a stack overflow fails the test
+    // instead of aborting the test run.
+    fn on_small_stack_in_child(name: &str, test: fn()) {
+        if std::env::var_os(CHILD).is_some() {
+            std::thread::Builder::new()
+                .stack_size(2 * 1024 * 1024)
+                .spawn(test)
+                .unwrap()
+                .join()
+                .unwrap();
+            return;
+        }
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([name, "--exact", "--nocapture", "--test-threads=1"])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "child failed ({}): {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .last()
+                .unwrap_or_default()
+        );
+    }
+
+    // inbuxa: message/rfc822 parts without an encoding nested to any depth,
+    // and dropping the parsed message took a stack frame per level, so a
+    // message of a few megabytes aborted the server
+    #[test]
+    fn deeply_nested_messages_drop_on_a_small_stack() {
+        on_small_stack_in_child(
+            "message::metadata::tests::deeply_nested_messages_drop_on_a_small_stack",
+            || {
+                let raw = deep_message(200_000);
+                let message = MessageParser::new().parse(&raw).unwrap();
+                let (depth, rest_kept) = nesting_depth(&message);
+                drop(message);
+                assert_eq!(depth, 20);
+                assert!(rest_kept);
+            },
+        );
+    }
+
+    // inbuxa: part ids and nested message ids are stored as u16, and a
+    // message of more than 65,535 parts had them wrap, so the root multipart
+    // listed itself among its parts
+    #[test]
+    fn stored_part_ids_never_wrap() {
+        let mut raw = String::from(
+            "From: a@example.org\r\nContent-Type: multipart/mixed; boundary=b\r\n\r\n",
+        );
+        for _ in 0..65_537 {
+            raw.push_str("--b\r\n\r\nx\r\n");
+        }
+        raw.push_str("--b--\r\n");
+        let message = MessageParser::new().parse(&raw).unwrap();
+        assert_eq!(message.parts.len(), 65_538);
+        assert!(!super::fits_stored_metadata(&message));
+        let contents = super::build_metadata_contents(message);
+        for (part_id, part) in contents[0].parts.iter().enumerate() {
+            if let super::MetadataPartType::Multipart(sub_parts) = &part.body {
+                assert!(
+                    sub_parts
+                        .iter()
+                        .all(|&sub_part| sub_part as usize > part_id),
+                    "part {part_id} lists itself or an earlier part"
+                );
+            }
         }
     }
 }

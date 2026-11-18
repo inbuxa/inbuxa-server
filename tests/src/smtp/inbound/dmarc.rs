@@ -13,10 +13,13 @@ use crate::{
     },
     utils::{dns::DnsCache, server::TestServerBuilder},
 };
+use base64::Engine;
 use common::config::smtp::report::AggregateFrequency;
 use mail_auth::{
-    common::{parse::TxtRecordParser, verify::DomainKey},
-    dkim::DomainKeyReport,
+    common::{
+        crypto::Ed25519Key, headers::HeaderWriter, parse::TxtRecordParser, verify::DomainKey,
+    },
+    dkim::{DkimSigner, DomainKeyReport},
     dmarc::Dmarc,
     report::DmarcResult,
     spf::Spf,
@@ -535,4 +538,69 @@ async fn dmarc() {
         )
         .await;
     test.assert_no_events();
+
+    // inbuxa: DKIM signatures that would cost too much to check are ignored:
+    // more than 128 h= entries, more than 10 signatures, or more than 1,000
+    // header fields. Under strict DKIM verification such a message has no
+    // passing signature left and is refused.
+    test.server.txt_add(
+        "big._domainkey.example.com",
+        DomainKey::parse(format!("v=DKIM1; k=ed25519; p={ED_PUBLIC}").as_bytes()).unwrap(),
+        Instant::now() + Duration::from_secs(5),
+    );
+    for (extra_headers, bogus_signatures, expected) in [
+        (125, 0, "250"),
+        (126, 0, "550 5.7.20"),
+        (0, 9, "250"),
+        (0, 10, "550 5.7.20"),
+        (996, 0, "250"),
+        (997, 0, "550 5.7.20"),
+    ] {
+        // From, To, Subject and the extra headers are signed, unless there
+        // are more than 125 of them; then only the first three are
+        let mut message =
+            String::from("From: bill@example.com\r\nTo: jdoe@localdomain.org\r\nSubject: test\r\n");
+        let mut signed = vec!["From".to_string(), "To".to_string(), "Subject".to_string()];
+        for i in 0..extra_headers {
+            message.push_str(&format!("X-Extra-{i}: x\r\n"));
+            if extra_headers <= 126 {
+                signed.push(format!("X-Extra-{i}"));
+            }
+        }
+        message.push_str("\r\ntest\r\n");
+        let signature = DkimSigner::from_key(ed25519_key())
+            .domain("example.com")
+            .selector("big")
+            .headers(signed)
+            .sign(message.as_bytes())
+            .unwrap()
+            .to_header();
+        let mut bogus = String::new();
+        for i in 0..bogus_signatures {
+            bogus.push_str(&format!(
+                "DKIM-Signature: v=1; a=ed25519-sha256; d=example.com; s=b{i}; h=From; bh=AAAA; b=AAAA\r\n"
+            ));
+        }
+        session
+            .send_message(
+                "bill@example.com",
+                &["jdoe@localdomain.org"],
+                &format!("{bogus}{signature}{message}"),
+                expected,
+            )
+            .await;
+        if expected == "250" {
+            test.consume_message().await;
+        }
+        test.assert_no_events();
+    }
+}
+
+const ED_PUBLIC: &str = "hwjviTXyzUXSCWayBqE17s/4NSynQKxw58jayHudRAI=";
+
+fn ed25519_key() -> Ed25519Key {
+    let der = base64::engine::general_purpose::STANDARD
+        .decode("MC4CAQAwBQYDK2VwBCIEIIOQVf8MDGvvmIkpUbgoqtyUIxjlzRqaBR6aP12tcGGE")
+        .unwrap();
+    Ed25519Key::from_pkcs8_maybe_unchecked_der(&der).unwrap()
 }
