@@ -42,6 +42,17 @@ Every changed file carries the AGPL 5(a) notice in its header.
   in `context.rs` cover it; they run from this directory with `cargo test
   --offline --target-dir ../../target/sieve-rs-tests scan_limit` (the crate's
   `test_suite` and `parse_rfc` need upstream's `tests/`, which isn't kept).
+- `src/runtime/actions/action_mime.rs`, `src/runtime/tests/mime.rs`,
+  `action_editheader.rs`: `replace` removes the replaced part's children
+  with `Context::remove_parts`, which renumbers the parts left (every
+  multipart's child list, the body and attachment lists, and every
+  `foreverypart` iterator with the part it returns to), and `enclose` ends
+  any `foreverypart` loop it runs in. Upstream shifted the parts with
+  `Vec::remove` and left the loop's ids stale, so `replace` or `enclose`
+  inside `foreverypart` (RFC 5703's attachment stripping) panicked the
+  delivery on a message with nested parts. Headers are added and removed
+  only on a part that exists, and the message size can't wrap below zero.
+  The `sieve_replace_inside_foreverypart` test in `crates/common` covers it.
 - `Cargo.toml`: the example target is dropped, with the top-level
   `examples/` and `tests/`, which the server never builds. (`src/` keeps its
   own `tests` modules: the crate declares them.)
