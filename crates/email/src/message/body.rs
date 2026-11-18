@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::message::metadata::{
@@ -165,12 +167,21 @@ impl ToBodyPart for ArchivedMessageMetadataContents {
         let mut parts = vec![part_id].into_iter();
         let mut parts_stack = Vec::new();
         let mut subparts = Vec::with_capacity(1);
+        // inbuxa: a message stored with wrapped part ids can list a part
+        // under itself or under several multiparts, so a multipart's parts
+        // are only followed when they come after it, and the walk emits no
+        // more parts than the message has
+        let mut budget = self.parts.len();
 
         loop {
-            if let Some((part_id, part)) = parts
-                .next()
-                .map(|part_id| (part_id, &self.parts[part_id as usize]))
-            {
+            let next = if budget > 0 {
+                parts
+                    .find_map(|part_id| Some((part_id, self.parts.as_ref().get(part_id as usize)?)))
+            } else {
+                None
+            };
+            if let Some((part_id, part)) = next {
+                budget -= 1;
                 let mut values = Map::with_capacity(properties.len());
                 let multipart = if let ArchivedMetadataPartType::Multipart(parts) = &part.body {
                     parts.into()
@@ -269,6 +280,7 @@ impl ToBodyPart for ArchivedMessageMetadataContents {
                     let multipart = multipart
                         .iter()
                         .map(|id| u16::from(id) as u32)
+                        .filter(|&id| id > part_id)
                         .collect::<Vec<_>>();
                     parts_stack.push((
                         parts,
@@ -391,5 +403,85 @@ pub fn truncate_html(html: &str, mut max_len: usize) -> (bool, String) {
         (true, result)
     } else {
         (false, html.replace('\r', ""))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ToBodyPart;
+    use crate::message::metadata::{
+        ArchivedMessageMetadataContents, MessageMetadataContents, MessageMetadataPart,
+        MetadataPartType,
+    };
+    use jmap_proto::object::email::{EmailProperty, EmailValue};
+    use jmap_tools::Value;
+    use types::{blob::BlobId, blob_hash::BlobHash};
+    use utils::chained_bytes::ChainedBytes;
+
+    fn archive(bodies: Vec<MetadataPartType>) -> rkyv::util::AlignedVec {
+        rkyv::to_bytes::<rkyv::rancor::Error>(&MessageMetadataContents {
+            html_body: Box::new([]),
+            text_body: Box::new([]),
+            attachments: Box::new([]),
+            parts: bodies
+                .into_iter()
+                .map(|body| MessageMetadataPart {
+                    headers: Box::new([]),
+                    body,
+                    flags: 0,
+                    offset_header: 0,
+                    offset_body: 0,
+                    offset_end: 0,
+                })
+                .collect(),
+        })
+        .unwrap()
+    }
+
+    fn body_parts(bytes: &[u8]) -> usize {
+        let contents =
+            rkyv::access::<ArchivedMessageMetadataContents, rkyv::rancor::Error>(bytes).unwrap();
+        let tree = contents.to_body_part(
+            0,
+            &[EmailProperty::PartId, EmailProperty::SubParts],
+            &ChainedBytes::new(b""),
+            &BlobId::new(BlobHash::default(), Default::default()),
+            0,
+        );
+        let mut count = 0;
+        let mut stack: Vec<&Value<'_, EmailProperty, EmailValue>> = vec![&tree];
+        while let Some(value) = stack.pop() {
+            match value {
+                Value::Object(object) => {
+                    count += 1;
+                    stack.extend(object.values());
+                }
+                Value::Array(values) => stack.extend(values),
+                _ => {}
+            }
+        }
+        count
+    }
+
+    // inbuxa: part ids stored as u16 wrapped for a message of more than
+    // 65,535 parts, so a multipart could list itself or an earlier part and
+    // the walk never ended; a part is now only followed into the parts after
+    // it, and no walk emits more parts than the message has
+    #[test]
+    fn body_part_walk_ends_on_bad_part_ids() {
+        // A multipart that lists itself
+        let cycle = archive(vec![
+            MetadataPartType::Multipart(vec![1, 0].into()),
+            MetadataPartType::Text,
+        ]);
+        assert_eq!(body_parts(&cycle), 2);
+
+        // Multiparts that share their parts with each other
+        let mut shared = vec![MetadataPartType::Multipart(vec![1; 100].into())];
+        shared.push(MetadataPartType::Multipart(
+            (2..102).collect::<Vec<_>>().into(),
+        ));
+        shared.extend((2..102).map(|_| MetadataPartType::Text));
+        assert!(body_parts(&archive(shared)) <= 102);
     }
 }

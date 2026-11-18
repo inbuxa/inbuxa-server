@@ -309,6 +309,18 @@ async fn data() {
         .send_message("john@doe.org", &["bill@foobar.org"], "invalid", "550 5.7.7")
         .await;
 
+    // inbuxa: a message of more than 65,535 parts can't be stored, so it is
+    // refused at DATA
+    let mut message =
+        String::from("From: bill@doe.org\r\nContent-Type: multipart/mixed; boundary=b\r\n\r\n");
+    for _ in 0..65_536 {
+        message.push_str("--b\r\n\r\nx\r\n");
+    }
+    message.push_str("--b--\r\n");
+    session
+        .send_message("bill@doe.org", &["mike@test.com"], &message, "552 5.3.4")
+        .await;
+
     // Naive Loop detection
     session
         .send_message(

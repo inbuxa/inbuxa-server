@@ -77,6 +77,13 @@ impl<T: SessionStream> Session<T> {
             }
         };
 
+        // inbuxa: a message whose part ids don't fit the stored structure
+        // couldn't be delivered to a mailbox, so it's refused now rather
+        // than bounced later
+        if !email::message::metadata::fits_stored_metadata(&parsed_message) {
+            return (&b"552 5.3.4 Message has too many MIME parts.\r\n"[..]).into();
+        }
+
         // inbuxa: MA-S3: a shared mailbox's people send only as it over SMTP
         // too, so the answer comes back to the mailbox
         if let Some(address) = self.shared_mailbox_foreign_address(&parsed_message).await {
