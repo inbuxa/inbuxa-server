@@ -174,13 +174,53 @@ enum Stopped {
     Upgraded,
 }
 
+/// inbuxa: K-S2: the join token, from INBUXA_RELAY_JOIN_TOKEN or from the
+/// file INBUXA_RELAY_JOIN_TOKEN_FILE names (a mounted secret). Both set, or a
+/// file that can't be read or holds nothing, is refused.
+fn join_token_from_env() -> Result<Option<String>, String> {
+    let value = std::env::var("INBUXA_RELAY_JOIN_TOKEN")
+        .ok()
+        .filter(|v| !v.trim().is_empty());
+    let file = std::env::var("INBUXA_RELAY_JOIN_TOKEN_FILE")
+        .ok()
+        .filter(|v| !v.trim().is_empty());
+    join_token(value, file, |path| std::fs::read_to_string(path))
+}
+
+fn join_token(
+    value: Option<String>,
+    file: Option<String>,
+    read: impl Fn(&str) -> std::io::Result<String>,
+) -> Result<Option<String>, String> {
+    match (value, file) {
+        (Some(_), Some(_)) => Err(
+            "INBUXA_RELAY_JOIN_TOKEN and INBUXA_RELAY_JOIN_TOKEN_FILE are both set: set one of them"
+                .into(),
+        ),
+        (Some(token), None) => Ok(Some(token)),
+        (None, Some(path)) => {
+            let path = path.trim();
+            let token = read(path).map_err(|err| {
+                format!("INBUXA_RELAY_JOIN_TOKEN_FILE: can't read {path}: {err}")
+            })?;
+            let token = token.trim();
+            if token.is_empty() {
+                Err(format!("INBUXA_RELAY_JOIN_TOKEN_FILE: {path} is empty"))
+            } else {
+                Ok(Some(token.to_string()))
+            }
+        }
+        (None, None) => Ok(None),
+    }
+}
+
 fn run(paths: &Paths, link_listen: SocketAddr, link_allow_any: bool) -> Result<Stopped, String> {
     paths.create_dirs().map_err(|e| e.to_string())?;
     let _lock = RunLock::acquire(paths).map_err(|e| e.to_string())?;
     let identity = match Identity::load(paths).map_err(|e| e.to_string())? {
         Some(identity) => identity,
-        None => match std::env::var("INBUXA_RELAY_JOIN_TOKEN") {
-            Ok(token) if !token.trim().is_empty() => {
+        None => match join_token_from_env()? {
+            Some(token) => {
                 join(paths, &token)?;
                 Identity::load(paths)
                     .map_err(|e| e.to_string())?
@@ -410,4 +450,28 @@ fn reset(paths: &Paths, discard_held: bool) -> Result<(), String> {
         }
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod join_token_tests {
+    use super::join_token;
+
+    #[test]
+    fn the_join_token_comes_from_the_variable_or_its_file() {
+        let no_file = |_: &str| -> std::io::Result<String> { panic!("no file to read") };
+        assert_eq!(join_token(None, None, no_file), Ok(None));
+        assert_eq!(
+            join_token(Some("t".into()), None, no_file),
+            Ok(Some("t".into()))
+        );
+        assert_eq!(
+            join_token(None, Some("/run/t".into()), |_| Ok("tok\n".into())),
+            Ok(Some("tok".into()))
+        );
+        assert!(join_token(Some("t".into()), Some("/run/t".into()), no_file).is_err());
+        assert_eq!(
+            join_token(None, Some("/run/t".into()), |_| Ok("\n".into())),
+            Err("INBUXA_RELAY_JOIN_TOKEN_FILE: /run/t is empty".into())
+        );
+    }
 }

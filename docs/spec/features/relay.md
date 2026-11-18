@@ -1030,7 +1030,7 @@ Packaging (step 6, RL-31):
   uid 2001; about 12 MB. It runs as 2001, with `cap_net_bind_service` on
   the binary and nothing else, sets `INBUXA_RELAY_CONTAINER` (so
   `selfUpgrade: false`), and joins from `INBUXA_RELAY_JOIN_TOKEN` on its
-  first run.
+  first run, or from the file `INBUXA_RELAY_JOIN_TOKEN_FILE` names (K-S2).
 - A release tag builds it beside the server, on whichever forge builds:
   `<registry>/inbuxa/inbuxa-relay` under the server's tags. Before a tag
   moves, the amd64 image must print `inbuxa-relay <Cargo version>` and

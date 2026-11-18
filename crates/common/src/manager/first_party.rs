@@ -223,7 +223,23 @@ pub fn front_end_origins(stored: &FrontEnds) -> Vec<String> {
 /// Whether the environment gives the webmail its secret. `inbuxa:FrontEnds`
 /// can't set one then: the environment's would be put back at every start.
 pub fn webmail_secret_from_environment() -> bool {
-    env("WEBMAIL_CLIENT_SECRET").is_some()
+    webmail_secret_env().is_some()
+}
+
+/// inbuxa: K-S2: INBUXA_WEBMAIL_CLIENT_SECRET, or the file
+/// INBUXA_WEBMAIL_CLIENT_SECRET_FILE names. Boot refuses a bad one, so this
+/// only fails if the file went away since; that is reported, and the secret
+/// treated as unset.
+fn webmail_secret_env() -> Option<String> {
+    match types::branding::secret_env_var("WEBMAIL_CLIENT_SECRET") {
+        Ok(secret) => secret
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty()),
+        Err(message) => {
+            trc::event!(Auth(trc::AuthEvent::Error), Details = message);
+            None
+        }
+    }
 }
 
 fn env(name: &str) -> Option<String> {
@@ -254,7 +270,7 @@ pub async fn ensure_first_party_clients(bp: &mut Bootstrap) -> trc::Result<()> {
         .into_iter()
         .chain(stored.webmail_url.clone())
         .collect();
-    let webmail_secret = env("WEBMAIL_CLIENT_SECRET")
+    let webmail_secret = webmail_secret_env()
         .map(ClientSecret::Plain)
         .or_else(|| stored.webmail_secret_hash.clone().map(ClientSecret::Hash));
     if !webmail_urls.is_empty() && webmail_secret.is_none() {
