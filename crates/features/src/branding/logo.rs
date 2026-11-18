@@ -203,6 +203,23 @@ pub fn chain<'x>(candidates: impl IntoIterator<Item = (Source, Option<&'x str>)>
     logos
 }
 
+/// The candidates `chain` takes, from each level's logo and dark-mode logo,
+/// most specific level first. For a dark page a level offers its dark logo,
+/// then its own; a light page never gets a dark logo (BT-27).
+pub fn levels<'x>(
+    levels: impl IntoIterator<Item = (Source, Option<&'x str>, Option<&'x str>)>,
+    dark: bool,
+) -> Vec<(Source, Option<&'x str>)> {
+    let mut out = Vec::new();
+    for (source, light, dark_logo) in levels {
+        if dark {
+            out.push((source, dark_logo));
+        }
+        out.push((source, light));
+    }
+    out
+}
+
 /// The names to try for a domain name D (BT-1): D, then D without its
 /// leftmost label while at least two labels remain. Lowercase.
 pub fn lookup_names(name: &str) -> Vec<String> {
@@ -298,6 +315,44 @@ mod tests {
         assert_eq!(logos.len(), 2);
         assert!(!logos[0].is_embeddable());
         assert!(logos[1].is_embeddable());
+    }
+
+    #[test]
+    fn dark_logos() {
+        let light = "https://example.org/light.png";
+        let dark = "https://example.org/dark.png";
+        let server_dark = "https://example.org/server-dark.png";
+        let candidates = |d| {
+            chain(levels(
+                [
+                    (Source::Domain(1), Some(light), None),
+                    (Source::Tenant(2), None, Some(dark)),
+                    (Source::Server, None, Some(server_dark)),
+                ],
+                d,
+            ))
+        };
+        // A level's own logo beats a less specific level's dark logo
+        assert_eq!(candidates(true)[0], Logo::Url(light.into()));
+        // A light page never gets a dark logo
+        assert_eq!(candidates(false), vec![Logo::Url(light.into())]);
+        // Within a level, the dark logo comes first; an unusable one falls
+        // back to the level's own
+        let logos = chain(levels(
+            [
+                (Source::Domain(1), Some(light), Some(dark)),
+                (Source::Tenant(2), Some(light), Some("admin")),
+            ],
+            true,
+        ));
+        assert_eq!(
+            logos,
+            vec![
+                Logo::Url(dark.into()),
+                Logo::Url(light.into()),
+                Logo::Url(light.into())
+            ]
+        );
     }
 
     #[test]

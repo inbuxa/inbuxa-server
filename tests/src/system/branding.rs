@@ -486,6 +486,72 @@ pub async fn test(test: &mut TestServer) {
         assert!(refused, "test 16: {object:?} {response:?}");
     }
 
+    // Acceptance test 19: dark-mode logos (BT-27). The server-wide dark logo
+    // doesn't beat a domain's own logo; the domain's dark one does, and a
+    // light page never gets a dark logo. A tenant administrator sets its
+    // domain's dark logo, but not the server-wide one.
+    admin
+        .registry_update_object(
+            ObjectType::Enterprise,
+            Id::singleton(),
+            json!({"logoUrlDark": "https://logo.example.org/server-dark.png"}),
+        )
+        .await;
+    let answer = get(&admin, "/logo?domain=t-brand.example.org&theme=dark", None).await;
+    assert_eq!(
+        answer.header("content-type"),
+        "image/png",
+        "test 19: the domain's own logo"
+    );
+    let answer = get_image(&admin, "/logo?domain=nowhere.example.net&theme=dark").await;
+    assert_eq!(answer.status, StatusCode::FOUND, "test 19");
+    assert_eq!(
+        answer.header("location"),
+        "https://logo.example.org/server-dark.png",
+        "test 19: the server-wide dark logo"
+    );
+    admin
+        .registry_update_object_expect_err(
+            ObjectType::Domain,
+            t_domain,
+            json!({"logoDark": "javascript:alert(1)"}),
+        )
+        .await
+        .assert_type(SetErrorType::InvalidProperties)
+        .assert_properties(&["logoDark"]);
+    t_admin
+        .registry_update_object(
+            ObjectType::Domain,
+            t_domain,
+            json!({"logoDark": data_url("image/gif", b"GIF89a\x01\0\x01\0\0\0\0;")}),
+        )
+        .await;
+    let dark = get(&admin, "/logo?domain=t-brand.example.org&theme=dark", None).await;
+    assert_eq!(dark.header("content-type"), "image/gif", "test 19: dark");
+    dark.assert_logo_headers("test 19");
+    let light = get(&admin, "/logo?domain=t-brand.example.org", None).await;
+    assert_eq!(light.header("content-type"), "image/png", "test 19: light");
+    let other = get(&admin, "/logo?domain=t-brand.example.org&theme=sepia", None).await;
+    assert_eq!(other.header("content-type"), "image/png", "test 19: other");
+    let response = t_admin
+        .registry_update(
+            ObjectType::Enterprise,
+            [(
+                Id::singleton(),
+                json!({"logoUrlDark": "https://logo.example.org/x.png"}),
+            )],
+        )
+        .await;
+    let refused = response
+        .0
+        .pointer(&format!(
+            "/methodResponses/0/1/notUpdated/{}",
+            Id::singleton()
+        ))
+        .is_some()
+        || response.0.pointer("/methodResponses/0/0") == Some(&json!("error"));
+    assert!(refused, "test 19: {response:?}");
+
     // Acceptance test 17: the built-in pages load /logo through an image
     // element, which follows a redirect and falls back on error (BT-26)
     for page in [
@@ -495,11 +561,15 @@ pub async fn test(test: &mut TestServer) {
         assert!(page.contains("img.src = target"), "test 17");
         assert!(page.contains("img.onerror = showDefault"), "test 17");
         assert!(!page.contains("fetch(target"), "test 17");
+        assert!(page.contains("params.push('theme=dark')"), "test 19");
     }
 
     // Clean up
     admin
-        .registry_update_setting(Enterprise::default(), &[Property::LogoUrl])
+        .registry_update_setting(
+            Enterprise::default(),
+            &[Property::LogoUrl, Property::LogoUrlDark],
+        )
         .await;
     admin
         .registry_update_setting(CalendarAlarm::default(), &[Property::Template])

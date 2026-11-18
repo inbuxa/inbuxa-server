@@ -17,7 +17,9 @@ use types::id::Id;
 impl Server {
     /// The logos that apply to a domain name, most specific first. An unknown
     /// name gets what a known domain with no logo of its own gets (BT-6).
-    pub async fn logos_for(&self, name: &str) -> trc::Result<Vec<Logo>> {
+    /// With `dark`, each level offers its dark-mode logo before its own
+    /// logo (BT-27).
+    pub async fn logos_for(&self, name: &str, dark: bool) -> trc::Result<Vec<Logo>> {
         let mut domain = None;
         for candidate in logo::lookup_names(name) {
             if let Some(found) = self.domain(&candidate).await? {
@@ -26,35 +28,46 @@ impl Server {
             }
         }
         let registry = self.registry();
-        let domain_logo = match &domain {
+        let (domain_logo, domain_dark) = match &domain {
             Some(domain) => registry
                 .object::<Domain>(Id::from(domain.id))
                 .await?
-                .and_then(|d| d.logo),
-            None => None,
+                .map_or((None, None), |d| (d.logo, d.logo_dark)),
+            None => (None, None),
         };
         let tenant_id = domain.as_ref().and_then(|d| d.id_tenant);
-        let tenant_logo = match tenant_id {
+        let (tenant_logo, tenant_dark) = match tenant_id {
             Some(tenant_id) => registry
                 .object::<Tenant>(Id::from(tenant_id))
                 .await?
-                .and_then(|t| t.logo),
-            None => None,
+                .map_or((None, None), |t| (t.logo, t.logo_dark)),
+            None => (None, None),
         };
-        let server_logo = registry
+        let (server_logo, server_dark) = registry
             .object::<Enterprise>(Id::singleton())
             .await?
-            .and_then(|e| e.logo_url);
-        Ok(logo::chain([
-            (
-                Source::Domain(domain.as_ref().map_or(u32::MAX, |d| d.id)),
-                domain_logo.as_deref(),
-            ),
-            (
-                Source::Tenant(tenant_id.unwrap_or(u32::MAX)),
-                tenant_logo.as_deref(),
-            ),
-            (Source::Server, server_logo.as_deref()),
-        ]))
+            .map_or((None, None), |e| (e.logo_url, e.logo_url_dark));
+        let domain_source = Source::Domain(domain.as_ref().map_or(u32::MAX, |d| d.id));
+        let tenant_source = Source::Tenant(tenant_id.unwrap_or(u32::MAX));
+        Ok(logo::chain(logo::levels(
+            [
+                (
+                    domain_source,
+                    domain_logo.as_deref(),
+                    domain_dark.as_deref(),
+                ),
+                (
+                    tenant_source,
+                    tenant_logo.as_deref(),
+                    tenant_dark.as_deref(),
+                ),
+                (
+                    Source::Server,
+                    server_logo.as_deref(),
+                    server_dark.as_deref(),
+                ),
+            ],
+            dark,
+        )))
     }
 }

@@ -19839,7 +19839,8 @@ impl RegistryJsonPropertyPatch for DnsServerYandexCloud {
 
 impl ObjectImpl for Domain {
     const FLAGS: u64 = OBJ_FILTER_TENANT | OBJ_SEQ_ID;
-    const VERSION: u8 = 1;
+    // inbuxa: 2: logoDark (branding BT-27)
+    const VERSION: u8 = 2;
     const OBJECT: ObjectType = ObjectType::Domain;
 
     fn validate(&self, errors: &mut Vec<ValidationError>) -> bool {
@@ -19866,6 +19867,11 @@ impl ObjectImpl for Domain {
         if let Some(value) = &self.logo {
             if value.is_empty() {
                 errors.push(ValidationError::required(Property::Logo));
+            }
+        }
+        if let Some(value) = &self.logo_dark {
+            if value.is_empty() {
+                errors.push(ValidationError::required(Property::LogoDark));
             }
         }
         let value = &self.certificate_management;
@@ -19939,6 +19945,7 @@ impl Pickle for Domain {
         self.allow_relaying.pickle(out);
         self.report_address_uri.pickle(out);
         self.allow_scim_provisioning.pickle(out);
+        self.logo_dark.pickle(out);
     }
 
     fn unpickle(stream: &mut crate::pickle::PickledStream<'_>) -> Option<Self> {
@@ -19961,6 +19968,10 @@ impl Pickle for Domain {
         if stream.version() >= 1 {
             this.allow_scim_provisioning = Pickle::unpickle(stream)?;
         }
+        // inbuxa: branding BT-27, stored from version 2
+        if stream.version() >= 2 {
+            this.logo_dark = Pickle::unpickle(stream)?;
+        }
         Some(this)
     }
 }
@@ -19974,6 +19985,7 @@ impl Default for Domain {
             created_at: Default::default(),
             description: Default::default(),
             logo: Default::default(),
+            logo_dark: Default::default(),
             certificate_management: Default::default(),
             dkim_management: Default::default(),
             dns_management: Default::default(),
@@ -19997,6 +20009,7 @@ impl IntoValue for Domain {
         map.insert_unchecked(Property::CreatedAt, self.created_at.into_value());
         map.insert_unchecked(Property::Description, self.description.into_value());
         map.insert_unchecked(Property::Logo, self.logo.into_value());
+        map.insert_unchecked(Property::LogoDark, self.logo_dark.into_value());
         map.insert_unchecked(
             Property::CertificateManagement,
             self.certificate_management.into_value(),
@@ -20040,6 +20053,7 @@ impl RegistryJsonPropertyPatch for Domain {
             Some(Property::CreatedAt) => pointer.assert_server_set(),
             Some(Property::Description) => self.description.patch(pointer, value),
             Some(Property::Logo) => self.logo.patch(pointer, value),
+            Some(Property::LogoDark) => self.logo_dark.patch(pointer, value),
             Some(Property::CertificateManagement) => {
                 self.certificate_management.patch(pointer, value)
             }
@@ -20923,7 +20937,8 @@ impl RegistryJsonPropertyPatch for EncryptionSettings {
 
 impl ObjectImpl for Enterprise {
     const FLAGS: u64 = OBJ_SINGLETON;
-    const VERSION: u8 = 0;
+    // inbuxa: 1: logoUrlDark (branding BT-27)
+    const VERSION: u8 = 1;
     const OBJECT: ObjectType = ObjectType::Enterprise;
 
     fn validate(&self, errors: &mut Vec<ValidationError>) -> bool {
@@ -20937,6 +20952,11 @@ impl ObjectImpl for Enterprise {
                 errors.push(ValidationError::required(Property::LogoUrl));
             }
         }
+        if let Some(value) = &self.logo_url_dark {
+            if value.is_empty() {
+                errors.push(ValidationError::required(Property::LogoUrlDark));
+            }
+        }
         errors.len() == neb
     }
 
@@ -20948,6 +20968,7 @@ impl Pickle for Enterprise {
         self.api_key.pickle(out);
         self.license_key.pickle(out);
         self.logo_url.pickle(out);
+        self.logo_url_dark.pickle(out);
     }
 
     fn unpickle(stream: &mut crate::pickle::PickledStream<'_>) -> Option<Self> {
@@ -20955,6 +20976,10 @@ impl Pickle for Enterprise {
         this.api_key = Pickle::unpickle(stream)?;
         this.license_key = Pickle::unpickle(stream)?;
         this.logo_url = Pickle::unpickle(stream)?;
+        // inbuxa: branding BT-27, stored from version 1
+        if stream.version() >= 1 {
+            this.logo_url_dark = Pickle::unpickle(stream)?;
+        }
         Some(this)
     }
 }
@@ -20965,6 +20990,7 @@ impl Default for Enterprise {
             api_key: Default::default(),
             license_key: Default::default(),
             logo_url: Default::default(),
+            logo_url_dark: Default::default(),
         }
     }
 }
@@ -20975,6 +21001,7 @@ impl IntoValue for Enterprise {
         map.insert_unchecked(Property::ApiKey, self.api_key.into_value());
         map.insert_unchecked(Property::LicenseKey, self.license_key.into_value());
         map.insert_unchecked(Property::LogoUrl, self.logo_url.into_value());
+        map.insert_unchecked(Property::LogoUrlDark, self.logo_url_dark.into_value());
         JmapValue::Object(map)
     }
 }
@@ -20990,6 +21017,9 @@ impl RegistryJsonPropertyPatch for Enterprise {
             Some(Property::LicenseKey) => self.license_key.patch(pointer, value),
             Some(Property::LogoUrl) => self
                 .logo_url
+                .patch(pointer.with_validators(&[StringValidator::Trim]), value),
+            Some(Property::LogoUrlDark) => self
+                .logo_url_dark
                 .patch(pointer.with_validators(&[StringValidator::Trim]), value),
             Some(Property::Type) => Ok(MaybeUnpatched::Unpatched {
                 property: Property::Type,
@@ -44475,7 +44505,8 @@ impl RegistryJsonPropertyPatch for TaskTlsReport {
 
 impl ObjectImpl for Tenant {
     const FLAGS: u64 = OBJ_SEQ_ID;
-    const VERSION: u8 = 0;
+    // inbuxa: 1: logoDark (branding BT-27)
+    const VERSION: u8 = 1;
     const OBJECT: ObjectType = ObjectType::Tenant;
 
     fn validate(&self, errors: &mut Vec<ValidationError>) -> bool {
@@ -44491,6 +44522,11 @@ impl ObjectImpl for Tenant {
         if let Some(value) = &self.logo {
             if value.is_empty() {
                 errors.push(ValidationError::required(Property::Logo));
+            }
+        }
+        if let Some(value) = &self.logo_dark {
+            if value.is_empty() {
+                errors.push(ValidationError::required(Property::LogoDark));
             }
         }
         let value = &self.roles;
@@ -44514,6 +44550,7 @@ impl Pickle for Tenant {
         self.roles.pickle(out);
         self.permissions.pickle(out);
         self.quotas.pickle(out);
+        self.logo_dark.pickle(out);
     }
 
     fn unpickle(stream: &mut crate::pickle::PickledStream<'_>) -> Option<Self> {
@@ -44524,6 +44561,10 @@ impl Pickle for Tenant {
         this.roles = Pickle::unpickle(stream)?;
         this.permissions = Pickle::unpickle(stream)?;
         this.quotas = Pickle::unpickle(stream)?;
+        // inbuxa: branding BT-27, stored from version 1
+        if stream.version() >= 1 {
+            this.logo_dark = Pickle::unpickle(stream)?;
+        }
         Some(this)
     }
 }
@@ -44534,6 +44575,7 @@ impl Default for Tenant {
             name: Default::default(),
             created_at: Default::default(),
             logo: Default::default(),
+            logo_dark: Default::default(),
             roles: Default::default(),
             permissions: Default::default(),
             quotas: Default::default(),
@@ -44547,6 +44589,7 @@ impl IntoValue for Tenant {
         map.insert_unchecked(Property::Name, self.name.into_value());
         map.insert_unchecked(Property::CreatedAt, self.created_at.into_value());
         map.insert_unchecked(Property::Logo, self.logo.into_value());
+        map.insert_unchecked(Property::LogoDark, self.logo_dark.into_value());
         map.insert_unchecked(Property::Roles, self.roles.into_value());
         map.insert_unchecked(Property::Permissions, self.permissions.into_value());
         map.insert_unchecked(Property::Quotas, self.quotas.into_value());
@@ -44564,6 +44607,7 @@ impl RegistryJsonPropertyPatch for Tenant {
             Some(Property::Name) => self.name.patch(pointer, value),
             Some(Property::CreatedAt) => pointer.assert_server_set(),
             Some(Property::Logo) => self.logo.patch(pointer, value),
+            Some(Property::LogoDark) => self.logo_dark.patch(pointer, value),
             Some(Property::Roles) => self.roles.patch(pointer, value),
             Some(Property::Permissions) => self.permissions.patch(pointer, value),
             Some(Property::Quotas) => self.quotas.patch(pointer, value),

@@ -993,6 +993,9 @@ pub enum Property {
     Relays = 939,
     // inbuxa: #397: a trace's kind, as x:Trace/query filters it
     Kind = 940,
+    // inbuxa: branding BT-27, dark-mode logos
+    LogoDark = 941,
+    LogoUrlDark = 942,
     RequireClientRegistration = 615,
     RequireScopes = 608,
     RequireTls = 525,

@@ -101,13 +101,13 @@ impl Server {
     }
 
     // inbuxa: BT-9: the first logo mail can carry inline; none leaves the
-    // built-in INBUXA logo
+    // built-in INBUXA logo. Email is always light (BT-27)
     pub async fn logo_resource(
         &self,
         domain: &str,
     ) -> trc::Result<Option<crate::manager::application::Resource<Vec<u8>>>> {
         Ok(self
-            .logos_for(domain)
+            .logos_for(domain, false)
             .await?
             .into_iter()
             .find(|logo| logo.is_embeddable())

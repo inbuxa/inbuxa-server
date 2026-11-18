@@ -268,14 +268,28 @@ Each requirement has an ID, and tests name the IDs they check.
   can't follow BT-5's redirect to another origin without that origin's CORS
   headers, and an image element can.
 
+### Dark mode
+
+- **BT-27.** Each level can also hold a logo for dark mode: `logoDark` on a
+  domain and on a tenant, `logoUrlDark` on `x:Enterprise`. Each is written
+  and read like the level's own logo (BT-3, BT-4) and changed by whoever can
+  change that logo (BT-24, BT-25). `GET /logo?theme=dark` resolves BT-1's
+  chain with each level offering its dark logo first, then its own logo, so
+  a domain's own logo still beats the server-wide dark one. Without
+  `theme=dark`, or with any other value, a dark logo is never served. Email
+  always uses the light logo (BT-9). The built-in sign-in and RSVP pages ask
+  for `theme=dark` when they show dark, and inbuxa Admin and inbuxa Webmail
+  when their theme is dark. **Decision**: a separate field per level, as
+  requested in community t/304, rather than one value holding both images.
+
 ## Interfaces
 
 - **Existing, unchanged:** `x:Enterprise/get` and `/set`,
   `x:CalendarAlarm/get` and `/set`, `x:CalendarScheduling/get` and `/set`,
   `x:Domain/get` and `/set`, their permissions; `GET /calendar/rsvp`;
   `POST /api/calendar/rsvp`.
-- **New:** `GET /logo` (BT-5), with an optional `domain` parameter. The fork's
-  own pages already call it.
+- **New:** `GET /logo` (BT-5), with optional `domain` and `theme`
+  (BT-27) parameters. The fork's own pages already call it.
 - **Per principal:** the applicable logo over JMAP, as proposed in
   multi-tenancy MT-22, following BT-1's full chain (BT-2).
 - **Errors:** RFC 8620 `invalidProperties`, naming the field, with the parse
@@ -350,6 +364,10 @@ marked **(compat)** also runs against a copy of INBUXA's data.
     redirect, and their built-in logo when `/logo` is `404` (BT-26).
 18. **(compat)** Every logo and template INBUXA holds reads back unchanged, and
     each renders or is served as it did before cutover (BT-4, BT-19).
+19. With a dark logo on the server and a light one on a domain,
+    `/logo?theme=dark` for that domain serves the domain's logo; with a dark
+    logo on the domain too, it serves that one. `/logo` without the
+    parameter never serves a dark logo (BT-27).
 
 ## Open questions / to observe
 
@@ -394,10 +412,10 @@ Built 2026-09-18 from this spec, clean-room, under the multi-tenancy hand-off
 brief's rules. The rules live in `crates/features` (`inbuxa-features`, module
 `branding`); the domain lookup in `crates/common/src/storage/branding.rs`;
 `/logo` and the RSVP page's answer in `crates/http/src/branding.rs`; upstream
-files carry hooks marked `inbuxa:`. Acceptance tests 1 to 17 pass as
+files carry hooks marked `inbuxa:`. Acceptance tests 1 to 17 and 19 pass as
 `tests/src/system/branding.rs`.
 
-- **BT-1 to BT-26:** built.
+- **BT-1 to BT-27:** built.
 - **ihasmail changes** belong to inbuxa-webmail and aren't part of this
   repository.
 - **Test 18 (compat)** is written as `branding_compat`, ignored, and unrun

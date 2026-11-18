@@ -1054,7 +1054,13 @@
                 var wrap = $('logo-wrap');
                 function showDefault() { wrap.removeAttribute('data-loading'); }
                 var target = apiUrl.replace(/\/api\/calendar\/rsvp$/, '') + '/logo';
-                if (domain) target += '?domain=' + encodeURIComponent(domain);
+                var params = [];
+                if (domain) params.push('domain=' + encodeURIComponent(domain));
+                // The dark-mode logo when this page shows dark (branding BT-27)
+                if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
+                    params.push('theme=dark');
+                }
+                if (params.length) target += '?' + params.join('&');
                 // An image element, not fetch: it can follow /logo's redirect to
                 // a URL logo on another origin (branding BT-26)
                 var img = new Image();
