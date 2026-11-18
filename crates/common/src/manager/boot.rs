@@ -33,10 +33,10 @@ pub struct BootManager {
     /// inbuxa: K-S3: started with `--upgrade-store`: no listeners, no
     /// services; main upgrades the store's layout and exits
     pub upgrade_store: bool,
-    /// inbuxa: K-S5: started with `--seed <PATH>`: like `--upgrade-store`,
+    /// inbuxa: K-S8: started with `--seed <PATH>`: like `--upgrade-store`,
     /// and then main applies the seed and exits
     pub seed: Option<PathBuf>,
-    /// inbuxa: K-S5: whether the store was new when this process started,
+    /// inbuxa: K-S8: whether the store was new when this process started,
     /// before the defaults went in
     pub store_was_new: bool,
 }
@@ -94,7 +94,7 @@ enum StoreOp {
     Console,
     // inbuxa: K-S3
     UpgradeStore,
-    // inbuxa: K-S5
+    // inbuxa: K-S8
     Seed(PathBuf),
     None,
 }
@@ -181,7 +181,7 @@ impl BootManager {
             StoreOp::Seed(path) => Some(path.clone()),
             _ => None,
         };
-        // inbuxa: K-S5: a seed run boots as --upgrade-store does
+        // inbuxa: K-S8: a seed run boots as --upgrade-store does
         let one_shot = upgrade_store || seed.is_some();
         let registry = RegistryStore::init(
             PathBuf::from(config_path.unwrap()),
@@ -197,7 +197,7 @@ impl BootManager {
         }
         let mut bootstrap = Bootstrap::new(registry).await;
 
-        // inbuxa: K-S5: a seed is only for a new store, which the defaults
+        // inbuxa: K-S8: a seed is only for a new store, which the defaults
         // below stop being
         let store_was_new = seed.is_some()
             && super::defaults::is_new_install(&bootstrap)

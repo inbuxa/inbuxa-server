@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: AGPL-3.0-only
  */
 
-//! inbuxa: K-S5: a new store's setup from a file (`--seed`), for installs
+//! inbuxa: K-S8: a new store's setup from a file (`--seed`), for installs
 //! that are declared rather than clicked through, such as the Helm chart
 //! (docs/spec/store-seed.md).
 //!

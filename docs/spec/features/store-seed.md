@@ -1,7 +1,7 @@
 # Feature spec: setting up a new store from a file (`--seed`)
 
 Status: approved direction, 2026-11-18 (John chose "a setup file the server
-reads" over a chart job that drives recovery mode). Kubernetes item K-S5.
+reads" over a chart job that drives recovery mode). Kubernetes item K-S8.
 Not a rebuild (SPEC.md §4): inbuxa's own design.
 
 ## Provenance
