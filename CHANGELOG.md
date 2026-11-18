@@ -15,6 +15,41 @@ https://github.com/inbuxa/inbuxa-server/security/advisories.
 Every version PR adds that version's entry here. CI refuses a version this
 file has no entry for (`tools/release/version.py --changelog`).
 
+## [27.1-rc.31] - 2026-11-18
+
+27.1-rc.30 with 3 security fixes from our own review of the suite (1 high,
+1 medium, 1 low) and one hardening change. 27.1-rc.1 to 27.1-rc.30 are
+affected, and so is 2026.x up to and including 2026.11.18.2. The same fixes
+are in 2026.11.18.3.
+
+### Security
+High
+- SMTP: one unauthenticated message could stall the server through DKIM2
+  verification, which took time quadratic in a signature's s= list. DKIM2
+  is now checked only when each signature has at most 4 s= values, the
+  chain has at most 20 links and no DKIM2 field is over 64 KiB; otherwise
+  the message has no DKIM2 result. (GHSA-8wjf-95c6-c4q3, #444)
+
+Medium
+- Mail parsing: header fields had no limit, so a large header block could
+  exhaust memory. A part keeps at most 10,000 header fields and a message
+  262,144; over SMTP, more than 1,000 header fields in any part is refused
+  with `552 5.3.4`. (GHSA-mvcp-vm37-f74j, #444)
+
+Low
+- Spam filter: an off-path host could forge Pyzor replies and mark mail as
+  listed. Replies must now come from the Pyzor server queried and match the
+  request, and request ids are random. (GHSA-4q7q-hg28-7666, #444)
+
+### Changed
+- Spam filter: the URL homograph check looks up at most 10 distinct names
+  per message, each once. ARC chains of more than 20 sets, or with a field
+  over 64 KiB, are treated as broken. (#444)
+
+### Upgrading
+- A message with more than 1,000 header fields in any part is refused over
+  SMTP.
+
 ## [27.1-rc.30] - 2026-11-18
 
 27.1-rc.29 with 4 security fixes from our own review of the suite (3 high,
