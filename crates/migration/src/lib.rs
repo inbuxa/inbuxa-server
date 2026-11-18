@@ -33,6 +33,56 @@ pub async fn upgrade_store(server: &Server) -> trc::Result<layout::Outcome> {
     migrate(server, layout::Run::UpgradeOnly).await
 }
 
+/// inbuxa: what an upgrade of this store to this build would do, for
+/// `--upgrade-plan`. Reads only: the decisions are `migrate`'s.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpgradePlan {
+    /// A store nothing has written yet: a first start marks it, no steps
+    NewStore,
+    /// The store's layout version and the steps from it; none when current
+    Steps {
+        from: u32,
+        steps: Vec<layout::PlannedStep>,
+    },
+    /// A newer release changed this store; this build refuses it
+    Newer(u32),
+    /// Not something an upgrade does: a migration by hand comes first
+    NeedsMigration(&'static str),
+}
+
+pub async fn upgrade_plan(server: &Server) -> trc::Result<UpgradePlan> {
+    let store_version = layout::store_version(server.store()).await?;
+    if let Some(version) = store_version.filter(|version| *version > INBUXA_STORE_VERSION) {
+        return Ok(UpgradePlan::Newer(version));
+    }
+
+    let schema = server
+        .store()
+        .get_value::<u32>(AnyKey {
+            subspace: SUBSPACE_PROPERTY,
+            key: vec![0u8],
+        })
+        .await
+        .caused_by(trc::location!())?;
+    let from = match schema {
+        Some(DATABASE_SCHEMA_VERSION) => store_version.unwrap_or(1),
+        None if is_new_install(server).await.caused_by(trc::location!())? => {
+            return Ok(UpgradePlan::NewStore);
+        }
+        _ => {
+            return Ok(UpgradePlan::NeedsMigration(
+                "the store is from before 0.16 and needs the migration in \
+                 https://docs.inbuxa.org/install/migrating/ first",
+            ));
+        }
+    };
+
+    Ok(UpgradePlan::Steps {
+        from,
+        steps: layout::steps_from(from),
+    })
+}
+
 async fn migrate(server: &Server, run: layout::Run) -> trc::Result<layout::Outcome> {
     // inbuxa: a store a newer release has changed is refused before anything
     // below writes to it.

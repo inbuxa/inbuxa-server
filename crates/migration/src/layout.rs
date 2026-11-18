@@ -89,6 +89,27 @@ const STEPS: &[Step] = &[
     },
 ];
 
+/// inbuxa: a step an upgrade would run, for `--upgrade-plan`
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlannedStep {
+    pub from: u32,
+    pub rolling_safe: bool,
+    pub what: &'static str,
+}
+
+/// The steps from layout `version` up to this build's, in order
+pub fn steps_from(version: u32) -> Vec<PlannedStep> {
+    STEPS
+        .iter()
+        .filter(|step| step.from >= version && step.from < INBUXA_STORE_VERSION)
+        .map(|step| PlannedStep {
+            from: step.from,
+            rolling_safe: step.rolling_safe,
+            what: step.what,
+        })
+        .collect()
+}
+
 async fn run_step(server: &Server, from: u32) -> trc::Result<u64> {
     match from {
         1 => counters_keep_expiry(server).await,
@@ -560,4 +581,19 @@ async fn move_counter_expiry(store: &Store) -> trc::Result<u64> {
     }
 
     Ok(changed)
+}
+
+#[cfg(test)]
+mod plan_tests {
+    use super::*;
+
+    #[test]
+    fn plans_every_step_from_a_version() {
+        let all = steps_from(1);
+        assert_eq!(all.iter().map(|s| s.from).collect::<Vec<_>>(), vec![1, 2]);
+        assert!(all[0].rolling_safe);
+        assert!(!all[1].rolling_safe);
+        assert_eq!(steps_from(2).len(), 1);
+        assert!(steps_from(INBUXA_STORE_VERSION).is_empty());
+    }
 }

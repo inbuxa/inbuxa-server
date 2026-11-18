@@ -95,6 +95,7 @@ async fn store_version() {
     layout_step_1_2(server).await;
     layout_lease(server).await;
     upgrade_store_only(server).await;
+    upgrade_plan(server).await;
     layout_step_2_3(server).await;
 }
 
@@ -307,6 +308,51 @@ async fn layout_lease(server: &Server) {
     }
     assert_eq!(read_mark(server).await, Some(INBUXA_STORE_VERSION));
     assert!(!lease_held(server).await, "lease not released");
+}
+
+// inbuxa: K-C9: `--upgrade-plan` names the steps an upgrade would run and
+// whether one needs every other node stopped, and writes nothing.
+async fn upgrade_plan(server: &Server) {
+    use migration::UpgradePlan;
+
+    let steps = |plan: UpgradePlan| match plan {
+        UpgradePlan::Steps { from, steps } => (
+            from,
+            steps
+                .iter()
+                .map(|s| (s.from, s.rolling_safe))
+                .collect::<Vec<_>>(),
+        ),
+        other => panic!("expected steps, got {other:?}"),
+    };
+
+    write_mark(server, Some(INBUXA_STORE_VERSION)).await;
+    assert_eq!(
+        steps(migration::upgrade_plan(server).await.unwrap()),
+        (INBUXA_STORE_VERSION, vec![])
+    );
+
+    // From 2026.x (layout 1): both steps, the second not rolling-safe
+    write_mark(server, Some(1)).await;
+    assert_eq!(
+        steps(migration::upgrade_plan(server).await.unwrap()),
+        (1, vec![(1, true), (2, false)])
+    );
+    assert_eq!(read_mark(server).await, Some(1), "the plan wrote the mark");
+
+    write_mark(server, Some(2)).await;
+    assert_eq!(
+        steps(migration::upgrade_plan(server).await.unwrap()),
+        (2, vec![(2, false)])
+    );
+
+    write_mark(server, Some(INBUXA_STORE_VERSION + 1)).await;
+    assert_eq!(
+        migration::upgrade_plan(server).await.unwrap(),
+        UpgradePlan::Newer(INBUXA_STORE_VERSION + 1)
+    );
+
+    write_mark(server, Some(INBUXA_STORE_VERSION)).await;
 }
 
 // inbuxa: K-S3: `--upgrade-store` upgrades and stops; it changes nothing on

@@ -3934,6 +3934,7 @@ dependencies = [
  "registry",
  "rustls",
  "scim",
+ "serde_json",
  "services",
  "smtp",
  "smtp-proto",
