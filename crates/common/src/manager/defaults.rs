@@ -512,21 +512,28 @@ async fn insert_safe_defaults(bp: &mut Bootstrap) -> trc::Result<()> {
     // inbuxa: personal-data catalog: the compliance roles, once per server
     super::compliance_roles::ensure_compliance_roles(&bp.registry, &bp.data_store).await?;
 
+    // inbuxa: K-S1: INBUXA_LISTENER_PORTS moves the default listeners, so a
+    // pod without the privilege to bind ports below 1024 can start. Checked on
+    // every start, so a mistake in it is found before it matters. Once the
+    // listeners exist it changes nothing: the registry holds them
+    let listener_ports = std::env::var(super::listener_ports::ENV_VAR).ok();
+    let default_listeners = super::listener_ports::default_listeners(listener_ports.as_deref())
+        .unwrap_or_else(|err| utils::failed(&err));
+
     if bp
         .registry
         .count_object(ObjectType::NetworkListener)
         .await?
         == 0
     {
-        for (protocol, name, port, tls_implicit) in [
-            (NetworkListenerProtocol::Smtp, "smtp", 25, false),
-            (NetworkListenerProtocol::Smtp, "submissions", 465, true),
-            (NetworkListenerProtocol::Imap, "imaps", 993, true),
-            (NetworkListenerProtocol::Pop3, "pop3s", 995, true),
-            (NetworkListenerProtocol::ManageSieve, "sieve", 4190, false),
-            (NetworkListenerProtocol::Http, "https", 443, true),
-            (NetworkListenerProtocol::Http, "http", 8080, false),
-        ] {
+        for (name, port, tls_implicit) in default_listeners {
+            let protocol = match name {
+                "smtp" | "submissions" => NetworkListenerProtocol::Smtp,
+                "imaps" => NetworkListenerProtocol::Imap,
+                "pop3s" => NetworkListenerProtocol::Pop3,
+                "sieve" => NetworkListenerProtocol::ManageSieve,
+                _ => NetworkListenerProtocol::Http,
+            };
             bp.registry
                 .write(RegistryWrite::insert(
                     &NetworkListener {
