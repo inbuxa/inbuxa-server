@@ -87,6 +87,23 @@ pub struct Message {
     pub metadata: Box<[Metadata]>,
 }
 
+/// inbuxa: the longest subject kept in delivery history (#228)
+const SUBJECT_MAX_CHARS: usize = 255;
+
+/// inbuxa: a message's subject for its delivery history (#228), from its
+/// headers alone, cut to `SUBJECT_MAX_CHARS`. `None` when it has none.
+pub fn message_subject(raw_message: &[u8]) -> Option<String> {
+    let parsed = mail_parser::MessageParser::new().parse_headers(raw_message)?;
+    let subject = parsed.subject()?.trim();
+    if subject.is_empty() {
+        return None;
+    }
+    Some(match subject.char_indices().nth(SUBJECT_MAX_CHARS) {
+        Some((end, _)) => format!("{}…", &subject[..end]),
+        None => subject.to_string(),
+    })
+}
+
 impl Message {
     pub fn queued_event(&self) -> trc::QueueEvent {
         if (self.flags & FROM_AUTHENTICATED) != 0 {
@@ -745,5 +762,30 @@ mod smtp_path_tests {
         ] {
             assert!(!is_smtp_path(address), "{address:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod subject_tests {
+    use super::message_subject;
+
+    #[test]
+    fn subject_from_headers() {
+        assert_eq!(
+            message_subject(
+                b"From: a@example.org\r\nSubject: =?utf-8?q?Caf=C3=A9_menu?=\r\n\r\nbody"
+            )
+            .as_deref(),
+            Some("Café menu")
+        );
+        assert_eq!(
+            message_subject(b"From: a@example.org\r\n\r\nSubject: not a header"),
+            None
+        );
+        assert_eq!(message_subject(b"Subject:   \r\n\r\n"), None);
+        let long = format!("Subject: {}\r\n\r\n", "é".repeat(300));
+        let subject = message_subject(long.as_bytes()).unwrap();
+        assert_eq!(subject.chars().count(), 256);
+        assert!(subject.ends_with('…'));
     }
 }

@@ -15,10 +15,10 @@
 // (audit-hold-lock spec, AU-3, AU-8); 649 is cluster.node-id-reassigned;
 // 650 to 659 are inbuxa Relay's (relay spec, RL-23, RL-T23); 660 is
 // store.blob-read-through; 661 is smtp.directory-no-answer (#364); 662 is
-// spam.result (#397).
+// spam.result (#397); 663 is queue.message-subject (inbuxa-admin #228).
 // TOTAL_EVENT_COUNT sizes the collector's per-event tables, so it is one
 // more than the highest id; the test below holds it to the variant list
-pub const TOTAL_EVENT_COUNT: usize = 663;
+pub const TOTAL_EVENT_COUNT: usize = 664;
 pub const TOTAL_METRIC_COUNT: usize = 369;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -608,6 +608,9 @@ pub enum PushSubscriptionEvent {
 pub enum QueueEvent {
     Started = 390,
     MessageQueued = 380,
+    /// inbuxa: inbuxa-admin #228: a queued message's subject, for delivery
+    /// history. Debug level, so an info log never holds subjects.
+    MessageSubject = 663,
     AuthenticatedMessageQueued = 381,
     ReportQueued = 382,
     DsnQueued = 379,
@@ -1418,6 +1421,8 @@ pub enum Key {
     Value = 63,
     Version = 64,
     QueueName = 65,
+    // inbuxa: a message's subject in delivery history (#228)
+    Subject = 66,
 }
 
 #[cfg(test)]

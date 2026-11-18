@@ -28,8 +28,8 @@ use store::{
     write::{BatchBuilder, SearchIndex, TelemetryClass, ValueClass, now},
 };
 use trc::{
-    AddContext, AuthEvent, DeliveryEvent, Event, EventDetails, EventType, Key, Level, SmtpEvent,
-    ipc::subscriber::SubscriberBuilder,
+    AddContext, AuthEvent, DeliveryEvent, Event, EventDetails, EventType, Key, Level, QueueEvent,
+    SmtpEvent, ipc::subscriber::SubscriberBuilder,
 };
 use utils::snowflake::SnowflakeIdGenerator;
 
@@ -270,9 +270,11 @@ pub(crate) fn spawn_store_tracer(builder: SubscriberBuilder, tracing: Store, dat
                     span.has_mail_from = true;
                 }
                 let is_end = typ.is_span_end();
-                // MON-12: info and above, never raw I/O
+                // MON-12: info and above, never raw I/O; MON-42: the subject
                 if !typ.is_raw_io()
-                    && (is_end || event.inner.level as usize >= Level::Info as usize)
+                    && (is_end
+                        || event.inner.level as usize >= Level::Info as usize
+                        || typ == EventType::Queue(QueueEvent::MessageSubject))
                 {
                     if span.events.len() < MAX_EVENTS - 1 || is_end {
                         span.events.push(event);

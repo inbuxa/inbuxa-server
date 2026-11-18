@@ -426,6 +426,8 @@ impl EventType {
             b"push-subscription.not-found" => EventType::PushSubscription(PushSubscriptionEvent::NotFound),
             b"queue.started" => EventType::Queue(QueueEvent::Started),
             b"queue.message-queued" => EventType::Queue(QueueEvent::MessageQueued),
+            // inbuxa: inbuxa-admin #228
+            b"queue.message-subject" => EventType::Queue(QueueEvent::MessageSubject),
             b"queue.authenticated-message-queued" => EventType::Queue(QueueEvent::AuthenticatedMessageQueued),
             b"queue.report-queued" => EventType::Queue(QueueEvent::ReportQueued),
             b"queue.dsn-queued" => EventType::Queue(QueueEvent::DsnQueued),
@@ -1211,6 +1213,8 @@ impl EventType {
             }
             EventType::Queue(QueueEvent::Started) => "queue.started",
             EventType::Queue(QueueEvent::MessageQueued) => "queue.message-queued",
+            // inbuxa: inbuxa-admin #228
+            EventType::Queue(QueueEvent::MessageSubject) => "queue.message-subject",
             EventType::Queue(QueueEvent::AuthenticatedMessageQueued) => {
                 "queue.authenticated-message-queued"
             }
@@ -1921,6 +1925,8 @@ impl EventType {
             EventType::PushSubscription(PushSubscriptionEvent::NotFound) => 372,
             EventType::Queue(QueueEvent::Started) => 390,
             EventType::Queue(QueueEvent::MessageQueued) => 380,
+            // inbuxa: inbuxa-admin #228
+            EventType::Queue(QueueEvent::MessageSubject) => 663,
             EventType::Queue(QueueEvent::AuthenticatedMessageQueued) => 381,
             EventType::Queue(QueueEvent::ReportQueued) => 382,
             EventType::Queue(QueueEvent::DsnQueued) => 379,
@@ -2635,6 +2641,8 @@ impl EventType {
             372 => Some(EventType::PushSubscription(PushSubscriptionEvent::NotFound)),
             390 => Some(EventType::Queue(QueueEvent::Started)),
             380 => Some(EventType::Queue(QueueEvent::MessageQueued)),
+            // inbuxa: inbuxa-admin #228
+            663 => Some(EventType::Queue(QueueEvent::MessageSubject)),
             381 => Some(EventType::Queue(QueueEvent::AuthenticatedMessageQueued)),
             382 => Some(EventType::Queue(QueueEvent::ReportQueued)),
             379 => Some(EventType::Queue(QueueEvent::DsnQueued)),
@@ -3081,6 +3089,8 @@ impl EventType {
             EventType::OutgoingReport(OutgoingReportEvent::Locked) => Level::Info,
             EventType::Queue(QueueEvent::Started) => Level::Info,
             EventType::Queue(QueueEvent::MessageQueued) => Level::Info,
+            // inbuxa: inbuxa-admin #228: debug, so info logs never hold subjects
+            EventType::Queue(QueueEvent::MessageSubject) => Level::Debug,
             EventType::Queue(QueueEvent::AuthenticatedMessageQueued) => Level::Info,
             EventType::Queue(QueueEvent::ReportQueued) => Level::Info,
             EventType::Queue(QueueEvent::DsnQueued) => Level::Info,
@@ -3816,6 +3826,8 @@ impl EventType {
             }
             EventType::Queue(QueueEvent::Started) => "MTA queue started",
             EventType::Queue(QueueEvent::MessageQueued) => "Queued message for delivery",
+            // inbuxa: inbuxa-admin #228
+            EventType::Queue(QueueEvent::MessageSubject) => "Subject of the queued message",
             EventType::Queue(QueueEvent::AuthenticatedMessageQueued) => {
                 "Queued message submission for delivery"
             }
@@ -4830,6 +4842,8 @@ impl EventType {
             EventType::PushSubscription(PushSubscriptionEvent::NotFound),
             EventType::Queue(QueueEvent::Started),
             EventType::Queue(QueueEvent::MessageQueued),
+            // inbuxa: inbuxa-admin #228
+            EventType::Queue(QueueEvent::MessageSubject),
             EventType::Queue(QueueEvent::AuthenticatedMessageQueued),
             EventType::Queue(QueueEvent::ReportQueued),
             EventType::Queue(QueueEvent::DsnQueued),
@@ -8162,6 +8176,7 @@ impl Key {
             b"value" => Key::Value,
             b"version" => Key::Version,
             b"queueName" => Key::QueueName,
+            b"subject" => Key::Subject,
         }
         .copied()
     }
@@ -8234,6 +8249,7 @@ impl Key {
             Key::Value => "value",
             Key::Version => "version",
             Key::QueueName => "queueName",
+            Key::Subject => "subject",
         }
     }
 
@@ -8309,11 +8325,12 @@ impl Key {
             63 => Some(Key::Value),
             64 => Some(Key::Version),
             65 => Some(Key::QueueName),
+            66 => Some(Key::Subject),
             _ => None,
         }
     }
 
-    pub const COUNT: usize = 66;
+    pub const COUNT: usize = 67;
 }
 
 impl serde::Serialize for Key {

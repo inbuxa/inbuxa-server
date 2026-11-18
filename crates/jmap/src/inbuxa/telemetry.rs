@@ -234,11 +234,13 @@ use store::{
 use trc::{AddContext, EventType, Key};
 
 /// The trace's server-set fields (MON-14): the first event's time, the
-/// first `from`, every distinct `to`, and the message size or 0.
+/// first `from`, every distinct `to`, the message size or 0, and the first
+/// `subject` (MON-42).
 fn trace_to_value(id: u64, trace: Trace) -> JmapValue<'static> {
     let mut from = None;
     let mut to: Vec<String> = Vec::new();
     let mut size = None;
+    let mut subject = None;
     let mut first_timestamp = None;
     for event in trace.events.iter() {
         first_timestamp.get_or_insert(event.timestamp.timestamp());
@@ -262,6 +264,11 @@ fn trace_to_value(id: u64, trace: Trace) -> JmapValue<'static> {
                 Key::From => {
                     if from.is_none() {
                         from = texts.into_iter().next();
+                    }
+                }
+                Key::Subject => {
+                    if subject.is_none() {
+                        subject = texts.into_iter().next();
                     }
                 }
                 Key::To => {
@@ -292,6 +299,13 @@ fn trace_to_value(id: u64, trace: Trace) -> JmapValue<'static> {
         );
         obj.insert_unchecked(Property::To, JmapValue::Str(to.join(", ").into()));
         obj.insert_unchecked(Property::Size, JmapValue::Number(size.unwrap_or(0).into()));
+        obj.insert_unchecked(
+            Property::Subject,
+            match subject {
+                Some(subject) => JmapValue::Str(subject.into()),
+                None => JmapValue::Null,
+            },
+        );
     }
     value
 }

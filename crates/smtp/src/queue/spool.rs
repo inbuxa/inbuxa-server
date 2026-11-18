@@ -396,6 +396,13 @@ impl MessageWrapper {
             ..
         } = params;
         let event = self.message.queued_event();
+        // inbuxa: inbuxa-admin #228: the subject, only while delivery
+        // history is kept
+        let subject = if !server.tracing_store().is_none() {
+            crate::queue::message_subject(raw_message)
+        } else {
+            None
+        };
 
         // Write blob
         let raw_headers = raw_headers.unwrap_or_default();
@@ -503,6 +510,15 @@ impl MessageWrapper {
             NextDsn = self.message.next_dsn(None).map(trc::Value::Timestamp),
             Expires = self.message.expires(None).map(trc::Value::Timestamp),
         );
+        // inbuxa: inbuxa-admin #228: the subject for delivery history
+        if let Some(subject) = subject {
+            trc::event!(
+                Queue(trc::QueueEvent::MessageSubject),
+                SpanId = session_id,
+                QueueId = self.queue_id,
+                Subject = subject,
+            );
+        }
 
         // Write message to queue
         let mut batch = BatchBuilder::new();

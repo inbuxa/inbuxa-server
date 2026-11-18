@@ -2268,9 +2268,11 @@ where = ["data-store", "search-store"]
 scope = "server"
 retention = { setting = "x:DataRetention.holdTracesFor" }
 [object."x:Trace".properties]
-events = ["network", "identifier", "metadata"]
+events = ["network", "identifier", "metadata", "content"]
 from = ["identifier"]
 size = ["metadata"]
+# inbuxa-admin #228: the message's Subject header
+subject = ["content"]
 timestamp = ["metadata"]
 to = ["identifier"]
 
@@ -2281,7 +2283,7 @@ where = ["data-store"]
 scope = "server"
 retention = { setting = "x:DataRetention.holdTracesFor" }
 [object."x:TraceEvent".properties]
-keyValues = ["network", "identifier", "metadata"]
+keyValues = ["network", "identifier", "metadata", "content"]
 timestamp = ["metadata"]
 
 [object."x:TraceKeyValue"]
@@ -2291,7 +2293,7 @@ where = ["data-store"]
 scope = "server"
 retention = { setting = "x:DataRetention.holdTracesFor" }
 [object."x:TraceKeyValue".properties]
-value = ["network", "identifier", "metadata"]
+value = ["network", "identifier", "metadata", "content"]
 
 [object."x:TraceValueBoolean"]
 default = "none"
