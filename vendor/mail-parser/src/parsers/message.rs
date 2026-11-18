@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: Apache-2.0 OR MIT
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use std::borrow::Cow;
@@ -15,6 +17,15 @@ use crate::{
 use super::MessageStream;
 
 const MAX_NESTED_ENCODED: usize = 3;
+
+// inbuxa: the most message/rfc822 parts without an encoding nested in one
+// another. Each level is a Message inside its parent, and dropping one takes
+// a stack frame per level, so a message of a megabyte or two nested tens of
+// thousands deep overflowed a 2 MiB thread stack and aborted the process.
+// A part deeper than this is kept as an attachment and not parsed. With the
+// encoded limit above, no tree is more than (MAX_NESTED_ENCODED + 1) times
+// this deep.
+pub const MAX_NESTED_MESSAGES: usize = 20;
 
 #[derive(Debug, PartialEq, Default)]
 enum MimeType {
@@ -133,6 +144,7 @@ impl MessageParser {
 
         let mut state = MessageParserState::new();
         let mut state_stack = Vec::with_capacity(4);
+        let mut nested_messages = 0;
 
         let mut part_headers = Vec::new();
 
@@ -211,7 +223,17 @@ impl MessageParser {
                 _ => (Encoding::None, MessageStream::mime_part),
             };
 
+            if mime_type == MimeType::Message
+                && encoding == Encoding::None
+                && nested_messages >= MAX_NESTED_MESSAGES
+            {
+                mime_type = MimeType::Other;
+                is_inline = false;
+                is_text = false;
+            }
+
             if mime_type == MimeType::Message && encoding == Encoding::None {
+                nested_messages += 1;
                 let new_state = MessageParserState {
                     mime_type: MimeType::Message,
                     mime_boundary: state.mime_boundary.take(),
@@ -393,6 +415,7 @@ impl MessageParser {
                     if let MimeType::Message = state.mime_type {
                         // Finished processing a nested message, restore parent message from stack
                         if let Some((mut prev_state, Some(mut prev_message))) = state_stack.pop() {
+                            nested_messages -= 1;
                             let offset_end = state
                                 .mime_boundary
                                 .as_ref()
@@ -465,7 +488,10 @@ impl MessageParser {
                             }
 
                             // Restore ancestor's state
-                            if let Some((prev_state, _)) = state_stack.pop() {
+                            if let Some((prev_state, prev_message)) = state_stack.pop() {
+                                if prev_message.is_some() {
+                                    nested_messages -= 1;
+                                }
                                 state = prev_state;
 
                                 if let Some(ref mime_boundary) = state.mime_boundary {

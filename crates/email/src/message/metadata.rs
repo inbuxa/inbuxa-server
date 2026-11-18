@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::mailbox::{ArchivedUidMailbox, UidMailbox};
@@ -1316,5 +1318,88 @@ impl From<&ArchivedMetadataContentType> for ContentType<'static> {
                     .collect(),
             ),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use mail_parser::{Message, MessageParser, PartType};
+    use std::process::Command;
+
+    const CHILD: &str = "INBUXA_TEST_DEEP_MESSAGE_CHILD";
+
+    fn deep_message(levels: usize) -> Vec<u8> {
+        let mut raw = b"From: a@example.org\r\nContent-Type: message/rfc822\r\n\r\n".to_vec();
+        for _ in 0..levels {
+            raw.extend_from_slice(b"Content-Type: message/rfc822\r\n\r\n");
+        }
+        raw.extend_from_slice(b"Subject: x\r\n\r\nx\r\n");
+        raw
+    }
+
+    // How deep the messages nest, and whether the innermost one keeps the
+    // rest as an attachment
+    fn nesting_depth(message: &Message<'_>) -> (usize, bool) {
+        let mut depth = 0;
+        let mut message = message;
+        while let Some(nested) = message.parts.iter().find_map(|part| match &part.body {
+            PartType::Message(nested) => Some(nested),
+            _ => None,
+        }) {
+            depth += 1;
+            message = nested;
+        }
+        let rest_kept = message.parts.iter().any(|part| {
+            matches!(&part.body, PartType::Binary(rest) if rest.starts_with(b"Content-Type: message/rfc822"))
+        });
+        (depth, rest_kept)
+    }
+
+    // Runs `test` in a child process, on a thread with the 2 MiB stack the
+    // server's worker threads have, so a stack overflow fails the test
+    // instead of aborting the test run.
+    fn on_small_stack_in_child(name: &str, test: fn()) {
+        if std::env::var_os(CHILD).is_some() {
+            std::thread::Builder::new()
+                .stack_size(2 * 1024 * 1024)
+                .spawn(test)
+                .unwrap()
+                .join()
+                .unwrap();
+            return;
+        }
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([name, "--exact", "--nocapture", "--test-threads=1"])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "child failed ({}): {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .last()
+                .unwrap_or_default()
+        );
+    }
+
+    // inbuxa: message/rfc822 parts without an encoding nested to any depth,
+    // and dropping the parsed message took a stack frame per level, so a
+    // message of a few megabytes aborted the server
+    #[test]
+    fn deeply_nested_messages_drop_on_a_small_stack() {
+        on_small_stack_in_child(
+            "message::metadata::tests::deeply_nested_messages_drop_on_a_small_stack",
+            || {
+                let raw = deep_message(200_000);
+                let message = MessageParser::new().parse(&raw).unwrap();
+                let (depth, rest_kept) = nesting_depth(&message);
+                drop(message);
+                assert_eq!(depth, 20);
+                assert!(rest_kept);
+            },
+        );
     }
 }
