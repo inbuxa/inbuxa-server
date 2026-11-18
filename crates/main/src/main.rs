@@ -60,6 +60,11 @@ async fn main() -> std::io::Result<()> {
     // Load config and apply macros
     let mut init = Box::pin(BootManager::init()).await;
 
+    // inbuxa: K-S3: --upgrade-store upgrades the store's layout and exits
+    if init.upgrade_store {
+        std::process::exit(upgrade_store_and_exit(&init.inner.build_server()).await);
+    }
+
     // Migrate database
     if let Err(err) = migration::try_migrate(&init.inner.build_server()).await {
         trc::event!(
@@ -185,4 +190,51 @@ fn spawn_listener(
             shutdown_rx,
         ),
     }
+}
+
+/// inbuxa: K-S3: the exit code of `--upgrade-store`: 0 when the store is at
+/// this build's layout (upgraded now or already), 1 when the upgrade failed,
+/// 2 when it was refused because another node is in the way.
+async fn upgrade_store_and_exit(server: &common::Server) -> i32 {
+    use migration::layout::Outcome;
+
+    let (code, message) = match migration::upgrade_store(server).await {
+        Ok(Outcome::Current) => (
+            0,
+            format!(
+                "The store layout is at version {}: nothing to upgrade.",
+                common::INBUXA_STORE_VERSION
+            ),
+        ),
+        Ok(Outcome::Upgraded { from }) => (
+            0,
+            format!(
+                "Upgraded the store layout from version {from} to {}.",
+                common::INBUXA_STORE_VERSION
+            ),
+        ),
+        Ok(Outcome::Refused(reason)) => {
+            trc::event!(
+                Server(trc::ServerEvent::StartupError),
+                Details = "Refused to upgrade the store layout",
+                Reason = reason.clone(),
+            );
+            (2, format!("Refused to upgrade the store layout: {reason}."))
+        }
+        Err(err) => {
+            let message = format!("Failed to upgrade the store layout: {err}");
+            trc::event!(
+                Server(trc::ServerEvent::StartupError),
+                Details = "Failed to upgrade the store layout",
+                Reason = err,
+            );
+            (1, message)
+        }
+    };
+    eprintln!("{message}");
+
+    // Let the log reach its collector
+    Collector::shutdown();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    code
 }

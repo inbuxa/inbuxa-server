@@ -94,6 +94,7 @@ async fn store_version() {
 
     layout_step_1_2(server).await;
     layout_lease(server).await;
+    upgrade_store_only(server).await;
     layout_step_2_3(server).await;
 }
 
@@ -245,15 +246,14 @@ async fn write_lease(server: &Server, node_id: u16, expires_at: u64) {
 }
 
 async fn lease_held(server: &Server) -> bool {
-    server
-        .store()
-        .get_value::<u64>(AnyKey {
-            subspace: SUBSPACE_INBUXA,
-            key: migration::layout::LAYOUT_LEASE_KEY.to_vec(),
-        })
-        .await
-        .unwrap()
-        .is_some()
+    // A lease is a node id and an expiry, so it's read as it is
+    get_raw(
+        server.store(),
+        SUBSPACE_INBUXA,
+        migration::layout::LAYOUT_LEASE_KEY,
+    )
+    .await
+    .is_some()
 }
 
 // SL-3: a node that can't take the lease waits for the mark; a lease that
@@ -307,6 +307,57 @@ async fn layout_lease(server: &Server) {
     }
     assert_eq!(read_mark(server).await, Some(INBUXA_STORE_VERSION));
     assert!(!lease_held(server).await, "lease not released");
+}
+
+// inbuxa: K-S3: `--upgrade-store` upgrades and stops; it changes nothing on
+// a current store, and refuses, rather than waits, while another node holds
+// the lease.
+async fn upgrade_store_only(server: &Server) {
+    use migration::layout::Outcome;
+
+    // Current: nothing to do, twice over
+    write_mark(server, Some(INBUXA_STORE_VERSION)).await;
+    for _ in 0..2 {
+        assert_eq!(
+            migration::upgrade_store(server).await.unwrap(),
+            Outcome::Current
+        );
+        assert_eq!(read_mark(server).await, Some(INBUXA_STORE_VERSION));
+    }
+
+    // Another node holds the lease: refused at once, and its lease is left
+    write_mark(server, Some(1)).await;
+    write_lease(server, 900, now() + 600).await;
+    let outcome = tokio::time::timeout(Duration::from_secs(5), migration::upgrade_store(server))
+        .await
+        .expect("waited on another node's lease instead of refusing")
+        .unwrap();
+    match outcome {
+        Outcome::Refused(reason) => assert!(reason.contains("node 900"), "{reason}"),
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+    assert_eq!(
+        read_mark(server).await,
+        Some(1),
+        "upgraded under another lease"
+    );
+    assert!(
+        lease_held(server).await,
+        "the other node's lease was removed"
+    );
+
+    // Once it's gone: upgraded, lease released, and a second run is a no-op
+    write_lease(server, 900, now() - 1).await;
+    assert_eq!(
+        migration::upgrade_store(server).await.unwrap(),
+        Outcome::Upgraded { from: 1 }
+    );
+    assert_eq!(read_mark(server).await, Some(INBUXA_STORE_VERSION));
+    assert!(!lease_held(server).await, "lease not released");
+    assert_eq!(
+        migration::upgrade_store(server).await.unwrap(),
+        Outcome::Current
+    );
 }
 
 async fn applications(server: &Server) -> Vec<(String, bool)> {

@@ -36,6 +36,33 @@ const LEASE_RENEWAL: Duration = Duration::from_secs(60);
 const WAIT_INTERVAL: Duration = Duration::from_secs(10);
 const WATCH_INTERVAL: Duration = Duration::from_secs(60);
 const UPDATING_DOCS: &str = "https://docs.inbuxa.org/install/updating/";
+/// K-S3: how long `--upgrade-store` waits for other nodes to show as
+/// stopped before a step that needs them stopped. A node shows as stopped a
+/// few minutes after its last heartbeat, so a pod that was just scaled down
+/// still counts for a while.
+const UPGRADE_ONLY_NODE_WAIT: Duration = Duration::from_secs(6 * 60);
+
+/// inbuxa: K-S3: who is running the steps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Run {
+    /// A node starting: it waits for whatever is in the way, then serves.
+    Boot,
+    /// `--upgrade-store`: it upgrades and exits, and refuses rather than
+    /// waits for another node's upgrade.
+    UpgradeOnly,
+}
+
+/// What a run of the steps came to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Outcome {
+    /// The store was at this build's layout already, or another node
+    /// brought it there while this one waited.
+    Current,
+    /// This node upgraded it, from this version.
+    Upgraded { from: u32 },
+    /// `--upgrade-store` refused, for this reason.
+    Refused(String),
+}
 
 /// One step, from the version it starts at to the next.
 struct Step {
@@ -103,27 +130,39 @@ pub async fn upgrade_layout(
     server: &Server,
     store_version: Option<u32>,
     new_install: bool,
-) -> trc::Result<()> {
+    run: Run,
+) -> trc::Result<Outcome> {
     let version = store_version.unwrap_or(if new_install { INBUXA_STORE_VERSION } else { 1 });
 
-    if version < INBUXA_STORE_VERSION {
-        run_steps(server, server.registry().node_id()).await?;
-    } else if store_version.is_none() {
-        write_mark(server.store(), INBUXA_STORE_VERSION).await?;
-    }
+    let outcome = if version < INBUXA_STORE_VERSION {
+        run_steps_as(server, server.registry().node_id(), run).await?
+    } else {
+        if store_version.is_none() {
+            write_mark(server.store(), INBUXA_STORE_VERSION).await?;
+        }
+        Outcome::Current
+    };
 
     // SL-7
-    trc::event!(
-        Server(trc::ServerEvent::Startup),
-        Details = format!("Store layout version {INBUXA_STORE_VERSION}"),
-    );
+    if !matches!(outcome, Outcome::Refused(_)) {
+        trc::event!(
+            Server(trc::ServerEvent::Startup),
+            Details = format!("Store layout version {INBUXA_STORE_VERSION}"),
+        );
+    }
 
-    Ok(())
+    Ok(outcome)
 }
 
 /// Runs every step from the store's version up to this build's, as node
 /// `node_id`, or waits for the node that runs them (SL-3).
 pub async fn run_steps(server: &Server, node_id: u16) -> trc::Result<()> {
+    run_steps_as(server, node_id, Run::Boot).await.map(|_| ())
+}
+
+/// As [`run_steps`]; under [`Run::UpgradeOnly`] another node's lease is a
+/// refusal rather than something to wait out.
+pub async fn run_steps_as(server: &Server, node_id: u16, run: Run) -> trc::Result<Outcome> {
     let store = server.store();
     let mut waiting = false;
 
@@ -137,13 +176,24 @@ pub async fn run_steps(server: &Server, node_id: u16) -> trc::Result<()> {
                     Version = version,
                 );
             }
-            return Ok(());
+            return Ok(Outcome::Current);
         }
 
         if let Some(lease) = Lease::take(store, node_id).await? {
-            let result = run_held(server, &lease, version).await;
+            let result = run_held(server, &lease, version, run).await;
             lease.release(store).await;
             return result;
+        }
+
+        if run == Run::UpgradeOnly {
+            return Ok(Outcome::Refused(match Lease::holder(store).await? {
+                Some((holder, expires)) => format!(
+                    "node {holder} holds the store layout lease and is upgrading the store; \
+                     it runs out in {}s unless that node renews it",
+                    expires.saturating_sub(now())
+                ),
+                None => "another node took the store layout lease first".to_string(),
+            }));
         }
 
         if !waiting {
@@ -158,10 +208,14 @@ pub async fn run_steps(server: &Server, node_id: u16) -> trc::Result<()> {
     }
 }
 
-async fn run_held(server: &Server, lease: &Lease, version: u32) -> trc::Result<()> {
+async fn run_held(server: &Server, lease: &Lease, version: u32, run: Run) -> trc::Result<Outcome> {
     let store = server.store();
     // Another node may have run a step between the read and the lease
     let mut version = store_version(store).await?.unwrap_or(version);
+    let from = version;
+    if version >= INBUXA_STORE_VERSION {
+        return Ok(Outcome::Current);
+    }
 
     while version < INBUXA_STORE_VERSION {
         let Some(step) = STEPS.iter().find(|step| step.from == version) else {
@@ -169,8 +223,14 @@ async fn run_held(server: &Server, lease: &Lease, version: u32) -> trc::Result<(
                 "The data store is at layout version {version}, and this release has no step from it"
             ));
         };
-        if !step.rolling_safe {
-            wait_for_other_nodes(server).await?;
+        if !step.rolling_safe
+            && let Some(running) = wait_for_other_nodes(server, run).await?
+        {
+            return Ok(Outcome::Refused(format!(
+                "the step from layout version {version} needs every other node stopped, \
+                 and these still show as running: {}",
+                running.join(", ")
+            )));
         }
 
         // SL-8
@@ -206,16 +266,19 @@ async fn run_held(server: &Server, lease: &Lease, version: u32) -> trc::Result<(
         );
     }
 
-    Ok(())
+    Ok(Outcome::Upgraded { from })
 }
 
 /// A step that isn't rolling-safe waits until no other node shows as active
 /// (SL-6). A single node never waits: only other node ids on other hosts
-/// count, so this node's own earlier lease doesn't.
-async fn wait_for_other_nodes(server: &Server) -> trc::Result<()> {
+/// count, so this node's own earlier lease doesn't. Under
+/// [`Run::UpgradeOnly`] it gives up after [`UPGRADE_ONLY_NODE_WAIT`] and
+/// returns the nodes still running.
+async fn wait_for_other_nodes(server: &Server, run: Run) -> trc::Result<Option<Vec<String>>> {
     let me = server.registry().node_id() as u64;
     let hostname = server.registry().local_hostname().to_string();
     let mut logged: Option<Instant> = None;
+    let started = Instant::now();
 
     loop {
         let others = server
@@ -232,7 +295,10 @@ async fn wait_for_other_nodes(server: &Server) -> trc::Result<()> {
             .map(|node| node.hostname)
             .collect::<Vec<_>>();
         if others.is_empty() {
-            return Ok(());
+            return Ok(None);
+        }
+        if run == Run::UpgradeOnly && started.elapsed() >= UPGRADE_ONLY_NODE_WAIT {
+            return Ok(Some(others));
         }
         if logged.is_none_or(|at| at.elapsed() >= Duration::from_secs(60)) {
             trc::event!(
@@ -302,6 +368,19 @@ async fn swap_lease(store: &Store, current: Option<&[u8]>, new: Vec<u8>) -> trc:
 }
 
 impl Lease {
+    /// Who holds the lease and until when, if anyone does and it hasn't run out.
+    async fn holder(store: &Store) -> trc::Result<Option<(u16, u64)>> {
+        Ok(store
+            .get_value::<Raw>(ValueKey::from(lease_class()))
+            .await
+            .caused_by(trc::location!())?
+            .and_then(|Raw(bytes)| {
+                let holder = bytes.as_slice().deserialize_be_u16(0).ok()?;
+                let expires = bytes.as_slice().deserialize_be_u64(2).ok()?;
+                (expires > now()).then_some((holder, expires))
+            }))
+    }
+
     /// Takes the lease if nobody holds it, it ran out, or it's this node's
     /// own (left by a run that stopped).
     async fn take(store: &Store, node_id: u16) -> trc::Result<Option<Lease>> {
