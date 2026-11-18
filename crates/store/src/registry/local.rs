@@ -41,8 +41,11 @@ impl RegistryStoreInner {
                 .ok()
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false),
-            env_recovery_admin: types::branding::env_var("RECOVERY_ADMIN")
+            // inbuxa: K-S2: or from INBUXA_RECOVERY_ADMIN_FILE; boot has
+            // already refused a bad one (check_secret_env_vars)
+            env_recovery_admin: types::branding::secret_env_var("RECOVERY_ADMIN")
                 .ok()
+                .flatten()
                 .and_then(|v| {
                     v.split_once(':')
                         .map(|(a, p)| (a.trim().to_string(), p.trim().to_string()))

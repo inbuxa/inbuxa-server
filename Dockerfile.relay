@@ -10,7 +10,8 @@
 # nothing more, and keeps its state in /var/lib/inbuxa-relay. It sets
 # INBUXA_RELAY_CONTAINER, so the relay reports selfUpgrade: false and an
 # upgrade is a new image (RL-29). On its first run it joins with
-# INBUXA_RELAY_JOIN_TOKEN.
+# INBUXA_RELAY_JOIN_TOKEN, or the token in the file
+# INBUXA_RELAY_JOIN_TOKEN_FILE names (a mounted secret).
 #
 # Docker Hub images, pulled through Google's mirror, as in Dockerfile.
 FROM mirror.gcr.io/library/rust:1-alpine3.22 AS builder

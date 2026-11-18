@@ -113,6 +113,12 @@ enum StoreOp {
 
 impl BootManager {
     pub async fn init() -> Self {
+        // inbuxa: K-S2: a secret given as INBUXA_<name>_FILE that can't be
+        // read, or given twice, stops the start here, before anything uses it
+        if let Err(message) = types::branding::check_secret_env_vars() {
+            eprintln!("Error: {message}");
+            std::process::exit(1);
+        }
         let mut config_path = std::env::var("CONFIG_PATH").ok();
         let mut import_export = StoreOp::None;
 

@@ -282,6 +282,14 @@ Done 2026-09-18:
   Now a `STALWART_*` name that's set where its `INBUXA_*` one isn't stops the
   server at startup, naming the variable to rename, so an install moved over
   from upstream never runs on settings it silently dropped.
+- The secrets among them, `RECOVERY_ADMIN` and `WEBMAIL_CLIENT_SECRET`
+  (`types::branding::SECRET_ENV_VARS`), can come instead from a file that
+  `INBUXA_<name>_FILE` names, such as a mounted Kubernetes or Docker secret,
+  so they never have to be in the environment (K-S2, 2026-11-18). The file's
+  trailing newline is dropped. Both set, or a file that can't be read or is
+  empty, stops the server at startup with the variable and path named,
+  never the secret. The relay's `INBUXA_RELAY_JOIN_TOKEN` takes `_FILE` the
+  same way.
 - The spam filter's blobs moved from `STALWART_SPAM_*` to `INBUXA_SPAM_*` on
   2026-09-22; every start moves any left under the old keys
   (`migration::try_migrate`), so no trained model is orphaned.
