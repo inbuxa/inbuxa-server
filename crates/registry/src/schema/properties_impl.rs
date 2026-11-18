@@ -868,6 +868,8 @@ impl EnumImpl for Property {
             b"locale" => Property::Locale,
             b"logo" => Property::Logo,
             b"logoUrl" => Property::LogoUrl,
+            b"logoDark" => Property::LogoDark,
+            b"logoUrlDark" => Property::LogoUrlDark,
             b"loiterBanPeriod" => Property::LoiterBanPeriod,
             b"loiterBanRate" => Property::LoiterBanRate,
             b"lossy" => Property::Lossy,
@@ -1814,6 +1816,8 @@ impl EnumImpl for Property {
             Property::Locale => "locale",
             Property::Logo => "logo",
             Property::LogoUrl => "logoUrl",
+            Property::LogoDark => "logoDark",
+            Property::LogoUrlDark => "logoUrlDark",
             Property::LoiterBanPeriod => "loiterBanPeriod",
             Property::LoiterBanRate => "loiterBanRate",
             Property::Lossy => "lossy",
@@ -3039,6 +3043,8 @@ impl EnumImpl for Property {
             938 => Some(Property::IntrospectionClientSecret),
             939 => Some(Property::Relays),
             940 => Some(Property::Kind),
+            941 => Some(Property::LogoDark),
+            942 => Some(Property::LogoUrlDark),
             615 => Some(Property::RequireClientRegistration),
             608 => Some(Property::RequireScopes),
             525 => Some(Property::RequireTls),
@@ -3250,7 +3256,7 @@ impl EnumImpl for Property {
         }
     }
 
-    const COUNT: usize = 940;
+    const COUNT: usize = 943;
 }
 
 impl serde::Serialize for Property {

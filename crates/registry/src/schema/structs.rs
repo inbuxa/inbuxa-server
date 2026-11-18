@@ -2737,6 +2737,9 @@ pub struct Domain {
     pub description: Option<String>,
     #[serde(rename = "logo")]
     pub logo: Option<String>,
+    // inbuxa: branding BT-27
+    #[serde(rename = "logoDark")]
+    pub logo_dark: Option<String>,
     #[serde(rename = "certificateManagement")]
     pub certificate_management: CertificateManagement,
     #[serde(rename = "dkimManagement")]
@@ -2880,6 +2883,9 @@ pub struct Enterprise {
     pub license_key: SecretKeyOptional,
     #[serde(rename = "logoUrl")]
     pub logo_url: Option<String>,
+    // inbuxa: branding BT-27
+    #[serde(rename = "logoUrlDark")]
+    pub logo_url_dark: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -5868,6 +5874,9 @@ pub struct Tenant {
     pub created_at: UTCDateTime,
     #[serde(rename = "logo")]
     pub logo: Option<String>,
+    // inbuxa: branding BT-27
+    #[serde(rename = "logoDark")]
+    pub logo_dark: Option<String>,
     #[serde(rename = "roles")]
     pub roles: Roles,
     #[serde(rename = "permissions")]

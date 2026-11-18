@@ -12,8 +12,8 @@ use crate::{
         enums::{MtaRouteType, OidcOpaqueTokens},
         prelude::{ObjectImpl, ObjectInner, ObjectType},
         structs::{
-            Bootstrap, Directory, DirectoryBootstrap, MtaRoute, MtaRouteCommon,
-            MtaRouteInbuxaRelay, OidcDirectory,
+            Bootstrap, Directory, DirectoryBootstrap, Domain, Enterprise, MtaRoute, MtaRouteCommon,
+            MtaRouteInbuxaRelay, OidcDirectory, Tenant,
         },
     },
     types::{EnumImpl, map::Map},
@@ -147,4 +147,75 @@ fn inbuxa_relay_routes_are_stored_after_the_others() {
         Some(MtaRouteType::InbuxaRelay)
     );
     assert_eq!(MtaRouteType::from_id(3), Some(MtaRouteType::InbuxaRelay));
+}
+
+/// An object as it was stored at `version`, before its last field: today's
+/// bytes with the version byte replaced and the unset field taken off the end.
+fn without_last_field<T: ObjectImpl>(object: &T, version: u8) -> Vec<u8> {
+    let mut unset = Vec::new();
+    None::<String>.pickle(&mut unset);
+    let mut bytes = object.to_pickled_vec();
+    assert!(bytes.ends_with(&unset));
+    bytes.truncate(bytes.len() - unset.len());
+    bytes[0] = version;
+    bytes
+}
+
+// branding BT-27: domains, tenants and the server-wide branding saved before
+// the dark-mode logo read back without one; saved now, with it
+#[test]
+fn logos_saved_before_dark_mode_read_back_without_a_dark_logo() {
+    let domain = Domain {
+        name: "example.org".to_string(),
+        logo: Some("https://example.org/logo.png".to_string()),
+        allow_scim_provisioning: true,
+        ..Default::default()
+    };
+    let tenant = Tenant {
+        name: "t".to_string(),
+        logo: Some("https://example.org/t.png".to_string()),
+        ..Default::default()
+    };
+    let enterprise = Enterprise {
+        logo_url: Some("https://example.org/server.png".to_string()),
+        ..Default::default()
+    };
+    assert_eq!(
+        read(ObjectType::Domain, &without_last_field(&domain, 1)),
+        ObjectInner::Domain(domain.clone())
+    );
+    assert_eq!(
+        read(ObjectType::Tenant, &without_last_field(&tenant, 0)),
+        ObjectInner::Tenant(tenant.clone())
+    );
+    assert_eq!(
+        read(ObjectType::Enterprise, &without_last_field(&enterprise, 0)),
+        ObjectInner::Enterprise(enterprise.clone())
+    );
+
+    let dark = Some("https://example.org/dark.png".to_string());
+    let domain = Domain {
+        logo_dark: dark.clone(),
+        ..domain
+    };
+    let tenant = Tenant {
+        logo_dark: dark.clone(),
+        ..tenant
+    };
+    let enterprise = Enterprise {
+        logo_url_dark: dark,
+        ..enterprise
+    };
+    assert_eq!(
+        read(ObjectType::Domain, &domain.to_pickled_vec()),
+        ObjectInner::Domain(domain)
+    );
+    assert_eq!(
+        read(ObjectType::Tenant, &tenant.to_pickled_vec()),
+        ObjectInner::Tenant(tenant)
+    );
+    assert_eq!(
+        read(ObjectType::Enterprise, &enterprise.to_pickled_vec()),
+        ObjectInner::Enterprise(enterprise)
+    );
 }

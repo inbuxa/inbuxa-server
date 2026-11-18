@@ -43,6 +43,15 @@ fn requested_domain(req: &HttpRequest) -> String {
         .unwrap_or_default()
 }
 
+/// Whether `/logo` was asked for the dark-mode logo, with `?theme=dark`
+/// (BT-27). Anything else is the light one.
+fn wants_dark(req: &HttpRequest) -> bool {
+    req.uri().query().is_some_and(|query| {
+        http_proto::form_urlencoded::parse(query.as_bytes())
+            .any(|(key, value)| key == "theme" && value.eq_ignore_ascii_case("dark"))
+    })
+}
+
 /// Whether the browser is loading `/logo` as an image, as an `<img>` does
 /// (BT-26). A link opened, a frame, a script or a client that doesn't say
 /// isn't.
@@ -60,10 +69,11 @@ fn is_https(url: &str) -> bool {
 }
 
 /// `GET /logo`: the image, a redirect to a URL logo, or `404` when no
-/// custom logo applies. The server never fetches a URL (BT-7).
+/// custom logo applies. The server never fetches a URL (BT-7). With
+/// `?theme=dark`, a dark-mode logo where one is set (BT-27).
 pub async fn logo(server: &Server, req: &HttpRequest) -> trc::Result<HttpResponse> {
     let response = match server
-        .logos_for(&requested_domain(req))
+        .logos_for(&requested_domain(req), wants_dark(req))
         .await?
         .into_iter()
         .find(|logo| !matches!(logo, Logo::Url(url) if !is_https(url)))

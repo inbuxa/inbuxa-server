@@ -423,13 +423,20 @@
             (function loadCustomLogo() {
                 var wrap = $('logo-wrap');
                 function showDefault() { wrap.removeAttribute('data-loading'); }
-                var target = '/logo';
+                var params = [];
                 if (loginHint) {
                     var at = loginHint.lastIndexOf('@');
                     if (at !== -1 && at < loginHint.length - 1) {
-                        target = '/logo?domain=' + encodeURIComponent(loginHint.slice(at + 1).toLowerCase());
+                        params.push('domain=' + encodeURIComponent(loginHint.slice(at + 1).toLowerCase()));
                     }
                 }
+                // The dark-mode logo when this page shows dark (branding BT-27)
+                var theme = document.documentElement.getAttribute('data-theme');
+                if (theme === 'dark' || (theme !== 'light' && window.matchMedia &&
+                        window.matchMedia('(prefers-color-scheme: dark)').matches)) {
+                    params.push('theme=dark');
+                }
+                var target = '/logo' + (params.length ? '?' + params.join('&') : '');
                 // An image element, not fetch: it can follow /logo's redirect to
                 // a URL logo on another origin (branding BT-26)
                 var img = new Image();
