@@ -96,8 +96,7 @@ async fn insert_safe_defaults(bp: &mut Bootstrap) -> trc::Result<()> {
         return Ok(());
     }
 
-    let is_new_install =
-        bp.registry.count_object(ObjectType::Role).await? == 0 || first_boot_pending(bp).await?;
+    let is_new_install = is_new_install(bp).await?;
 
     // inbuxa: a store brought over from Stalwart doesn't serve upstream's web
     // interface (docs/spec/import-0.16.md), before the applications load
@@ -641,6 +640,12 @@ fn first_boot_key() -> ValueClass {
         subspace: SUBSPACE_INBUXA,
         key: b"Bd".to_vec(),
     })
+}
+
+/// inbuxa: K-S5: a store no start has set up yet: no roles, or a first boot
+/// that hasn't finished. The same test the defaults use.
+pub async fn is_new_install(bp: &Bootstrap) -> trc::Result<bool> {
+    Ok(bp.registry.count_object(ObjectType::Role).await? == 0 || first_boot_pending(bp).await?)
 }
 
 async fn first_boot_pending(bp: &Bootstrap) -> trc::Result<bool> {
