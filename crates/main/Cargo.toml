@@ -15,6 +15,7 @@ name = "inbuxa"
 path = "src/main.rs"
 
 [dependencies]
+serde_json = "1.0"
 store = { path = "../store" }
 coordinator = { path = "../coordinator" }
 jmap = { path = "../jmap" }

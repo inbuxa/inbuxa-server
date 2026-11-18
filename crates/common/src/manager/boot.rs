@@ -33,6 +33,9 @@ pub struct BootManager {
     /// inbuxa: K-S3: started with `--upgrade-store`: no listeners, no
     /// services; main upgrades the store's layout and exits
     pub upgrade_store: bool,
+    /// inbuxa: K-C9: started with `--upgrade-plan`: as `--upgrade-store`,
+    /// but main only reports what an upgrade would do, and exits
+    pub upgrade_plan: bool,
     /// inbuxa: K-S8: started with `--seed <PATH>`: like `--upgrade-store`,
     /// and then main applies the seed and exits
     pub seed: Option<PathBuf>,
@@ -63,6 +66,7 @@ Options:
   -o, --console                    Open the store console
   -u, --upgrade-store              Upgrade the store's layout, then exit
       --seed <PATH>                Set up a new store from a file, then exit
+      --upgrade-plan               Print what --upgrade-store would do, then exit
   -h, --help                       Print help
   -V, --version                    Print version
 
@@ -84,6 +88,12 @@ once as the system administrator, where {"$file": "<PATH>"} stands for that
 file's contents. It upgrades the store's layout first, as --upgrade-store
 does, and exits: 0 when the seed was applied (or was before, to this store),
 1 when it failed, 2 when it refused because the store was set up already.
+
+--upgrade-plan reads the store and changes nothing. It prints, as one line
+of JSON, the layout steps --upgrade-store would run, and exits: 0 when there
+are none, 3 when there are and every one can run with older nodes still up,
+4 when one needs every other node stopped first, 2 when a newer release has
+changed the store, 1 when it can't tell (the message says why).
 "#
 );
 
@@ -96,6 +106,8 @@ enum StoreOp {
     UpgradeStore,
     // inbuxa: K-S8
     Seed(PathBuf),
+    // inbuxa: K-C9
+    UpgradePlan,
     None,
 }
 
@@ -153,6 +165,9 @@ impl BootManager {
                 ("upgrade-store" | "u", None) => {
                     import_export = StoreOp::UpgradeStore;
                 }
+                ("upgrade-plan", None) => {
+                    import_export = StoreOp::UpgradePlan;
+                }
                 ("seed", Some(value)) => {
                     import_export = StoreOp::Seed(value.into());
                 }
@@ -182,7 +197,8 @@ impl BootManager {
             _ => None,
         };
         // inbuxa: K-S8: a seed run boots as --upgrade-store does
-        let one_shot = upgrade_store || seed.is_some();
+        let upgrade_plan = import_export == StoreOp::UpgradePlan;
+        let one_shot = upgrade_store || upgrade_plan || seed.is_some();
         let registry = RegistryStore::init(
             PathBuf::from(config_path.unwrap()),
             import_export == StoreOp::None || one_shot,
@@ -226,7 +242,7 @@ impl BootManager {
         let telemetry = Telemetry::parse(&mut bootstrap, &storage).await;
 
         match import_export {
-            StoreOp::None | StoreOp::UpgradeStore | StoreOp::Seed(_) => {
+            StoreOp::None | StoreOp::UpgradeStore | StoreOp::UpgradePlan | StoreOp::Seed(_) => {
                 // Parse components
                 let core: Box<Core> =
                     Box::new(Box::pin(Core::parse(&mut bootstrap, storage)).await);
@@ -242,6 +258,8 @@ impl BootManager {
                         Server(trc::ServerEvent::Startup),
                         Details = if upgrade_store {
                             "Started with --upgrade-store: upgrading the store layout, then exiting"
+                        } else if upgrade_plan {
+                            "Started with --upgrade-plan: reporting what an upgrade would do, then exiting"
                         } else {
                             "Started with --seed: setting up a new store from a file, then exiting"
                         },
@@ -335,6 +353,7 @@ impl BootManager {
                     servers,
                     ipc_rxs,
                     upgrade_store,
+                    upgrade_plan,
                     seed,
                     store_was_new,
                 }

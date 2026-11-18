@@ -68,6 +68,12 @@ async fn main() -> std::io::Result<()> {
         std::process::exit(Box::pin(upgrade_store_and_exit(&server)).await);
     }
 
+    // inbuxa: K-C9: --upgrade-plan reports what an upgrade would do
+    if init.upgrade_plan {
+        let server = init.inner.build_server();
+        std::process::exit(Box::pin(upgrade_plan_and_exit(&server)).await);
+    }
+
     // inbuxa: K-S8: --seed sets up a new store from a file and exits
     if let Some(path) = init.seed.clone() {
         let server = init.inner.build_server();
@@ -257,6 +263,62 @@ async fn seed_and_exit(
         }
     };
     eprintln!("{message}");
+    flush_and_exit_code(code).await
+}
+
+/// inbuxa: K-C9: `--upgrade-plan`: one line of JSON on stdout, for a
+/// script to read, and the exit code a shell can branch on
+async fn upgrade_plan_and_exit(server: &common::Server) -> i32 {
+    use migration::UpgradePlan;
+
+    let target = common::INBUXA_STORE_VERSION;
+    let (code, plan) = match migration::upgrade_plan(server).await {
+        Ok(UpgradePlan::NewStore) => (
+            0,
+            serde_json::json!({"store": null, "target": target, "newStore": true, "steps": [], "stopAllNodes": false}),
+        ),
+        Ok(UpgradePlan::Steps { from, steps }) => {
+            let stop = steps.iter().any(|step| !step.rolling_safe);
+            let code = match (steps.is_empty(), stop) {
+                (true, _) => 0,
+                (false, false) => 3,
+                (false, true) => 4,
+            };
+            let steps = steps
+                .iter()
+                .map(|step| {
+                    serde_json::json!({
+                        "from": step.from,
+                        "to": step.from + 1,
+                        "rollingSafe": step.rolling_safe,
+                        "what": step.what,
+                    })
+                })
+                .collect::<Vec<_>>();
+            (
+                code,
+                serde_json::json!({"store": from, "target": target, "newStore": false, "steps": steps, "stopAllNodes": stop}),
+            )
+        }
+        Ok(UpgradePlan::Newer(version)) => {
+            eprintln!(
+                "A newer release changed this store (layout version {version}; this release reads up to {target})."
+            );
+            (
+                2,
+                serde_json::json!({"store": version, "target": target, "newer": true}),
+            )
+        }
+        Ok(UpgradePlan::NeedsMigration(reason)) => {
+            eprintln!("Can't plan an upgrade: {reason}.");
+            return flush_and_exit_code(1).await;
+        }
+        Err(err) => {
+            eprintln!("Can't plan an upgrade: {err}");
+            return flush_and_exit_code(1).await;
+        }
+    };
+    println!("{plan}");
     flush_and_exit_code(code).await
 }
 
