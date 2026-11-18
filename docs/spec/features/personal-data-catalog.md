@@ -463,7 +463,7 @@ Response `list[0]`:
     {
       "id": "x:Trace",
       "kind": "object",
-      "categories": ["network", "identifier", "metadata"],
+      "categories": ["network", "identifier", "metadata", "content"],
       "collected": true,
       "retention": { "days": 30, "setting": "x:DataRetention.holdTracesFor" },
       "leavesHost": false,

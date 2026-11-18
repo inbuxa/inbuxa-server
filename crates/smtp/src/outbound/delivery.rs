@@ -57,6 +57,20 @@ impl QueuedMessage {
                     message.span_id = server.inner.data.span_id_gen.generate();
                     let span_id = message.span_id;
 
+                    // inbuxa: the subject for delivery history (#228), read
+                    // only when history is kept; a fresh message comes from
+                    // this node's blob cache, and delivery reads it anyway
+                    let subject = if !server.tracing_store().is_none() {
+                        server
+                            .get_message_blob(message.message.blob_hash.as_slice(), 0..usize::MAX)
+                            .await
+                            .ok()
+                            .flatten()
+                            .and_then(|blob| crate::queue::message_subject(&blob))
+                    } else {
+                        None
+                    };
+
                     trc::event!(
                         Delivery(DeliveryEvent::AttemptStart),
                         SpanId = message.span_id,
@@ -86,6 +100,15 @@ impl QueuedMessage {
                         Size = message.message.size,
                         Total = message.message.recipients.len(),
                     );
+                    // inbuxa: inbuxa-admin #228
+                    if let Some(subject) = subject {
+                        trc::event!(
+                            Queue(trc::QueueEvent::MessageSubject),
+                            SpanId = span_id,
+                            QueueId = message.queue_id,
+                            Subject = subject,
+                        );
+                    }
 
                     // Attempt delivery
                     let start_time = Instant::now();

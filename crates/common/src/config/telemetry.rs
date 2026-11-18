@@ -516,7 +516,9 @@ impl Tracers {
                         && (Level::Info.is_contained(event_level)
                             || event_type.is_span_start()
                             || event_type.is_span_end()
-                            || event_type.as_str().starts_with("smtp.mail-from"))
+                            || event_type.as_str().starts_with("smtp.mail-from")
+                            // inbuxa-admin #228: debug, so it reaches no info log
+                            || *event_type == EventType::Queue(trc::QueueEvent::MessageSubject))
                     {
                         interests.set(event_type.to_id() as usize);
                         global_interests.set(event_type.to_id() as usize);

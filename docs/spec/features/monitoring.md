@@ -77,7 +77,7 @@ Clean-up of expired history runs on the existing `dataCleanupSchedule`.
 `timestamp`, and `keyValues`: a list of `key` (a `Key`) and `value` (a
 `TraceValue`: `String`, `UnsignedInt`, `Integer`, `Boolean`, `Float`,
 `UTCDateTime`, `Duration`, `IpAddr`, `List`, `Event`, `Null`). Server-set:
-`timestamp`, `from`, `to` (a string), `size`. Views: `x:Trace/InboundDelivery`
+`timestamp`, `from`, `to` (a string), `subject` (MON-42), `size`. Views: `x:Trace/InboundDelivery`
 and `x:Trace/OutboundDelivery`.
 
 ### The metric sample, `x:Metric` (read-only)
@@ -240,6 +240,18 @@ unchanged.
   with its points, highest first (X-Spam-Result lists them lowest first). When one rule rejects or
   discards a message by itself, `Details` names only that rule. An inbound
   session's trace therefore shows why its message scored the way it did.
+- **MON-42.** (inbuxa-admin #228) A trace's `subject` is the first `subject`
+  value in its events, or null. While a tracing store is set, the server
+  raises `queue.message-subject` (debug level, id 663) with the message's
+  `Subject` header, cut to 255 characters: in the SMTP session when it
+  queues a message, and in the delivery attempt right after
+  `delivery.attempt-start`, read from the message's blob (a fresh message
+  comes from the node's blob cache). The trace history keeps this one debug
+  event, so an info-level log or OpenTelemetry tracer never holds subjects;
+  a tracer set to debug does. With no tracing store nothing is read or
+  raised. Both list views show it between To and Size. It isn't in the
+  `text` search keywords. Like every other trace field it is kept for
+  `holdTracesFor`, and only the superuser set can read it.
 
 ### Retention and growth
 
@@ -567,7 +579,7 @@ they cover tests 10 and 12 (`tracing.rs`), 13 (`metrics.rs`) and 18
 (`alerts.rs`). Tests 1, 3, 5 to 9, 11, 14 to 17, 19 to 21, 23 and 24 pass as
 `tests/src/system/monitoring.rs`.
 
-- **MON-1 to MON-41:** built, with the limits below.
+- **MON-1 to MON-42:** built, with the limits below.
 - **Test 26 (compat)** is written as `monitoring_compat`, ignored, and unrun
   until a copy of INBUXA's data is provided. It checks observed 1, reads the
   old history without an error, and purges it. It deletes history, so only

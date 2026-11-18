@@ -167,6 +167,11 @@ pub async fn test(test: &mut TestServer) {
             .is_some_and(|to| to.contains("mon@example.org"))),
         "test 9: to"
     );
+    // #228: the session and the delivery attempt both name the subject
+    assert!(
+        traces.iter().all(|t| t["subject"] == "Traced"),
+        "test 9: subject, {traces:?}"
+    );
 
     // #397: the session came from outside and the attempt only filed the
     // message here, so each list's default leaves out the other kind
