@@ -1331,11 +1331,9 @@ fn parse_dkim2_dsn<'x, 'r>(
     // field, and a text/rfc822-headers part isn't covered by the parser's
     // limits, so one with too many fields isn't looked at
     if !returned.is_empty() && raw_header_fields(returned) <= MAX_PART_HEADER_FIELDS {
-        Some(Dkim2Dsn::new(
-            raw,
-            AuthenticatedMessage::parse(returned)?,
-            returned_full,
-        ))
+        let mut returned = AuthenticatedMessage::parse(returned)?;
+        limit_signature_work(&mut returned);
+        Some(Dkim2Dsn::new(raw, returned, returned_full))
     } else {
         None
     }
@@ -1398,10 +1396,20 @@ pub const MAX_DKIM_SIGNATURES: usize = 10;
 pub const MAX_SIGNED_HEADERS: usize = 128;
 pub const MAX_SIGNED_MESSAGE_HEADERS: usize = 1_000;
 
+// inbuxa: the most values (selector and signature pairs) in one DKIM2
+// signature's s= list, the most ARC sets or DKIM2 signatures and message
+// instances in a chain (mail-auth allows 50), and the longest ARC or DKIM2
+// header field. Each s= value is a key lookup and a check over all the
+// chain's earlier fields, the list itself included, so the work grew with
+// the square of the list: 32,000 values (3.4 MB) took 9 seconds.
+pub const MAX_DKIM2_SIGNATURE_VALUES: usize = 4;
+pub const MAX_SIGNATURE_CHAIN: usize = 20;
+pub const MAX_SIGNATURE_HEADER_BYTES: usize = 64 * 1024;
+
 // inbuxa: leaves out the DKIM signatures past the limits above, which are
 // then not checked at all (RFC 6376, Section 6.1, lets a verifier limit the
-// signatures it checks), and marks an ARC chain with a set past them as
-// broken.
+// signatures it checks), leaves out a DKIM2 chain past them (the message
+// then has no DKIM2 result), and marks an ARC chain past them as broken.
 pub fn limit_signature_work(message: &mut AuthenticatedMessage<'_>) {
     if message.headers.len() > MAX_SIGNED_MESSAGE_HEADERS {
         message.dkim_headers.clear();
@@ -1412,12 +1420,35 @@ pub fn limit_signature_work(message: &mut AuthenticatedMessage<'_>) {
             .retain(|header| header.header.h.len() <= MAX_SIGNED_HEADERS);
     }
 
+    if message.dkim2_signatures.len() > MAX_SIGNATURE_CHAIN
+        || message.dkim2_instances.len() > MAX_SIGNATURE_CHAIN
+        || message.dkim2_signatures.iter().any(|header| {
+            header.header.s.len() > MAX_DKIM2_SIGNATURE_VALUES
+                || header.value.len() > MAX_SIGNATURE_HEADER_BYTES
+        })
+        || message
+            .dkim2_instances
+            .iter()
+            .any(|header| header.value.len() > MAX_SIGNATURE_HEADER_BYTES)
+    {
+        message.dkim2_signatures.clear();
+        message.dkim2_instances.clear();
+    }
+
     if !message.ams_headers.is_empty()
         && (message.headers.len() > MAX_SIGNED_MESSAGE_HEADERS
+            || message.ams_headers.len() > MAX_SIGNATURE_CHAIN
             || message
                 .ams_headers
                 .iter()
-                .any(|header| header.header.h.len() > MAX_SIGNED_HEADERS))
+                .any(|header| header.header.h.len() > MAX_SIGNED_HEADERS)
+            || message
+                .ams_headers
+                .iter()
+                .map(|header| header.value)
+                .chain(message.as_headers.iter().map(|header| header.value))
+                .chain(message.aar_headers.iter().map(|header| header.value))
+                .any(|value| value.len() > MAX_SIGNATURE_HEADER_BYTES))
     {
         message.has_arc_errors = true;
         message.errors.push(Header {
@@ -1609,5 +1640,81 @@ mod tests {
                 "{n} fields"
             );
         }
+    }
+
+    // inbuxa: a DKIM2 chain with a signature of more than four s= values,
+    // more than MAX_SIGNATURE_CHAIN links or a field over
+    // MAX_SIGNATURE_HEADER_BYTES is left out, and an ARC chain past those
+    // limits is marked broken
+    #[test]
+    fn signature_chain_limits() {
+        use super::{MAX_DKIM2_SIGNATURE_VALUES, MAX_SIGNATURE_CHAIN};
+        use mail_auth::{
+            common::crypto::Ed25519Key,
+            dkim2::{Dkim2Signer, Hop},
+        };
+
+        let pkcs8 = Ed25519Key::generate_pkcs8().unwrap();
+        let key = || Ed25519Key::from_pkcs8_maybe_unchecked_der(&pkcs8).unwrap();
+        let base = "From: a@example.org\r\nSubject: test\r\n\r\ntest\r\n".to_string();
+        let sign = |message: &str, values: usize, rcpts: usize| {
+            let mut signer = Dkim2Signer::from_key(key())
+                .domain("example.org")
+                .selector("s");
+            for _ in 1..values {
+                signer = signer.additional_key(key(), "s");
+            }
+            let rcpt_to = (0..rcpts)
+                .map(|i| format!("r{i}@example.net"))
+                .collect::<Vec<_>>();
+            let signed = signer
+                .sign(message.as_bytes(), Hop::real("a@example.org", rcpt_to))
+                .unwrap();
+            format!("{}{message}", signed.to_header())
+        };
+        let kept = |raw: &str| {
+            let mut message = AuthenticatedMessage::parse(raw.as_bytes()).unwrap();
+            assert!(!message.dkim2_signatures.is_empty());
+            limit_signature_work(&mut message);
+            !message.dkim2_signatures.is_empty()
+        };
+
+        assert!(kept(&sign(&base, MAX_DKIM2_SIGNATURE_VALUES, 1)));
+        assert!(!kept(&sign(&base, MAX_DKIM2_SIGNATURE_VALUES + 1, 1)));
+        assert!(kept(&sign(&base, 1, 1_000)));
+        assert!(!kept(&sign(&base, 1, 3_000)));
+        let mut chain = base.clone();
+        for _ in 0..MAX_SIGNATURE_CHAIN {
+            chain = sign(&chain, 1, 1);
+        }
+        assert!(kept(&chain));
+        assert!(!kept(&sign(&chain, 1, 1)));
+
+        let arc = |sets: usize, results: usize| {
+            let mut raw = String::new();
+            for i in (1..=sets).rev() {
+                raw.push_str(&format!(
+                    concat!(
+                        "ARC-Seal: i={i}; a=rsa-sha256; cv={cv}; d=example.org; s=s; t=1; b=AAAA\r\n",
+                        "ARC-Message-Signature: i={i}; a=rsa-sha256; c=relaxed/relaxed; ",
+                        "d=example.org; s=s; t=1; h=from; bh=AAAA; b=AAAA\r\n",
+                        "ARC-Authentication-Results: i={i}; example.org; spf=pass{pad}\r\n"
+                    ),
+                    i = i,
+                    cv = if i == 1 { "none" } else { "pass" },
+                    pad = " ".repeat(results),
+                ));
+            }
+            raw.push_str("From: a@example.org\r\nSubject: test\r\n\r\ntest\r\n");
+            let mut message = AuthenticatedMessage::parse(raw.as_bytes()).unwrap();
+            assert_eq!(message.ams_headers.len(), sets);
+            assert!(!message.has_arc_errors);
+            limit_signature_work(&mut message);
+            message.has_arc_errors
+        };
+        assert!(!arc(MAX_SIGNATURE_CHAIN, 0));
+        assert!(arc(MAX_SIGNATURE_CHAIN + 1, 0));
+        assert!(!arc(1, 1_000));
+        assert!(arc(1, 70_000));
     }
 }
