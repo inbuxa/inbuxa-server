@@ -283,11 +283,11 @@ pub async fn build_email_push_object(
                     EmailPushProperty::Attachments => &contents.attachments,
                     _ => unreachable!(),
                 };
-                parts
-                    .iter()
+                contents
+                    .listed_part_ids(parts)
                     .map(|part_id| {
                         contents.to_body_part(
-                            u16::from(part_id) as u32,
+                            part_id,
                             BODY_PROPERTIES,
                             &raw_message,
                             &blob_id,

@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use common::Server;
@@ -23,6 +25,16 @@ pub trait SpamFilterInit {
 }
 
 const POSTMASTER_ADDRESSES: [&str; 3] = ["postmaster", "mailer-daemon", "root"];
+
+// inbuxa: the most tokens taken from one part (the Subject counts as one)
+// and from the whole message, and the most HTML parsed per message. A token
+// takes over 200 bytes and a punctuation mark is a token of its own, so
+// tokenizing a large message in full needed gigabytes. Past these limits the
+// rest of the text isn't tokenized; it is still there for the rules that
+// read the text itself.
+pub const MAX_TOKENS_PER_PART: usize = 25_000;
+pub const MAX_TOKENS_PER_MESSAGE: usize = 100_000;
+pub const MAX_HTML_BYTES_PER_MESSAGE: usize = 1024 * 1024;
 
 impl SpamFilterInit for Server {
     fn spam_filter_init<'x>(&self, mut input: SpamFilterInput<'x>) -> SpamFilterContext<'x> {
@@ -115,6 +127,8 @@ impl SpamFilterInit for Server {
         }
 
         // Tokenize subject
+        let mut token_budget = MAX_TOKENS_PER_MESSAGE;
+        let mut html_budget = MAX_HTML_BYTES_PER_MESSAGE;
         let subject_tokens = TypesTokenizer::new(subject)
             .tokenize_numbers(false)
             .tokenize_urls(true)
@@ -134,7 +148,9 @@ impl SpamFilterInit for Server {
                 TokenType::Email(e) => TokenType::Email(Email::new(e)),
                 TokenType::Float(s) => TokenType::Float(s.into()),
             })
+            .take(MAX_TOKENS_PER_PART.min(token_budget))
             .collect::<Vec<_>>();
+        token_budget -= subject_tokens.len();
 
         // Tokenize and convert text parts
         let mut text_parts = Vec::new();
@@ -169,9 +185,12 @@ impl SpamFilterInit for Server {
                                 TokenType::Email(e) => TokenType::Email(Email::new(e)),
                                 TokenType::Float(s) => TokenType::Float(s.into()),
                             })
+                            .take(MAX_TOKENS_PER_PART.min(token_budget))
                             .collect::<Vec<_>>(),
                     },
                     PartType::Html(html) => {
+                        let html = &html[..html.floor_char_boundary(html_budget)];
+                        html_budget -= html.len();
                         let html_tokens = html_to_tokens(html);
                         let text_body_len = html_tokens
                             .iter()
@@ -235,6 +254,7 @@ impl SpamFilterInit for Server {
                                     TokenType::Email(e) => TokenType::Email(Email::new(e)),
                                     TokenType::Float(s) => TokenType::Float(s.to_string().into()),
                                 })
+                                .take(MAX_TOKENS_PER_PART.min(token_budget))
                                 .collect::<Vec<_>>(),
                             html_tokens,
                             text_body,
@@ -247,6 +267,10 @@ impl SpamFilterInit for Server {
                     }
                     _ => TextPart::None,
                 };
+
+                if let TextPart::Plain { tokens, .. } | TextPart::Html { tokens, .. } = &text_part {
+                    token_budget -= tokens.len();
+                }
 
                 if is_main_message {
                     text_parts.push(text_part);

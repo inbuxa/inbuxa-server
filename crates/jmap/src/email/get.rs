@@ -389,20 +389,21 @@ impl EmailGet for Server {
                                 EmailProperty::HtmlBody => &contents.html_body,
                                 EmailProperty::Attachments => &contents.attachments,
                                 _ => unreachable!(),
-                            }
-                            .iter();
+                            };
                             email.insert_unchecked(
                                 property.clone(),
-                                list.map(|part_id| {
-                                    contents.to_body_part(
-                                        u16::from(part_id) as u32,
-                                        &body_properties,
-                                        &raw_message,
-                                        &blob_id,
-                                        blob_body_offset,
-                                    )
-                                })
-                                .collect::<Vec<_>>(),
+                                contents
+                                    .listed_part_ids(list)
+                                    .map(|part_id| {
+                                        contents.to_body_part(
+                                            part_id,
+                                            &body_properties,
+                                            &raw_message,
+                                            &blob_id,
+                                            blob_body_offset,
+                                        )
+                                    })
+                                    .collect::<Vec<_>>(),
                             );
                         }
                         EmailProperty::BodyStructure => {

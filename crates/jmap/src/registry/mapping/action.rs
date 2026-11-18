@@ -312,7 +312,8 @@ async fn classify_spam(server: &Server, mut request: SpamClassify) -> Option<Spa
             .await
     };
 
-    let auth_message = AuthenticatedMessage::from_parsed(&message, raw_message, true);
+    let mut auth_message = AuthenticatedMessage::from_parsed(&message, raw_message, true);
+    smtp::inbound::data::limit_signature_work(&mut auth_message);
 
     let dkim_output = server
         .core
@@ -500,7 +501,8 @@ async fn dmarc_troubleshoot(
         .message
         .take()
         .unwrap_or_else(|| format!("From: {mail_from}\r\nSubject: test\r\n\r\ntest"));
-    let auth_message = AuthenticatedMessage::parse_with_opts(body.as_bytes(), None, true)?;
+    let mut auth_message = AuthenticatedMessage::parse_with_opts(body.as_bytes(), None, true)?;
+    smtp::inbound::data::limit_signature_work(&mut auth_message);
 
     let dkim_output = server
         .core
