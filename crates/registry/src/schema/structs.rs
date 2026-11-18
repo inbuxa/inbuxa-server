@@ -6164,6 +6164,9 @@ pub struct TracerLog {
     pub events: Map<trc::EventType>,
     #[serde(rename = "eventsPolicy")]
     pub events_policy: EventPolicy,
+    // inbuxa: #456
+    #[serde(rename = "format")]
+    pub format: LogFormat,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{Error, Event, EventDetails, EventType, Key, MetricType, Value};
@@ -117,6 +119,47 @@ impl<T: AsRef<Event<EventDetails>>> Serialize for JsonEventSerializer<T> {
                 with_spans: self.with_spans,
                 with_description: self.with_description,
                 with_id: self.with_id,
+            },
+        )?;
+        map.end()
+    }
+}
+
+/// inbuxa (#456): one entry of a Log tracer writing JSON lines:
+/// `{"timestamp", "level", "event", "description", "data"}`, where `data`
+/// holds the event's keys (and its span's) as typed values: nested events as
+/// objects, lists as arrays.
+pub struct JsonLogLine<'x>(pub &'x Event<EventDetails>);
+
+impl Serialize for JsonLogLine<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let event = self.0;
+        let mut map = serializer.serialize_map(Some(5))?;
+        map.serialize_entry(
+            "timestamp",
+            &DateTime::from_timestamp(event.inner.timestamp as i64).to_rfc3339(),
+        )?;
+        map.serialize_entry("level", &event.inner.level.as_str().to_ascii_lowercase())?;
+        map.serialize_entry("event", event.inner.typ.as_str())?;
+        map.serialize_entry("description", event.inner.typ.description())?;
+        map.serialize_entry(
+            "data",
+            &JsonEventSerializer {
+                inner: Keys {
+                    keys: event.keys.as_slice(),
+                    span_keys: event
+                        .inner
+                        .span
+                        .as_ref()
+                        .map(|s| &s.keys[..])
+                        .unwrap_or(&[]),
+                },
+                with_spans: false,
+                with_description: false,
+                with_id: false,
             },
         )?;
         map.end()

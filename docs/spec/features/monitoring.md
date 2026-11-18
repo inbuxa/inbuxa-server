@@ -252,6 +252,17 @@ unchanged.
   raised. Both list views show it between To and Size. It isn't in the
   `text` search keywords. Like every other trace field it is kept for
   `holdTracesFor`, and only the superuser set can read it.
+- **MON-43.** (#456) A Log tracer has a `format`: `text` (the default, as
+  upstream) or `json`, one object per line:
+  `{"timestamp", "level", "event", "description", "data"}`, where `timestamp`
+  is RFC 3339, `level` is lowercase, and `data` holds the event's keys and its
+  span's as typed values (nested events as objects, lists as arrays). `ansi`
+  and `multiline` apply to text only. Stored at `x:Tracer` and `x:Bootstrap`
+  version 3; a tracer saved before reads back as `text`. `x:Log/get` and
+  `x:Log/query`, with every filter, read both formats, a mix of them too (a
+  tracer switched over keeps its older text lines). A JSON entry's `details`
+  is its `data` as a JSON object, `""` when it has none; a text entry's stays
+  the `key = value` text.
 
 ### Retention and growth
 
@@ -579,7 +590,7 @@ they cover tests 10 and 12 (`tracing.rs`), 13 (`metrics.rs`) and 18
 (`alerts.rs`). Tests 1, 3, 5 to 9, 11, 14 to 17, 19 to 21, 23 and 24 pass as
 `tests/src/system/monitoring.rs`.
 
-- **MON-1 to MON-42:** built, with the limits below.
+- **MON-1 to MON-43:** built, with the limits below.
 - **Test 26 (compat)** is written as `monitoring_compat`, ignored, and unrun
   until a copy of INBUXA's data is provided. It checks observed 1, reads the
   old history without an error, and purges it. It deletes history, so only

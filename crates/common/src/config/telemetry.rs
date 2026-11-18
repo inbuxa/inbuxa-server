@@ -17,7 +17,7 @@ use opentelemetry_otlp::{
 use opentelemetry_sdk::{Resource, metrics::Temporality};
 use opentelemetry_semantic_conventions::resource::SERVICE_VERSION;
 use registry::schema::{
-    enums::{EventPolicy, LogRotateFrequency},
+    enums::{EventPolicy, LogFormat, LogRotateFrequency},
     prelude::ObjectType,
     structs::{self, EventTracingLevel, MetricsPrometheus, Tracer, WebHook},
 };
@@ -87,6 +87,8 @@ pub struct LogTracer {
     pub rotate: RotationStrategy,
     pub ansi: bool,
     pub multiline: bool,
+    // inbuxa: #456, one JSON object per line instead of text
+    pub json: bool,
 }
 
 #[derive(Debug)]
@@ -196,6 +198,7 @@ impl Tracers {
                             },
                             ansi: tracer.ansi,
                             multiline: tracer.multiline,
+                            json: tracer.format == LogFormat::Json,
                         })
                     }
                     Tracer::Stdout(tracer) if tracer.enable => {

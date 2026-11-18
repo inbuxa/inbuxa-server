@@ -5522,6 +5522,57 @@ impl<'de> serde::Deserialize<'de> for Locale {
     }
 }
 
+// inbuxa: #456
+impl EnumImpl for LogFormat {
+    fn parse(value: &str) -> Option<Self> {
+        hashify::tiny_map! {
+            value.as_bytes(),
+            b"text" => LogFormat::Text,
+            b"json" => LogFormat::Json,
+        }
+    }
+
+    fn as_str(&self) -> &'static str {
+        match self {
+            LogFormat::Text => "text",
+            LogFormat::Json => "json",
+        }
+    }
+
+    fn to_id(&self) -> u16 {
+        *self as u16
+    }
+
+    fn from_id(id: u16) -> Option<Self> {
+        match id {
+            0 => Some(LogFormat::Text),
+            1 => Some(LogFormat::Json),
+            _ => None,
+        }
+    }
+
+    const COUNT: usize = 2;
+}
+
+impl serde::Serialize for LogFormat {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for LogFormat {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = Cow::<str>::deserialize(deserializer)?;
+        Self::parse(&s).ok_or_else(|| serde::de::Error::unknown_variant(&s, &[]))
+    }
+}
+
 impl EnumImpl for LogRotateFrequency {
     fn parse(value: &str) -> Option<Self> {
         hashify::tiny_map! {

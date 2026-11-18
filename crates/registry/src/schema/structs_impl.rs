@@ -4070,8 +4070,8 @@ impl RegistryJsonPropertyPatch for BlockedIp {
 impl ObjectImpl for Bootstrap {
     const FLAGS: u64 = OBJ_SINGLETON;
     // inbuxa: 2, as x:Directory: OidcDirectory gained fields at version 2
-    // of both
-    const VERSION: u8 = 2;
+    // of both. 3, as x:Tracer: a Log tracer's format (#456)
+    const VERSION: u8 = 3;
     const OBJECT: ObjectType = ObjectType::Bootstrap;
 
     fn validate(&self, errors: &mut Vec<ValidationError>) -> bool {
@@ -46428,7 +46428,9 @@ impl RegistryJsonPropertyPatch for TraceValueUnsignedInt {
 
 impl ObjectImpl for Tracer {
     const FLAGS: u64 = 0;
-    const VERSION: u8 = 0;
+    // inbuxa: 3, as x:Bootstrap, which holds a tracer too: a Log tracer's
+    // format (#456) is stored from version 3 of both
+    const VERSION: u8 = 3;
     const OBJECT: ObjectType = ObjectType::Tracer;
 
     fn validate(&self, errors: &mut Vec<ValidationError>) -> bool {
@@ -46665,6 +46667,7 @@ impl Pickle for TracerLog {
         self.lossy.pickle(out);
         self.events.pickle(out);
         self.events_policy.pickle(out);
+        self.format.pickle(out);
     }
 
     fn unpickle(stream: &mut crate::pickle::PickledStream<'_>) -> Option<Self> {
@@ -46679,6 +46682,10 @@ impl Pickle for TracerLog {
         this.lossy = Pickle::unpickle(stream)?;
         this.events = Pickle::unpickle(stream)?;
         this.events_policy = Pickle::unpickle(stream)?;
+        // inbuxa: #456, stored from version 3 of x:Tracer and x:Bootstrap
+        if stream.version() >= 3 {
+            this.format = Pickle::unpickle(stream)?;
+        }
         Some(this)
     }
 }
@@ -46696,13 +46703,14 @@ impl Default for TracerLog {
             lossy: false,
             events: Default::default(),
             events_policy: EventPolicy::Exclude,
+            format: LogFormat::Text,
         }
     }
 }
 
 impl IntoValue for TracerLog {
     fn into_value(self) -> JmapValue<'static> {
-        let mut map = jmap_tools::Map::with_capacity(12);
+        let mut map = jmap_tools::Map::with_capacity(13);
         map.insert_unchecked(Property::Path, self.path.into_value());
         map.insert_unchecked(Property::Prefix, self.prefix.into_value());
         map.insert_unchecked(Property::Rotate, self.rotate.into_value());
@@ -46713,6 +46721,7 @@ impl IntoValue for TracerLog {
         map.insert_unchecked(Property::Lossy, self.lossy.into_value());
         map.insert_unchecked(Property::Events, self.events.into_value());
         map.insert_unchecked(Property::EventsPolicy, self.events_policy.into_value());
+        map.insert_unchecked(Property::Format, self.format.into_value());
         JmapValue::Object(map)
     }
 }
@@ -46738,6 +46747,7 @@ impl RegistryJsonPropertyPatch for TracerLog {
             Some(Property::Lossy) => self.lossy.patch(pointer, value),
             Some(Property::Events) => self.events.patch(pointer, value),
             Some(Property::EventsPolicy) => self.events_policy.patch(pointer, value),
+            Some(Property::Format) => self.format.patch(pointer, value),
             Some(Property::Type) => Ok(MaybeUnpatched::Unpatched {
                 property: Property::Type,
                 value,
