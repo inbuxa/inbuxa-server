@@ -19,7 +19,11 @@ use registry::{
     schema::{enums::ClusterNodeStatus, structs::ClusterNode},
     types::datetime::UTCDateTime,
 };
-use std::{sync::atomic::Ordering, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    sync::atomic::Ordering,
+    time::Duration,
+};
 use trc::{AddContext, ClusterEvent};
 use utils::snowflake::{MAX_NODE_ID, SnowflakeIdGenerator};
 
@@ -34,6 +38,9 @@ const DEAD_NODE_TIMEOUT: u64 = 60 * 60 * 24; // 24 hours
 const HEARTBEAT_INTERVAL: u64 = 60; // 1 minute
 const UNRESPONSIVE_NODE_TIMEOUT: u64 = 3 * HEARTBEAT_INTERVAL;
 const MAX_LEASE_RETRIES: u32 = 5;
+// INBUXA: #458, see `release_renamed_lease`.
+const RENAMED_LEASE_GRACE: u64 = 2 * HEARTBEAT_INTERVAL;
+const HOSTNAME_MARKER: &str = "node-hostname";
 
 struct NodeSlot {
     node_id: u16,
@@ -52,6 +59,7 @@ impl RegistryStoreInner {
     pub(super) async fn acquire_node_id(&mut self) -> Result<(), String> {
         let (node_id, slots) = NodeSlot::acquire(&self.store, &self.env_hostname).await?;
         self.node_id.store(node_id, Ordering::Relaxed);
+        self.remember_hostname().await;
 
         if let Err(err) = NodeSlot::release(
             &self.store,
@@ -65,6 +73,38 @@ impl RegistryStoreInner {
         }
 
         Ok(())
+    }
+
+    // INBUXA: #458. The lease is keyed by hostname, so renaming a server
+    // (the installer sets the container's hostname to the mail host) left the
+    // old name's lease behind, reported as a node not responding until it went
+    // inactive a day later. Each node keeps the name it last leased under in a
+    // file next to its local config. When that name changes, the old name's
+    // lease is this node's own and is released once it stops renewing; see
+    // `release_renamed_lease`. The file is best effort: a read-only config
+    // directory only means a rename falls back to the 24-hour expiry.
+    async fn remember_hostname(&mut self) {
+        let path = hostname_marker(&self.local_path);
+        if let Ok(previous) = tokio::fs::read_to_string(&path).await {
+            let previous = previous.trim();
+            if !previous.is_empty() && previous != self.env_hostname {
+                self.renamed_from = Some((previous.to_string(), now()));
+            }
+        }
+        if self.renamed_from.is_some() || !path.exists() {
+            let _ = tokio::fs::write(&path, &self.env_hostname).await;
+        }
+    }
+}
+
+// INBUXA: #458, the file a node records its leased hostname in.
+// It sits beside the local config file, or inside the directory when the
+// path is one (as in the test harness).
+fn hostname_marker(local_path: &Path) -> PathBuf {
+    if local_path.is_dir() {
+        local_path.join(HOSTNAME_MARKER)
+    } else {
+        local_path.with_file_name(HOSTNAME_MARKER)
     }
 }
 
@@ -85,12 +125,10 @@ impl RegistryStore {
 
     pub async fn refresh_node_id_lease(&self) -> trc::Result<()> {
         let node_id = self.node_id();
-        let assert = match NodeSlot::list(&self.0.store, now())
+        let slots = NodeSlot::list(&self.0.store, now())
             .await
-            .caused_by(trc::location!())?
-            .into_iter()
-            .find(|slot| slot.node_id == node_id)
-        {
+            .caused_by(trc::location!())?;
+        let assert = match slots.iter().find(|slot| slot.node_id == node_id) {
             Some(slot) if slot.is_owned_by(&self.0.env_hostname) => AssertValue::Hash(slot.hash),
             Some(slot) => {
                 // INBUXA: another host took this id after the hour of silence,
@@ -112,7 +150,7 @@ impl RegistryStore {
                 trc::event!(
                     Cluster(ClusterEvent::NodeIdReassigned),
                     Id = new_node_id,
-                    Hostname = slot.hostname,
+                    Hostname = slot.hostname.clone(),
                     Details = format!("Node id {node_id} lease is held by another host"),
                 );
 
@@ -134,8 +172,30 @@ impl RegistryStore {
             .store
             .write(batch.build_all())
             .await
-            .caused_by(trc::location!())
-            .map(|_| ())
+            .caused_by(trc::location!())?;
+
+        self.release_renamed_lease(&slots).await
+    }
+
+    // INBUXA: #458. Drops the lease this node held under its previous
+    // hostname once that lease has missed two renewals, before the dashboard
+    // would report it as a node not responding. Only a lease last renewed
+    // before this node started counts: the old name stops renewing when the
+    // server is restarted under the new one. A host still running under that
+    // name (two nodes sharing a config directory, say) renews after that, so
+    // its lease is left to the usual expiry and still shows up when it stops.
+    async fn release_renamed_lease(&self, slots: &[NodeSlot]) -> trc::Result<()> {
+        let Some((previous, started)) = self.0.renamed_from.as_ref() else {
+            return Ok(());
+        };
+        NodeSlot::release(
+            &self.0.store,
+            slots
+                .iter()
+                .filter(|slot| slot.is_renamed_from(previous, &self.0.env_hostname, *started)),
+        )
+        .await
+        .caused_by(trc::location!())
     }
 
     pub async fn purge_dead_nodes(&self) -> trc::Result<()> {
@@ -315,6 +375,15 @@ impl NodeSlot {
         self.hostname == hostname
     }
 
+    // INBUXA: #458, a lease left under this node's previous hostname: last
+    // renewed before this node started, and two renewals missed since.
+    fn is_renamed_from(&self, previous: &str, current: &str, started: u64) -> bool {
+        previous != current
+            && self.is_owned_by(previous)
+            && self.last_renewal <= started
+            && self.elapsed > RENAMED_LEASE_GRACE
+    }
+
     fn is_stale(&self) -> bool {
         self.elapsed > STALE_NODE_TIMEOUT
     }
@@ -385,6 +454,40 @@ mod tests {
         );
     }
 
+    fn renewed(hostname: &str, last_renewal: u64, now: u64) -> NodeSlot {
+        NodeSlot {
+            node_id: 1,
+            hostname: hostname.into(),
+            last_renewal,
+            elapsed: now - last_renewal,
+            hash: 0,
+        }
+    }
+
+    #[test]
+    fn a_renamed_node_drops_its_old_lease() {
+        // mail.old.example renewed at 1000, the server came back as
+        // mail.new.example at 1010.
+        let (old, new, started) = ("mail.old.example", "mail.new.example", 1010);
+        // Not before two renewals are missed...
+        assert!(!renewed(old, 1000, 1000 + RENAMED_LEASE_GRACE).is_renamed_from(old, new, started));
+        // ...and then well before the dashboard would call it stale.
+        let left = renewed(old, 1000, 1001 + RENAMED_LEASE_GRACE);
+        assert!(left.is_renamed_from(old, new, started));
+        assert_eq!(left.status(), ClusterNodeStatus::Active);
+        // Only the previous name's lease, and never this node's own.
+        assert!(!renewed("mx2.example", 1000, 2000).is_renamed_from(old, new, started));
+        assert!(!renewed(new, 1000, 2000).is_renamed_from(new, new, started));
+    }
+
+    #[test]
+    fn a_live_host_under_the_old_name_keeps_its_lease() {
+        // Renewed after this node started, so it isn't a lease left behind
+        // by a rename: it goes through the usual Stale/Inactive path.
+        let (old, new, started) = ("mx1.example", "mx2.example", 1010);
+        assert!(!renewed(old, 1020, 5000).is_renamed_from(old, new, started));
+    }
+
     #[test]
     fn a_silent_node_keeps_its_id_for_an_hour() {
         // Reported Stale after three minutes, but not free to take over.
@@ -431,5 +534,125 @@ mod tests {
     fn several_renewals_fit_before_a_node_looks_unresponsive() {
         assert!(UNRESPONSIVE_NODE_TIMEOUT >= 3 * HEARTBEAT_INTERVAL);
         assert!(HEARTBEAT_INTERVAL * 2 < STALE_NODE_TIMEOUT);
+    }
+}
+
+// INBUXA: #458, a rename against a real store: the same config directory,
+// the server restarted under a new hostname.
+#[cfg(all(test, feature = "sqlite", feature = "test_mode"))]
+mod rename_tests {
+    use super::*;
+    use crate::{RegistryStore, backend::sqlite::SqliteStore};
+
+    struct Dir(PathBuf);
+
+    impl Drop for Dir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn node(dir: &Path, store: &Store, hostname: &str) -> RegistryStoreInner {
+        let mut inner = RegistryStoreInner::new(dir.join("config.json"));
+        inner.store = store.clone();
+        inner.env_hostname = hostname.to_string();
+        inner
+    }
+
+    // Moves a lease's last renewal back, as if its host had gone quiet.
+    async fn age(store: &Store, hostname: &str, last_renewal: u64) {
+        let slot = NodeSlot::list(store, now())
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|slot| slot.hostname == hostname)
+            .unwrap();
+        let mut batch = BatchBuilder::new();
+        batch.set(
+            ValueClass::NodeId(slot.node_id),
+            KeySerializer::new(hostname.len() + U64_LEN)
+                .write(last_renewal)
+                .write(hostname)
+                .finalize(),
+        );
+        store.write(batch.build_all()).await.unwrap();
+    }
+
+    async fn hostnames(store: &Store) -> Vec<String> {
+        let mut names = NodeSlot::list(store, now())
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|slot| slot.hostname)
+            .collect::<Vec<_>>();
+        names.sort();
+        names
+    }
+
+    fn temp_dir(name: &str) -> Dir {
+        let dir = std::env::temp_dir().join(format!("inbuxa-458-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        Dir(dir)
+    }
+
+    #[tokio::test]
+    async fn a_renamed_server_drops_its_old_lease() {
+        let dir = temp_dir("rename");
+        let store = Store::SQLite(SqliteStore::open_memory().unwrap().into());
+
+        let mut old = node(&dir.0, &store, "mail.old.example");
+        old.acquire_node_id().await.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.0.join(HOSTNAME_MARKER)).unwrap(),
+            "mail.old.example"
+        );
+
+        // Shut down a little while ago, then started again as mail.new.example.
+        age(&store, "mail.old.example", now() - 10).await;
+        let mut new = node(&dir.0, &store, "mail.new.example");
+        new.acquire_node_id().await.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.0.join(HOSTNAME_MARKER)).unwrap(),
+            "mail.new.example"
+        );
+        let new = RegistryStore(new.into());
+
+        // Inside the grace period both leases are there.
+        new.refresh_node_id_lease().await.unwrap();
+        assert_eq!(
+            hostnames(&store).await,
+            ["mail.new.example", "mail.old.example"]
+        );
+
+        // Two missed renewals later, the old one is gone.
+        age(&store, "mail.old.example", now() - RENAMED_LEASE_GRACE - 10).await;
+        new.refresh_node_id_lease().await.unwrap();
+        assert_eq!(hostnames(&store).await, ["mail.new.example"]);
+    }
+
+    #[tokio::test]
+    async fn a_host_still_renewing_the_old_name_is_left_alone() {
+        let dir = temp_dir("shared");
+        let store = Store::SQLite(SqliteStore::open_memory().unwrap().into());
+
+        let mut one = node(&dir.0, &store, "mx1.example");
+        one.acquire_node_id().await.unwrap();
+        // mx2 shares the config directory, so it reads mx1's name as its own
+        // previous one...
+        let mut two = node(&dir.0, &store, "mx2.example");
+        two.acquire_node_id().await.unwrap();
+        let (_, started) = two.renamed_from.clone().unwrap();
+        let two = RegistryStore(two.into());
+
+        // ...but mx1 renewed after mx2 started, then went quiet: a node down,
+        // which the dashboard has to keep showing.
+        age(&store, "mx1.example", started + 1).await;
+        // Pretend the clock moved on so the grace period has passed.
+        let slots = NodeSlot::list(&store, started + 1 + RENAMED_LEASE_GRACE + 60)
+            .await
+            .unwrap();
+        two.release_renamed_lease(&slots).await.unwrap();
+        assert_eq!(hostnames(&store).await, ["mx1.example", "mx2.example"]);
     }
 }
