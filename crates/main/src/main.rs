@@ -68,7 +68,7 @@ async fn main() -> std::io::Result<()> {
         std::process::exit(Box::pin(upgrade_store_and_exit(&server)).await);
     }
 
-    // inbuxa: K-S5: --seed sets up a new store from a file and exits
+    // inbuxa: K-S8: --seed sets up a new store from a file and exits
     if let Some(path) = init.seed.clone() {
         let server = init.inner.build_server();
         std::process::exit(Box::pin(seed_and_exit(&server, &path, init.store_was_new)).await);
@@ -210,7 +210,7 @@ async fn upgrade_store_and_exit(server: &common::Server) -> i32 {
     flush_and_exit_code(code).await
 }
 
-/// inbuxa: K-S5: `--seed`: the layout upgrade, then the seed
+/// inbuxa: K-S8: `--seed`: the layout upgrade, then the seed
 async fn seed_and_exit(
     server: &common::Server,
     path: &std::path::Path,
