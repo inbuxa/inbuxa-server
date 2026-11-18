@@ -11,6 +11,42 @@ https://github.com/inbuxa/inbuxa-server/security/advisories.
 Every version PR adds that version's entry here. CI refuses a version this
 file has no entry for (`tools/release/changelog-check.py`).
 
+## [2026.11.18.2] - 2026-11-18
+
+4 security fixes from our own review of the suite (3 high, 1 medium).
+Versions up to and including 2026.11.18.1, and 27.1-rc.1 to 27.1-rc.29, are
+affected. The same fixes are in 27.1-rc.30 for the 27.1 series.
+
+### Security
+High
+- SMTP: one unauthenticated message could stall the server through DKIM
+  verification, which took time quadratic in a signature's header list.
+  At most the first 10 signatures are now checked, a signature listing
+  more than 128 header fields is ignored, and a message with more than
+  1,000 header fields has none checked (dkim=none; refused with
+  `550 5.7.20` under strict DKIM). (GHSA-v7ww-m523-wjfj, #440)
+- Spam filter: one unauthenticated message could exhaust the server's
+  memory, since every punctuation mark became a token. At most 25,000
+  tokens per part and 100,000 per message are tokenized, and at most
+  1 MiB of HTML is parsed. (GHSA-gg2c-9hwc-59cm, #440)
+- Mail parsing: deeply nested message/rfc822 parts could overflow the
+  stack and crash the server, again on every retry. Unencoded nested
+  messages are parsed at most 20 levels deep; a deeper part is kept as an
+  attachment. mail-parser 0.11.9 is now vendored for this.
+  (GHSA-6245-jpv6-5pqm, #440)
+
+Medium
+- Mail store: a message with more than 65,535 MIME parts wrapped its
+  stored part ids, and opening it exhausted memory. Such messages are now
+  refused (`552 5.3.4` at DATA, NO on APPEND, an error from JMAP import),
+  and ones already stored show only their well-formed parts.
+  (GHSA-xm8r-p3w9-7cw8, #440)
+
+### Upgrading
+- Spam padded past the token limits hides later text from the classifier
+  and the URL checks; rules that read the text itself still see all of it.
+- A message with more than 65,535 MIME parts or nested messages is refused.
+
 ## [2026.11.18.1] - 2026-11-18
 
 6 security fixes from our own review of the suite (4 high, 2 medium).
