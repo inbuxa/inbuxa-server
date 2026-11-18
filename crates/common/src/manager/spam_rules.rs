@@ -31,12 +31,12 @@ use trc::AddContext;
 
 /// The version of the embedded rules: the spam-filter release they started
 /// from, then the fork's own revision of them (resources/spam-filter/README.md).
-pub const BUNDLED_SPAM_RULES_VERSION: &str = "3.0.2-inbuxa.1";
+pub const BUNDLED_SPAM_RULES_VERSION: &str = "3.0.2-inbuxa.2";
 
 /// What's recorded once the bundled rules are loaded: their version, then the
 /// fork's own generation of the update, so a change to how an update applies
 /// runs it once more. Generation 2 fingerprints (upstream v0.16.24).
-pub const BUNDLED_SPAM_RULES_APPLIED: &str = "3.0.2-inbuxa.1+2";
+pub const BUNDLED_SPAM_RULES_APPLIED: &str = "3.0.2-inbuxa.2+2";
 
 static BUNDLED_SPAM_RULES: &[u8] =
     include_bytes!("../../../../resources/spam-filter/spam-filter-rules.json.gz");

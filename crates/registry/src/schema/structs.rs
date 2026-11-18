@@ -5390,6 +5390,9 @@ pub struct SpamSettings {
     pub trust_replies: bool,
     #[serde(rename = "spamFilterRulesUrl")]
     pub spam_filter_rules_url: Option<String>,
+    // inbuxa: #401, read links in QR codes in a message's images
+    #[serde(rename = "scanQrCodes")]
+    pub scan_qr_codes: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

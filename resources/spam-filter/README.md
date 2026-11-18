@@ -27,6 +27,7 @@ high-confidence spam categories, −3.0 for legitimate), which match
 | Revision | Change |
 |---|---|
 | `inbuxa.1` | Scores for the DKIM2 result tags the server already emits (`crates/spam-filter/src/analysis/dmarc.rs`): `DKIM2_ALLOW` −0.2, `DKIM2_REJECT` 1.0, and `DKIM2_NA`, `DKIM2_PERMFAIL`, `DKIM2_TEMPFAIL` 0.0. The values are spam-filter v3.0.3's. |
+| `inbuxa.2` | `QR_CODE_URL` 0.0: the tag the URL checks add when a message's images hold a QR code with a web link (#401, `crates/spam-filter/src/analysis/qr.rs`). A QR code alone isn't a spam sign; its link is scored by the URL checks it goes through, at location `qr_code`. The tag is listed so an administrator can give it a score. |
 
 ## Changing the rules
 

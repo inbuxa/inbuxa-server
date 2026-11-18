@@ -178,6 +178,23 @@ impl SpamFilterAnalyzeUrl for Server {
 
         urls.extend(inferred_urls);
 
+        // inbuxa: #401, the web links in QR codes in the message's images go
+        // through the same checks, at location qr_code
+        if self.core.spam.scan_qr_codes {
+            let images = super::qr::images(ctx);
+            if !images.is_empty() {
+                let found = tokio::task::spawn_blocking(move || super::qr::qr_urls(&images))
+                    .await
+                    .unwrap_or_default();
+                if !found.is_empty() {
+                    ctx.result.add_tag("QR_CODE_URL");
+                    for url in found {
+                        urls.insert(ElementLocation::new(UrlParts::new(url), Location::QrCode));
+                    }
+                }
+            }
+        }
+
         if !ctx.input.is_train {
             let mut redirected_urls = HashSet::new();
             let mut trusted_domains: HashSet<String> = HashSet::new();

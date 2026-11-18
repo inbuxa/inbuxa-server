@@ -86,6 +86,8 @@ async fn antispam() {
             // (resources/spam-filter/), the path production takes;
             // SPAM_RULES_URL tests another set.
             spam_filter_rules_url: std::env::var("SPAM_RULES_URL").ok(),
+            // inbuxa: #401, the url tests read QR codes in images
+            scan_qr_codes: true,
             ..Default::default()
         })
         .await;
