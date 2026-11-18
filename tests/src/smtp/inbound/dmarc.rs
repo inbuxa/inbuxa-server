@@ -554,7 +554,9 @@ async fn dmarc() {
         (0, 9, "250"),
         (0, 10, "550 5.7.20"),
         (996, 0, "250"),
-        (997, 0, "550 5.7.20"),
+        // inbuxa: more than 1,000 header fields are now refused before
+        // DKIM is checked (MAX_PART_HEADER_FIELDS)
+        (997, 0, "552 5.3.4"),
     ] {
         // From, To, Subject and the extra headers are signed, unless there
         // are more than 125 of them; then only the first three are

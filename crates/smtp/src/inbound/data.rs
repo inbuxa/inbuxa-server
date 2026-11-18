@@ -84,6 +84,14 @@ impl<T: SessionStream> Session<T> {
             return (&b"552 5.3.4 Message has too many MIME parts.\r\n"[..]).into();
         }
 
+        // inbuxa: past its limits the parser leaves header fields out, and
+        // the server would then judge the message by fewer fields than a
+        // mail client that reads the raw message sees, so such a message is
+        // refused
+        if !fits_header_limits(&parsed_message) {
+            return (&b"552 5.3.4 Message has too many header fields.\r\n"[..]).into();
+        }
+
         // inbuxa: MA-S3: a shared mailbox's people send only as it over SMTP
         // too, so the answer comes back to the mailbox
         if let Some(address) = self.shared_mailbox_foreign_address(&parsed_message).await {
@@ -1319,7 +1327,10 @@ fn parse_dkim2_dsn<'x, 'r>(
         }
     }
 
-    if !returned.is_empty() {
+    // inbuxa: mail-auth parses the returned headers on its own, keeping every
+    // field, and a text/rfc822-headers part isn't covered by the parser's
+    // limits, so one with too many fields isn't looked at
+    if !returned.is_empty() && raw_header_fields(returned) <= MAX_PART_HEADER_FIELDS {
         Some(Dkim2Dsn::new(
             raw,
             AuthenticatedMessage::parse(returned)?,
@@ -1333,6 +1344,49 @@ fn parse_dkim2_dsn<'x, 'r>(
 // inbuxa: the most author domains a From header may name for DMARC to
 // check each of them
 const MAX_DMARC_AUTHOR_DOMAINS: usize = 10;
+
+// inbuxa: the most header fields one part of a message received over SMTP
+// may have. Real mail has tens, a long relay history a few hundred.
+pub const MAX_PART_HEADER_FIELDS: usize = 1_000;
+
+// inbuxa: the header fields of a raw message, counted up to the blank line
+// that ends them, and only to one past MAX_PART_HEADER_FIELDS
+fn raw_header_fields(raw: &[u8]) -> usize {
+    let mut fields = 0;
+    for line in raw.split(|&ch| ch == b'\n') {
+        match line {
+            b"" | b"\r" => break,
+            [b' ' | b'\t', ..] => {}
+            _ => {
+                fields += 1;
+                if fields > MAX_PART_HEADER_FIELDS {
+                    break;
+                }
+            }
+        }
+    }
+    fields
+}
+
+// inbuxa: whether no part of the message, nested messages included, has
+// more than MAX_PART_HEADER_FIELDS header fields and the parser kept every
+// field (it keeps 10,000 per part and MAX_HEADERS_PER_MESSAGE in all)
+pub fn fits_header_limits(message: &mail_parser::Message<'_>) -> bool {
+    let mut total = 0usize;
+    let mut stack = vec![message];
+    while let Some(message) = stack.pop() {
+        for part in &message.parts {
+            if part.headers.len() > MAX_PART_HEADER_FIELDS {
+                return false;
+            }
+            total += part.headers.len();
+            if let mail_parser::PartType::Message(nested) = &part.body {
+                stack.push(nested);
+            }
+        }
+    }
+    total < mail_parser::parsers::message::MAX_HEADERS_PER_MESSAGE
+}
 
 // inbuxa: the most DKIM-Signature fields checked in one message, the most
 // h= entries in a DKIM or ARC signature, and the most header fields a
@@ -1412,7 +1466,10 @@ fn dmarc_strictness(output: &DmarcOutput) -> (u8, u8, u8) {
 
 #[cfg(test)]
 mod tests {
-    use super::{dmarc_author_domains, limit_signature_work};
+    use super::{
+        MAX_PART_HEADER_FIELDS, dmarc_author_domains, fits_header_limits, limit_signature_work,
+        parse_dkim2_dsn,
+    };
     use mail_auth::AuthenticatedMessage;
 
     fn message_from(addresses: &[String]) -> Vec<u8> {
@@ -1480,5 +1537,77 @@ mod tests {
         let mut message = AuthenticatedMessage::parse(raw.as_bytes()).unwrap();
         limit_signature_work(&mut message);
         assert!(!message.has_arc_errors);
+    }
+
+    // inbuxa: a part may have up to MAX_PART_HEADER_FIELDS header fields,
+    // nested messages included, and a message whose fields the parser left
+    // out doesn't fit either
+    #[test]
+    fn header_field_limits() {
+        let fields = |n: usize| (0..n).map(|i| format!("X-{i}: x\r\n")).collect::<String>();
+        let parse = |raw: &str| {
+            let message = mail_parser::MessageParser::new().parse(raw).unwrap();
+            fits_header_limits(&message)
+        };
+        let top = |n: usize| format!("{}\r\ntest\r\n", fields(n));
+        assert!(parse(&top(MAX_PART_HEADER_FIELDS)));
+        assert!(!parse(&top(MAX_PART_HEADER_FIELDS + 1)));
+        assert!(!parse(&top(50_000)));
+
+        let nested = |n: usize| {
+            format!(
+                concat!(
+                    "From: a@example.org\r\nContent-Type: multipart/mixed; boundary=b\r\n\r\n",
+                    "--b\r\nContent-Type: message/rfc822\r\n\r\n{}\r\ntest\r\n--b--\r\n"
+                ),
+                fields(n)
+            )
+        };
+        assert!(parse(&nested(MAX_PART_HEADER_FIELDS)));
+        assert!(!parse(&nested(MAX_PART_HEADER_FIELDS + 1)));
+
+        // 300 parts of 1,000 fields each: the parser keeps 262,144 of them
+        let mut raw = String::from(
+            "From: a@example.org\r\nContent-Type: multipart/mixed; boundary=b\r\n\r\n",
+        );
+        for _ in 0..300 {
+            raw.push_str("--b\r\n");
+            raw.push_str(&fields(MAX_PART_HEADER_FIELDS));
+            raw.push_str("\r\nx\r\n");
+        }
+        raw.push_str("--b--\r\n");
+        assert!(!parse(&raw));
+    }
+
+    // inbuxa: the headers a DSN returns as text/rfc822-headers are parsed
+    // for DKIM2 only up to MAX_PART_HEADER_FIELDS fields
+    #[test]
+    fn dkim2_dsn_returned_headers_are_limited() {
+        let dsn = |n: usize| {
+            let mut raw = String::from(concat!(
+                "From: postmaster@example.org\r\n",
+                "Content-Type: multipart/report; report-type=delivery-status; boundary=b\r\n\r\n",
+                "--b\r\nContent-Type: text/rfc822-headers\r\n\r\n",
+                "From: a@example.org\r\n"
+            ));
+            for i in 1..n {
+                raw.push_str(&format!("X-{i}: x\r\n"));
+            }
+            raw.push_str("\r\n--b--\r\n");
+            raw
+        };
+        for (n, looked_at) in [
+            (MAX_PART_HEADER_FIELDS, true),
+            (MAX_PART_HEADER_FIELDS + 1, false),
+        ] {
+            let raw = dsn(n);
+            let parsed = mail_parser::MessageParser::new().parse(&raw).unwrap();
+            let auth = AuthenticatedMessage::parse(raw.as_bytes()).unwrap();
+            assert_eq!(
+                parse_dkim2_dsn(&parsed, &auth, raw.as_bytes()).is_some(),
+                looked_at,
+                "{n} fields"
+            );
+        }
     }
 }
