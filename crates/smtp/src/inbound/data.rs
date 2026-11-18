@@ -17,6 +17,7 @@ use crate::{
     reporting::analysis::{AnalyzeReport, ReportData},
     scripts::ScriptResult,
 };
+use ahash::AHashSet;
 use common::{
     config::{
         mailstore::spamfilter::{SpamFilterAction, spam_status},
@@ -377,25 +378,36 @@ impl<T: SessionStream> Session<T> {
 
                 // inbuxa: a From header naming several domains is checked
                 // against each of them and the strictest result applies
-                // (RFC 7489, Section 6.6.1)
+                // (RFC 7489, Section 6.6.1). Only the author address is
+                // copied for each domain, and past MAX_DMARC_AUTHOR_DOMAINS
+                // the message fails DMARC without a lookup: one of the
+                // domains left unchecked could ask for it to be rejected.
                 let author_domains = dmarc_author_domains(&auth_message);
-                let author_messages = if author_domains.len() > 1 {
+                let too_many_authors = author_domains.len() > MAX_DMARC_AUTHOR_DOMAINS;
+                let author_messages = if too_many_authors {
+                    vec![]
+                } else if author_domains.len() > 1 {
                     author_domains
                         .iter()
-                        .map(|domain| {
-                            let mut message = auth_message.clone();
-                            message.from.retain(|address| {
-                                address.rsplit_once('@').is_some_and(|(_, addr_domain)| {
-                                    to_a_label(addr_domain) == domain.as_str()
-                                })
-                            });
-                            Cow::Owned(message)
+                        .map(|(_, address)| {
+                            Cow::Owned(AuthenticatedMessage {
+                                from: vec![address.to_string()],
+                                ..Default::default()
+                            })
                         })
                         .collect::<Vec<_>>()
                 } else {
                     vec![Cow::Borrowed(&auth_message)]
                 };
                 let mut dmarc_output: Option<DmarcOutput> = None;
+                if too_many_authors {
+                    let fail = DmarcResult::Fail(mail_auth::Error::NotAligned);
+                    dmarc_output = Some(
+                        DmarcOutput::new(author_domains[0].0.to_string())
+                            .with_spf_result(fail.clone())
+                            .with_dkim_result(fail),
+                    );
+                }
                 for author_message in &author_messages {
                     let output = self
                         .server
@@ -431,8 +443,9 @@ impl<T: SessionStream> Session<T> {
                 let strict = dmarc.is_strict();
                 let is_temp_fail = matches!(dmarc_result, DmarcResult::TempError(_));
                 let rejected = strict
-                    && dmarc_output.policy() == dmarc::Policy::Reject
-                    && (is_temp_fail || matches!(dmarc_result, DmarcResult::Fail(_)));
+                    && (too_many_authors
+                        || (dmarc_output.policy() == dmarc::Policy::Reject
+                            && (is_temp_fail || matches!(dmarc_result, DmarcResult::Fail(_)))));
 
                 // Add to DMARC output to the Authentication-Results header
                 auth_results = auth_results.with_dmarc_result(&dmarc_output);
@@ -1253,14 +1266,24 @@ fn parse_dkim2_dsn<'x, 'r>(
     }
 }
 
-// inbuxa: the distinct author domains of the From header, as DMARC compares them
-fn dmarc_author_domains(message: &AuthenticatedMessage<'_>) -> Vec<String> {
-    let mut domains: Vec<String> = Vec::new();
+// inbuxa: the most author domains a From header may name for DMARC to
+// check each of them
+const MAX_DMARC_AUTHOR_DOMAINS: usize = 10;
+
+// inbuxa: the distinct author domains of the From header, as DMARC compares
+// them, each with its first address. It stops one past
+// MAX_DMARC_AUTHOR_DOMAINS, so a From header naming thousands costs no more.
+fn dmarc_author_domains<'x>(message: &'x AuthenticatedMessage<'_>) -> Vec<(Cow<'x, str>, &'x str)> {
+    let mut seen = AHashSet::new();
+    let mut domains = Vec::new();
     for address in &message.from {
         if let Some((_, domain)) = address.rsplit_once('@') {
             let domain = to_a_label(domain);
-            if !domains.iter().any(|d| d.as_str() == domain) {
-                domains.push(domain.into_owned());
+            if seen.insert(domain.clone()) {
+                domains.push((domain, address.as_str()));
+                if domains.len() > MAX_DMARC_AUTHOR_DOMAINS {
+                    break;
+                }
             }
         }
     }
@@ -1280,5 +1303,43 @@ fn dmarc_strictness(output: &DmarcOutput) -> (u8, u8, u8) {
         DmarcResult::TempError(_) => (2, policy, 0),
         DmarcResult::PermError(_) | DmarcResult::None => (1, 0, 0),
         DmarcResult::Pass => (0, 0, 0),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::dmarc_author_domains;
+    use mail_auth::AuthenticatedMessage;
+
+    fn message_from(addresses: &[String]) -> Vec<u8> {
+        format!(
+            "From: {}\r\nTo: rcpt@example.org\r\nSubject: test\r\n\r\ntest\r\n",
+            addresses.join(",\r\n ")
+        )
+        .into_bytes()
+    }
+
+    // inbuxa: the author domains are deduplicated, and a From header naming
+    // thousands of domains is looked at only up to one past the cap
+    #[test]
+    fn dmarc_author_domains_are_capped() {
+        let raw = message_from(&[
+            "a@x.example".to_string(),
+            "b@X.Example".to_string(),
+            "c@y.example".to_string(),
+            "d@x.example".to_string(),
+        ]);
+        let message = AuthenticatedMessage::parse(&raw).unwrap();
+        let domains = dmarc_author_domains(&message);
+        assert_eq!(domains.len(), 2);
+
+        let addresses = (0..20_000)
+            .map(|i| format!("a@d{i}.example"))
+            .collect::<Vec<_>>();
+        let raw = message_from(&addresses);
+        let message = AuthenticatedMessage::parse(&raw).unwrap();
+        assert_eq!(message.from.len(), 20_000);
+        let domains = dmarc_author_domains(&message);
+        assert_eq!(domains.len(), 11);
     }
 }

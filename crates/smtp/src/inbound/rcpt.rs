@@ -2,8 +2,11 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
+use crate::queue::is_xtext_value;
 use crate::{
     core::{Session, SessionAddress},
     scripts::ScriptResult,
@@ -67,6 +70,21 @@ impl<T: SessionStream> Session<T> {
             return self
                 .write(b"501 5.5.4 DSN extension has been disabled.\r\n")
                 .await;
+        }
+
+        // inbuxa: xtext decodes "+0D+0A" to a line break; ORCPT has to be
+        // printable ASCII (RFC 3461, Section 4)
+        if to
+            .orcpt
+            .as_deref()
+            .is_some_and(|orcpt| !is_xtext_value(orcpt))
+        {
+            trc::event!(
+                Smtp(SmtpEvent::InvalidParameter),
+                SpanId = self.data.session_id,
+                Details = "ORCPT",
+            );
+            return self.write(b"501 5.5.4 Invalid ORCPT parameter.\r\n").await;
         }
 
         // Build RCPT

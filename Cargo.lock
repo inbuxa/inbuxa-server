@@ -3395,6 +3395,7 @@ dependencies = [
  "registry",
  "serde",
  "serde_json",
+ "tokio",
  "trc",
 ]
 

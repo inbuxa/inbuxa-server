@@ -2,9 +2,9 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
-
-use std::cmp::Reverse;
 
 use mail_parser::{
     Encoding, HeaderName, Message, MessagePart, PartType, decoders::html::html_to_text,
@@ -26,25 +26,27 @@ use mail_builder::headers::message_id::generate_message_id_header;
 impl Replace {
     pub(crate) fn exec(&self, ctx: &mut Context) {
         // Delete children parts
-        let mut part_ids = ctx.find_nested_parts_ids(false);
-        part_ids.sort_unstable_by_key(|a| Reverse(*a));
-        for part_id in part_ids {
-            ctx.message.parts.remove(part_id as usize);
-        }
+        // inbuxa: and renumber what is left, so that a foreverypart loop
+        // over the message stays in step with its parts
+        let part_ids = ctx.find_nested_parts_ids(false);
+        ctx.remove_parts(part_ids);
         ctx.has_changes = true;
 
         // Update part
         let body = ctx.eval_value(&self.replacement).to_string().into_owned();
         let body_len = body.len();
 
-        let part = &mut ctx.message.parts[ctx.part as usize];
+        let Some(part) = ctx.message.parts.get_mut(ctx.part as usize) else {
+            return;
+        };
 
-        ctx.message_size = ctx.message_size + body_len
-            - (if part.offset_body != 0 {
+        ctx.message_size = (ctx.message_size + body_len).saturating_sub(
+            if part.offset_body != 0 {
                 (part.offset_end - part.offset_header) as usize
             } else {
                 part.body.len()
-            });
+            },
+        );
         part.body = PartType::Text(body.into());
         part.encoding = if !self.mime {
             Encoding::QuotedPrintable
@@ -190,6 +192,13 @@ impl Enclose {
 
         ctx.message_size += ((boundary.len() + 6) * 3) + body.len() + 2;
         ctx.part = 0;
+        // inbuxa: the parts any foreverypart loop was walking are now inside
+        // the enclosed message, so those loops end here
+        ctx.part_iter = Vec::new().into_iter();
+        for (part, part_iter) in &mut ctx.part_iter_stack {
+            *part = 0;
+            *part_iter = Vec::new().into_iter();
+        }
         ctx.has_changes = true;
         ctx.message = Message {
             html_body: Vec::with_capacity(0),

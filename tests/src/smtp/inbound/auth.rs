@@ -211,4 +211,23 @@ async fn auth() {
         .assert_contains(" PLAIN")
         .assert_contains("OAUTHBEARER")
         .assert_contains("XOAUTH2");
+
+    // inbuxa: AUTH during a mail transaction is refused (RFC 4954, Section
+    // 4), so a sender accepted before signing in isn't kept after it
+    let mut session = test.new_mta_session();
+    session.data.remote_ip_str = "10.0.0.3".into();
+    session.eval_session_params().await;
+    session.stream.tls = true;
+    session.ehlo("mx.foobar.org").await;
+    session.mail_from("jane@example.org", "250").await;
+    session
+        .auth_plain("john@example.org", "12345 + extra safety", "503 5.5.1")
+        .await;
+    assert!(session.data.authenticated_as.is_none());
+    session.rset().await;
+    session
+        .auth_plain("john@example.org", "12345 + extra safety", "235 2.7.0")
+        .await;
+    session.mail_from("jane@example.org", "501 5.5.4").await;
+    session.mail_from("john@example.org", "250").await;
 }
