@@ -287,7 +287,8 @@ with the server's own `inbuxa:` objects. In particular, the relay's
 | `domains` | downstream | The domains served (RL-1, RL-4) |
 | `maxMessageSize` | downstream | SIZE limit. Default 50 MiB |
 | `maxRecipients` | downstream | Per message. Default 100 |
-| `rateLimits` | downstream | Connections and messages per minute per remote IP, and concurrent sessions per IP |
+| `rateLimits` | downstream | Connections and messages per minute per remote IP, and concurrent sessions per IP. An IPv6 sender is counted by its /64, and an IPv4-mapped address as the IPv4 address |
+| `maxSmtpSessions` | downstream | SMTP sessions open at once on port 25, from all senders together. Default 1000. Past it a new connection gets `421 4.3.2` and is closed, so port 25 can't take the file descriptors the link and outbound delivery need |
 | `dnsbl` | downstream | DNSBL zones checked at connect in held mode. Default empty (RL-14) |
 | `liveVerdictTimeout` | downstream | Seconds to wait for a live verdict. Default 30, maximum 120 (RL-13) |
 | `heldMaxAge` | downstream | How long held inbound mail waits for the downstream. Default 30 days, maximum 90 |
@@ -391,9 +392,11 @@ Push: the relay sends a `StateChange` for `Relay`, `Inbound`, `Outbound` and
 
 In this order, whatever the mode:
 
-1. Connection rate limits per IP.
+1. Connection limits: `maxSmtpSessions` for everyone together, then the
+   rate limits per IP (an IPv6 /64 is one IP).
 2. EHLO, and protocol hygiene: early talkers are dropped, and the session
-   ends after the error limit.
+   ends after the error limit. Every reply is written within the command
+   timeout (5 minutes): a client that doesn't read its replies is dropped.
 3. MAIL FROM: syntax and SIZE.
 4. RCPT TO: RL-1, then `maxRecipients`.
 5. DATA: the size limit.
@@ -540,6 +543,9 @@ When no link is up, or after RL-13:
 - When the spool passes 90% of `spoolMaxBytes`, or 90% of its disk, the
   relay answers new inbound mail with `452 4.3.1`, and `Outbound/set` create
   with `overQuota`. Senders retry, and nothing already accepted is dropped.
+  Mail still being received counts toward the spool. A message that would
+  take the spool past `spoolMaxBytes` itself, or its disk past 95%, while it
+  comes in is dropped at once and answered `452 4.3.1` at the end of DATA.
 - **RL-22.** The state directory holds the link key, the pins, the cached
   settings, the recipient set, the SMTP certificate, the spool and the
   unacknowledged events. Everything else is rebuilt at start.

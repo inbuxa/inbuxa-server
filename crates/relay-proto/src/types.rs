@@ -54,6 +54,9 @@ pub struct RelaySettings {
     pub max_message_size: u64,
     pub max_recipients: u32,
     pub rate_limits: RateLimits,
+    /// SMTP sessions open at once on port 25, from all senders together.
+    /// Past it a new connection gets `421` and is closed.
+    pub max_smtp_sessions: u32,
     /// DNSBL zones, checked at connect in held mode. Empty by default (RL-14).
     pub dnsbl: Vec<String>,
     /// Seconds to wait for a live verdict (RL-13).
@@ -94,6 +97,7 @@ impl Default for RelaySettings {
             max_message_size: 50 * 1024 * 1024,
             max_recipients: 100,
             rate_limits: RateLimits::default(),
+            max_smtp_sessions: 1000,
             dnsbl: Vec::new(),
             live_verdict_timeout: 30,
             held_max_age: 30,
@@ -130,6 +134,9 @@ impl RelaySettings {
         }
         if self.max_message_size == 0 || self.max_recipients == 0 {
             out.push("maxMessageSize and maxRecipients must be above zero".into());
+        }
+        if self.max_smtp_sessions == 0 {
+            out.push("maxSmtpSessions must be above zero".into());
         }
         if !(1..=limits::LIVE_VERDICT_TIMEOUT_MAX).contains(&self.live_verdict_timeout) {
             out.push(format!(
@@ -515,7 +522,8 @@ mod tests {
         assert!(s.problems().is_empty());
         s.live_verdict_timeout = 121;
         s.held_max_age = 91;
-        assert_eq!(s.problems().len(), 2);
+        s.max_smtp_sessions = 0;
+        assert_eq!(s.problems().len(), 3);
         assert!(s.serves("EXAMPLE.com"));
     }
 

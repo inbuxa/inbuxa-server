@@ -11,6 +11,13 @@
 use crate::ScimError;
 use serde_json::Value;
 
+/// The longest filter accepted, in bytes. Identity providers send a few
+/// conditions; this leaves room for long values and many of them.
+pub const MAX_LENGTH: usize = 8 * 1024;
+
+/// How deep `(`, `not (` and `[` may nest.
+pub const MAX_DEPTH: usize = 32;
+
 /// `[URN ":"] name ["." sub]`. Names keep the case sent; compare them with
 /// [`AttrPath::is`].
 #[derive(Debug, Clone, PartialEq)]
@@ -140,9 +147,21 @@ pub enum Filter {
 }
 
 impl Filter {
+    /// Parses a filter of at most [`MAX_LENGTH`] bytes, nested at most
+    /// [`MAX_DEPTH`] deep: the parser and what reads the result recurse, and
+    /// a stack overflow ends the whole server.
     pub fn parse(text: &str) -> Result<Filter, ScimError> {
+        if text.len() > MAX_LENGTH {
+            return Err(ScimError::invalid_filter(format!(
+                "The filter is too long: at most {MAX_LENGTH} bytes"
+            )));
+        }
         let tokens = tokenize(text)?;
-        let mut parser = Parser { tokens, pos: 0 };
+        let mut parser = Parser {
+            tokens,
+            pos: 0,
+            depth: 0,
+        };
         let filter = parser.or()?;
         match parser.peek() {
             None => Ok(filter),
@@ -242,6 +261,7 @@ fn tokenize(text: &str) -> Result<Vec<Token>, ScimError> {
 struct Parser {
     tokens: Vec<Token>,
     pos: usize,
+    depth: usize,
 }
 
 impl Parser {
@@ -253,6 +273,22 @@ impl Parser {
         let token = self.tokens.get(self.pos).cloned();
         self.pos += 1;
         token
+    }
+
+    /// Parses `inner` one level deeper, refusing past [`MAX_DEPTH`].
+    fn nested(
+        &mut self,
+        inner: impl FnOnce(&mut Self) -> Result<Filter, ScimError>,
+    ) -> Result<Filter, ScimError> {
+        if self.depth >= MAX_DEPTH {
+            return Err(ScimError::invalid_filter(format!(
+                "The filter nests too deeply: at most {MAX_DEPTH} levels"
+            )));
+        }
+        self.depth += 1;
+        let result = inner(self);
+        self.depth -= 1;
+        result
     }
 
     fn is_word(&self, word: &str) -> bool {
@@ -280,7 +316,7 @@ impl Parser {
     }
 
     fn group(&mut self) -> Result<Filter, ScimError> {
-        let inner = self.or()?;
+        let inner = self.nested(Self::or)?;
         match self.next() {
             Some(Token::Close) => Ok(inner),
             _ => Err(ScimError::invalid_filter(
@@ -302,7 +338,7 @@ impl Parser {
                 })?;
                 if self.peek() == Some(&Token::OpenBracket) {
                     self.pos += 1;
-                    let inner = self.or()?;
+                    let inner = self.nested(Self::or)?;
                     return match self.next() {
                         Some(Token::CloseBracket) => Ok(Filter::ValuePath {
                             path,
@@ -417,6 +453,58 @@ mod tests {
             Filter::Or(_, right) => assert!(matches!(*right, Filter::And(..))),
             other => panic!("{other:?}"),
         }
+    }
+
+    /// Runs `check` on a thread with a server worker's 2 MiB stack.
+    fn on_worker_stack(check: impl FnOnce() + Send + 'static) {
+        std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(check)
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    fn is_invalid_filter(result: Result<Filter, ScimError>) -> bool {
+        result.is_err_and(|err| err.scim_type == Some(crate::ScimType::InvalidFilter))
+    }
+
+    #[test]
+    fn deep_nesting_is_refused() {
+        on_worker_stack(|| {
+            for text in [
+                "(".repeat(100_000),
+                "not (".repeat(1_500),
+                "a[".repeat(4_000),
+                format!("{}a pr{}", "(".repeat(33), ")".repeat(33)),
+            ] {
+                assert!(is_invalid_filter(Filter::parse(&text)), "{}", &text[..20]);
+            }
+            // As deep as a filter may go
+            for text in [
+                format!("{}a pr{}", "(".repeat(32), ")".repeat(32)),
+                format!("{}a pr{}", "not (".repeat(32), ")".repeat(32)),
+            ] {
+                assert!(Filter::parse(&text).is_ok(), "{}", &text[..20]);
+            }
+        });
+    }
+
+    #[test]
+    fn long_filters_are_refused() {
+        on_worker_stack(|| {
+            let mut longest = format!("{}a pr", "a pr or ".repeat((MAX_LENGTH - 4) / 8));
+            longest.push_str(&" ".repeat(MAX_LENGTH - longest.len()));
+            // The longest filter accepted parses and drops on a worker's stack
+            assert!(matches!(Filter::parse(&longest), Ok(Filter::Or(..))));
+            for text in [
+                format!("{longest} "),
+                "a eq 1 and ".repeat(90_000),
+                format!("userName eq \"{}\"", "x".repeat(MAX_LENGTH)),
+            ] {
+                assert!(is_invalid_filter(Filter::parse(&text)), "{}", text.len());
+            }
+        });
     }
 
     #[test]

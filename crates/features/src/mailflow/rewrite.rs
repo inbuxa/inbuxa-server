@@ -11,8 +11,10 @@
 //! Only what the action names changes. A disclaimer edits the message's
 //! main text and HTML bodies (not attachments, not attached messages):
 //! each is decoded, changed and written back as UTF-8 quoted-printable,
-//! with its other headers kept. A disclaimer already there isn't added
-//! again, so a reply thread carries it once.
+//! with its other headers kept. On outgoing mail a disclaimer already
+//! there isn't added again, so a reply thread carries it once. On incoming
+//! mail it always is: the sender wrote whatever is there, and could hide
+//! the text to keep a warning off the message.
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 use mail_builder::encoders::quoted_printable::QuotedPrintableEncoder;
@@ -132,12 +134,14 @@ fn with_html_disclaimer(body: &str, html: &str, position: Position) -> String {
 }
 
 /// The disclaimer added to each main text and HTML body. `html` is the HTML
-/// version, or the text escaped when there's none.
+/// version, or the text escaped when there's none. A body that already
+/// holds it is left alone on `outgoing` mail only.
 pub fn add_disclaimer(
     message: &[u8],
     text: &str,
     html: Option<&str>,
     position: Position,
+    outgoing: bool,
 ) -> Option<Vec<u8>> {
     let parsed = MessageParser::new().parse(message)?;
     let html = html
@@ -162,13 +166,13 @@ pub fn add_disclaimer(
         };
         let (new_body, content_type) = match &part.body {
             PartType::Text(body) => {
-                if body.contains(marker) {
+                if outgoing && body.contains(marker) {
                     continue;
                 }
                 (with_text_disclaimer(body, text, position), "text/plain")
             }
             PartType::Html(body) => {
-                if body.contains(marker) || body.contains(html.as_str()) {
+                if outgoing && (body.contains(marker) || body.contains(html.as_str())) {
                     continue;
                 }
                 (with_html_disclaimer(body, &html, position), "text/html")
@@ -259,7 +263,8 @@ mod tests {
 
     #[test]
     fn disclaimer_on_a_single_part() {
-        let out = add_disclaimer(PLAIN, "Sent by Example Co.", None, Position::Bottom).unwrap();
+        let out =
+            add_disclaimer(PLAIN, "Sent by Example Co.", None, Position::Bottom, true).unwrap();
         let parsed = parse(&out);
         let body = parsed.body_text(0).unwrap();
         assert!(body.starts_with("Café at noon."), "{body:?}");
@@ -270,7 +275,9 @@ mod tests {
             Some("b@elsewhere.org")
         );
         // Once only
-        assert!(add_disclaimer(&out, "Sent by Example Co.", None, Position::Bottom).is_none());
+        assert!(
+            add_disclaimer(&out, "Sent by Example Co.", None, Position::Bottom, true).is_none()
+        );
     }
 
     #[test]
@@ -280,6 +287,7 @@ mod tests {
             "Confidential.",
             Some("<p><i>Confidential.</i></p>"),
             Position::Top,
+            true,
         )
         .unwrap();
         let parsed = parse(&out);
@@ -302,5 +310,37 @@ mod tests {
             Some("Attachment text.")
         );
         assert!(!String::from_utf8_lossy(&out).contains("Confidential.\r\n\r\nAttachment"));
+    }
+
+    /// On incoming mail the sender can't keep a warning off by writing its
+    /// text, hidden, into the message.
+    #[test]
+    fn incoming_disclaimer_always_added() {
+        let warning = "CAUTION: This email originated from outside.";
+        let message = format!(
+            "From: someone@elsewhere.org\r\nSubject: Notice\r\nMIME-Version: 1.0\r\n\
+             Content-Type: multipart/alternative; boundary=\"b\"\r\n\r\n\
+             --b\r\nContent-Type: text/plain\r\n\r\nPlease log in.\r\n\r\n{warning}\r\n\
+             --b\r\nContent-Type: text/html\r\n\r\n<html><body><!-- {warning} -->\
+             <p>Please log in.</p></body></html>\r\n--b--\r\n"
+        );
+        let out =
+            add_disclaimer(message.as_bytes(), warning, None, Position::Top, false).expect("added");
+        let parsed = parse(&out);
+        assert!(
+            parsed.body_text(0).unwrap().starts_with(warning),
+            "{:?}",
+            parsed.body_text(0)
+        );
+        assert!(
+            parsed
+                .body_html(0)
+                .unwrap()
+                .contains(&format!("<body><p>{warning}</p>")),
+            "{:?}",
+            parsed.body_html(0)
+        );
+        // Outgoing, a reply that carries it already keeps one copy
+        assert!(add_disclaimer(message.as_bytes(), warning, None, Position::Top, true).is_none());
     }
 }

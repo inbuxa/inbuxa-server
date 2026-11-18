@@ -22,7 +22,7 @@ use crate::{
 };
 use registry::{
     schema::{
-        enums::MtaProtocol,
+        enums::{MtaProtocol, Permission},
         structs::{
             Expression, ExpressionMatch, Imap, MtaOutboundStrategy, MtaRoute, MtaRouteRelay,
             MtaStageAuth,
@@ -151,6 +151,8 @@ pub async fn test(test: &mut TestServer) {
         response["notCreated"]["l"]["type"], "forbidden",
         "AL-12: {response}"
     );
+
+    lock_needs_the_accounts_permissions(admin).await;
 
     // AL-8: send-as needs more than read
     let response = admin
@@ -498,6 +500,109 @@ pub async fn test(test: &mut TestServer) {
     );
 
     shared_mailbox(test, admin, &mut smtp_rx, &mut lmtp).await;
+}
+
+/// AL-12: a lock reaches only an account whose every permission the caller
+/// holds, as changing that account does. Otherwise a role that may only lock
+/// accounts could lock out an administrator and take over its mail.
+async fn lock_needs_the_accounts_permissions(admin: &Account) {
+    let helpdesk = admin
+        .create_user_account(
+            "helpdesk@example.com",
+            "helpdesk-secret-5530",
+            "Helpdesk",
+            &[],
+            vec![
+                Permission::SysAccountLockGet,
+                Permission::SysAccountLockCreate,
+                Permission::SysAccountLockUpdate,
+                Permission::SysAccountLockDestroy,
+            ],
+        )
+        .await;
+    let boss = admin
+        .create_user_account("boss@example.com", "boss-secret-6124", "Boss", &[], vec![])
+        .await;
+    admin
+        .assign_roles_to_account(boss.id(), &["user", "system"])
+        .await;
+    let leaver = admin
+        .create_user_account(
+            "leaver@example.com",
+            "leaver-secret-2208",
+            "Leaver",
+            &[],
+            vec![],
+        )
+        .await;
+    let to_self = json!([{"accountId": helpdesk.id_string(), "access": "full", "sendAs": true}]);
+
+    // Locking an administrator, and handing its mail to the caller, is refused
+    let response = helpdesk
+        .lock_set(json!({"create": {"l": {"accountId": boss.id_string(),
+            "reason": "Left", "delegates": to_self}}}))
+        .await;
+    assert_eq!(
+        response["notCreated"]["l"]["type"], "forbidden",
+        "AL-12: a lock-only role locked an administrator: {response}"
+    );
+    assert_eq!(
+        boss.session_status().await,
+        200,
+        "AL-12: the administrator was locked"
+    );
+
+    // So are changing and ending an administrator's lock
+    let response = admin
+        .lock_set(json!({"create": {"l": {"accountId": boss.id_string(), "reason": "Away"}}}))
+        .await;
+    assert_eq!(
+        response["created"]["l"]["id"],
+        boss.id_string(),
+        "AL-12: {response}"
+    );
+    let response = helpdesk
+        .lock_set(json!({"reason": "Review", "update": {boss.id_string(): {"delegates": to_self}}}))
+        .await;
+    assert_eq!(
+        response["notUpdated"][boss.id_string()]["type"],
+        "forbidden",
+        "AL-12: a lock-only role took over an administrator's lock: {response}"
+    );
+    let response = helpdesk
+        .lock_set(json!({"reason": "Back", "destroy": [boss.id_string()]}))
+        .await;
+    assert_eq!(
+        response["notDestroyed"][boss.id_string()]["type"],
+        "forbidden",
+        "AL-12: a lock-only role ended an administrator's lock: {response}"
+    );
+    let response = admin
+        .lock_set(json!({"reason": "Back", "destroy": [boss.id_string()]}))
+        .await;
+    assert_eq!(
+        response["destroyed"][0],
+        boss.id_string(),
+        "AL-12: {response}"
+    );
+
+    // An account with no more than the caller's permissions is still in reach
+    let response = helpdesk
+        .lock_set(json!({"create": {"l": {"accountId": leaver.id_string(), "reason": "Left"}}}))
+        .await;
+    assert_eq!(
+        response["created"]["l"]["id"],
+        leaver.id_string(),
+        "AL-12: {response}"
+    );
+    let response = helpdesk
+        .lock_set(json!({"reason": "Rehired", "destroy": [leaver.id_string()]}))
+        .await;
+    assert_eq!(
+        response["destroyed"][0],
+        leaver.id_string(),
+        "AL-12: {response}"
+    );
 }
 
 /// MA-S (specs/multi-account.md): a shared mailbox is a lock of its own

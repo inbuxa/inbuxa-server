@@ -310,6 +310,32 @@ Each has an ID, and tests name the IDs they check.
   build, 26 checks: everything above, both front ends' sign-in path, a wrong
   password answered exactly as the right one, and a redirect URI the webmail
   didn't register refused.
+
+### Security headers
+
+- **C-24.** **The server's pages can't be framed.** Every `text/html` answer
+  (the sign-in and device pages, the RSVP page, the console and account pages
+  the server serves) carries `X-Frame-Options: DENY`,
+  `Content-Security-Policy: frame-ancestors 'none'` and
+  `Referrer-Policy: strict-origin-when-cross-origin`. Every answer carries
+  `X-Content-Type-Options: nosniff`, and every answer on a TLS listener
+  `Strict-Transport-Security: max-age=15552000` (no `includeSubDomains`, no
+  `preload`). A plain listener behind a proxy sends no HSTS; that's the
+  proxy's to send. Each header is added only when the answer doesn't carry it
+  already, so a page's own policy and the operator's `http.response_headers`
+  win. A page already under a `frame-ancestors` rule gets no second one, which
+  is how an operator who must frame the pages allows it.
+  **Decision**: nothing in the suite frames these pages. The console and the
+  webmail sign in by a top-level redirect, and the webmail's PDF preview
+  frames its own origin's copy, not the server's.
+  **Built, 2026-11-17.** `crates/http/src/security_headers.rs`, called from
+  `request.rs` after the operator's headers. Checked in the system suite's
+  OIDC test.
+  The anonymous discovery documents that echo the address they're asked
+  about (the three autoconfig paths, `autodiscover.xml`, `autodiscover.json`
+  and `user-agent-configuration.json`) also carry
+  `Content-Security-Policy: default-src 'none'; sandbox`, so a browser that
+  opens one runs nothing on the server's origin.
   Observed before the change, in INBUXA's production logs from 2026-09-20 to 2026-09-29:
   every HTTPS password sign-in was the operator's own, apart from
   inbuxa-webmail's password sign-in on 2026-09-22, before it moved to OAuth.

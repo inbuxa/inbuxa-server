@@ -33,6 +33,21 @@ use std::{borrow::Cow, time::SystemTime};
 /// "can't be inspected" (§2.3).
 const INSPECTION_LIMIT: usize = 10 * 1024 * 1024;
 
+/// How many attachments one message is read for, attached messages'
+/// included; the rest count as "can't be inspected".
+const MAX_INSPECTED_ATTACHMENTS: usize = 100;
+
+/// What's left of reading one message.
+struct Reading {
+    /// Bytes of text, and of data unpacked from archives, still allowed.
+    budget: usize,
+    /// Attachments still read.
+    attachments: usize,
+    /// Whether a rule reads the text at all; when none does, attachments
+    /// are listed (name, type, size) but not read.
+    inspect: bool,
+}
+
 /// What the check decided.
 pub enum Checked {
     /// Go on, with the message unchanged.
@@ -122,8 +137,17 @@ fn refusal(blocked: bool, rules: &[RuleRef]) -> DlpRefusal {
 }
 
 /// A message and the messages attached to it, one level down.
-fn collect<'x>(message: &'x Message<'x>, content: &mut Content<'x>, budget: &mut usize, depth: u8) {
-    let add = |text: Cow<'x, str>, content: &mut Content<'x>, budget: &mut usize| {
+fn collect<'x>(
+    message: &'x Message<'x>,
+    content: &mut Content<'x>,
+    reading: &mut Reading,
+    depth: u8,
+) {
+    let add = |text: Cow<'x, str>, content: &mut Content<'x>, reading: &mut Reading| {
+        if !reading.inspect {
+            return;
+        }
+        let budget = &mut reading.budget;
         if *budget == 0 {
             content.truncated = true;
             return;
@@ -145,11 +169,11 @@ fn collect<'x>(message: &'x Message<'x>, content: &mut Content<'x>, budget: &mut
     // versions of the same alternative, so words aren't counted twice
     for part in message.text_bodies() {
         match &part.body {
-            PartType::Text(text) => add(Cow::Borrowed(text.as_ref()), content, budget),
-            PartType::Html(html) => add(
+            PartType::Text(text) => add(Cow::Borrowed(text.as_ref()), content, reading),
+            PartType::Html(html) if reading.inspect => add(
                 Cow::Owned(mail_parser::decoders::html::html_to_text(html)),
                 content,
-                budget,
+                reading,
             ),
             _ => {}
         }
@@ -157,9 +181,9 @@ fn collect<'x>(message: &'x Message<'x>, content: &mut Content<'x>, budget: &mut
     for part in message.attachments() {
         if let (Some(inner), true) = (part.message(), depth == 0) {
             if let Some(subject) = inner.subject() {
-                add(Cow::Borrowed(subject), content, budget);
+                add(Cow::Borrowed(subject), content, reading);
             }
-            collect(inner, content, budget, depth + 1);
+            collect(inner, content, reading, depth + 1);
             continue;
         }
         let content_type = part
@@ -170,19 +194,32 @@ fn collect<'x>(message: &'x Message<'x>, content: &mut Content<'x>, budget: &mut
             })
             .unwrap_or_default();
         let bytes = part.contents();
-        let mut extracted = extract::extract(
-            &content_type,
-            part.attachment_name(),
-            bytes,
-            &Limits::default(),
-        );
-        if let Extracted::Text(text) = &extracted {
-            if text.len() > *budget {
-                extracted = Extracted::NotInspectable(extract::Why::TooLarge);
-            } else {
-                *budget -= text.len();
+        let extracted = if !reading.inspect {
+            Extracted::NoText
+        } else if reading.budget == 0 || reading.attachments == 0 {
+            // Read up to the limits: the rest can't be inspected
+            Extracted::NotInspectable(extract::Why::TooLarge)
+        } else {
+            reading.attachments -= 1;
+            // What an archive may unpack is what's left of the message's
+            // budget, and counts against it whether or not it became text
+            let limits = Limits {
+                max_unpacked: Limits::default().max_unpacked.min(reading.budget as u64),
+                ..Limits::default()
+            };
+            let (mut extracted, unpacked) =
+                extract::extract_counted(&content_type, part.attachment_name(), bytes, &limits);
+            let mut spent = usize::try_from(unpacked).unwrap_or(usize::MAX);
+            if let Extracted::Text(text) = &extracted {
+                if text.len() > reading.budget {
+                    extracted = Extracted::NotInspectable(extract::Why::TooLarge);
+                } else {
+                    spent = spent.max(text.len());
+                }
             }
-        }
+            reading.budget = reading.budget.saturating_sub(spent);
+            extracted
+        };
         content.attachments.push(Attachment {
             name: part.attachment_name(),
             content_type: content_type.into(),
@@ -224,40 +261,8 @@ impl<T: SessionStream> Session<T> {
             return Checked::Accept;
         }
 
-        let parsed = MessageParser::new().parse(message);
-        let subject = parsed
-            .as_ref()
-            .and_then(|m| m.subject())
-            .unwrap_or_default();
         let jmap_override = self.data.dlp_override.clone();
-        // Only a sender of ours can override
-        let tag = if outgoing {
-            override_tag(subject)
-        } else {
-            None
-        };
-        let checked_subject = tag.as_ref().map_or(subject, |(_, rest)| rest.as_str());
-        let held_subject = checked_subject.to_string();
-
-        let mut content = Content {
-            subject: checked_subject,
-            size: message.len() as u64,
-            ..Default::default()
-        };
-        let mut budget = INSPECTION_LIMIT;
-        match &parsed {
-            Some(parsed) => {
-                content.headers = parsed
-                    .headers()
-                    .iter()
-                    .filter_map(|h| h.value.as_text().map(|v| (h.name.as_str(), v)))
-                    .collect();
-                collect(parsed, &mut content, &mut budget, 0);
-            }
-            // Nothing a rule could read: say so, rather than pass it
-            None => content.truncated = true,
-        }
-        let mut recipient_groups = Vec::with_capacity(self.data.rcpt_to.len());
+        let mut recipients = Vec::with_capacity(self.data.rcpt_to.len());
         for rcpt in &self.data.rcpt_to {
             let local = self
                 .server
@@ -283,7 +288,7 @@ impl<T: SessionStream> Session<T> {
             } else {
                 Vec::new()
             };
-            recipient_groups.push((local, groups));
+            recipients.push((rcpt.address_lcase.clone(), local, groups));
         }
         let sender_address = self
             .data
@@ -291,27 +296,91 @@ impl<T: SessionStream> Session<T> {
             .as_ref()
             .map(|m| m.address_lcase.clone())
             .unwrap_or_default();
-        let envelope = Envelope {
-            outgoing,
-            sender: &sender_address,
-            sender_groups: sender
+        let sender_groups = sender
+            .as_ref()
+            .map_or_else(Vec::new, |(_, a)| a.id_member_of.to_vec());
+        let sender_tenant = sender.as_ref().and_then(|(_, a)| a.id_tenant);
+
+        // Reading the message, unpacking its attachments and running the
+        // detectors is CPU work: done off the async workers, and bounded by
+        // the inspection limit and the number of attachments read
+        let message_owned = message.to_vec();
+        let checking = rules.clone();
+        let checked = tokio::task::spawn_blocking(move || {
+            let message = message_owned.as_slice();
+            let parsed = MessageParser::new().parse(message);
+            let subject = parsed
                 .as_ref()
-                .map_or(&[][..], |(_, a)| &a.id_member_of[..]),
-            sender_tenant: sender.as_ref().and_then(|(_, a)| a.id_tenant),
-            recipients: self
-                .data
-                .rcpt_to
-                .iter()
-                .zip(&recipient_groups)
-                .map(|(rcpt, (local, groups))| Recipient {
-                    address: &rcpt.address_lcase,
-                    local: *local,
-                    groups,
-                })
-                .collect(),
+                .and_then(|m| m.subject())
+                .unwrap_or_default();
+            // Only a sender of ours can override
+            let tag = if outgoing {
+                override_tag(subject)
+            } else {
+                None
+            };
+            let checked_subject = tag.as_ref().map_or(subject, |(_, rest)| rest.as_str());
+            let held_subject = checked_subject.to_string();
+            let envelope = Envelope {
+                outgoing,
+                sender: &sender_address,
+                sender_groups: &sender_groups,
+                sender_tenant,
+                recipients: recipients
+                    .iter()
+                    .map(|(address, local, groups)| Recipient {
+                        address,
+                        local: *local,
+                        groups,
+                    })
+                    .collect(),
+            };
+
+            let mut content = Content {
+                subject: checked_subject,
+                size: message.len() as u64,
+                ..Default::default()
+            };
+            let mut reading = Reading {
+                budget: INSPECTION_LIMIT,
+                attachments: MAX_INSPECTED_ATTACHMENTS,
+                inspect: checking.reads_content(&envelope),
+            };
+            match &parsed {
+                Some(parsed) => {
+                    content.headers = parsed
+                        .headers()
+                        .iter()
+                        .filter_map(|h| h.value.as_text().map(|v| (h.name.as_str(), v)))
+                        .collect();
+                    collect(parsed, &mut content, &mut reading, 0);
+                }
+                // Nothing a rule could read: say so, rather than pass it
+                None => content.truncated = true,
+            }
+            (checking.evaluate(&envelope, &content), tag, held_subject)
+        })
+        .await;
+        let (outcome, tag, held_subject) = match checked {
+            Ok(checked) => checked,
+            Err(err) => {
+                trc::error!(
+                    trc::EventType::Server(trc::ServerEvent::ThreadError)
+                        .into_err()
+                        .span_id(self.data.session_id)
+                        .caused_by(trc::location!())
+                        .reason(err)
+                        .details("Failed to check a message against the mail rules")
+                );
+                // Fail closed, as when the rules can't be loaded
+                return Checked::Refuse(
+                    b"451 4.3.0 This message couldn't be checked against the server's rules. Try again later.\r\n"
+                        .to_vec(),
+                    None,
+                );
+            }
         };
 
-        let outcome = rules.evaluate(&envelope, &content);
         let override_reason =
             jmap_override.or_else(|| tag.as_ref().map(|(reason, _)| reason.clone()));
         let decision = outcome.decision(override_reason.is_some());
@@ -324,7 +393,6 @@ impl<T: SessionStream> Session<T> {
         domains.sort_unstable();
         domains.dedup();
         let domains = domains.join(", ");
-        drop(envelope);
 
         if let Some((account_id, account)) = &sender {
             self.record_dlp(
@@ -396,7 +464,13 @@ impl<T: SessionStream> Session<T> {
                                 text,
                                 html,
                                 position,
-                            } => rewrite::add_disclaimer(now, text, html.as_deref(), *position),
+                            } => rewrite::add_disclaimer(
+                                now,
+                                text,
+                                html.as_deref(),
+                                *position,
+                                outgoing,
+                            ),
                             RuleAction::AddHeader { name, value } => {
                                 Some(rewrite::add_header(now, name, value))
                             }
@@ -654,7 +728,121 @@ impl<T: SessionStream> Session<T> {
 
 #[cfg(test)]
 mod tests {
-    use super::override_tag;
+    use super::*;
+    use mail_auth::zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
+    use mail_builder::MessageBuilder;
+    use std::io::Write;
+
+    /// What each attachment of `message` came to.
+    fn inspect(message: &[u8]) -> Vec<Extracted> {
+        let parsed = MessageParser::new().parse(message).unwrap();
+        let mut content = Content::default();
+        let mut reading = Reading {
+            budget: INSPECTION_LIMIT,
+            attachments: MAX_INSPECTED_ATTACHMENTS,
+            inspect: true,
+        };
+        collect(&parsed, &mut content, &mut reading, 0);
+        content
+            .attachments
+            .into_iter()
+            .map(|a| a.extracted)
+            .collect()
+    }
+
+    /// A message with these (type, name, contents) attachments.
+    fn with_attachments(parts: Vec<(&'static str, String, Vec<u8>)>) -> Vec<u8> {
+        let mut message = MessageBuilder::new()
+            .from("dana@example.com")
+            .to("x@elsewhere.org")
+            .subject("Files")
+            .text_body("See attached.");
+        for (content_type, name, body) in parts {
+            message = message.attachment(content_type, name, body);
+        }
+        message.write_to_vec().unwrap()
+    }
+
+    /// A small ZIP that unpacks to more than a message is read for, and
+    /// says it holds 1,000 bytes.
+    fn bomb() -> Vec<u8> {
+        let mut zip = ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        zip.start_file(
+            "a.txt",
+            SimpleFileOptions::default().compression_method(CompressionMethod::Deflated),
+        )
+        .unwrap();
+        let chunk = vec![b'a'; 1024 * 1024];
+        for _ in 0..(INSPECTION_LIMIT / chunk.len() + 2) {
+            zip.write_all(&chunk).unwrap();
+        }
+        let mut bytes = zip.finish().unwrap().into_inner();
+        // The uncompressed size, in the local header and the central
+        // directory: nothing checks it against the data
+        bytes[22..26].copy_from_slice(&1000u32.to_le_bytes());
+        let central = bytes.windows(4).position(|w| w == b"PK\x01\x02").unwrap();
+        bytes[central + 24..central + 28].copy_from_slice(&1000u32.to_le_bytes());
+        bytes
+    }
+
+    /// The inspection limit is one budget for the whole message: what an
+    /// archive unpacks counts against it whether or not it became text, so
+    /// a message of small ZIPs that each unpack to megabytes is unpacked
+    /// once, not once per attachment.
+    #[test]
+    fn one_unpacking_budget_per_message() {
+        let bomb = bomb();
+        assert!(bomb.len() < 64 * 1024, "{}", bomb.len());
+        let mut parts: Vec<_> = (0..20)
+            .map(|i| ("application/zip", format!("{i}.zip"), bomb.clone()))
+            .collect();
+        parts.push((
+            "text/plain",
+            "last.txt".into(),
+            b"card 4242424242424242".to_vec(),
+        ));
+        let started = std::time::Instant::now();
+        let extracted = inspect(&with_attachments(parts));
+        let elapsed = started.elapsed();
+        assert_eq!(extracted.len(), 21);
+        assert!(
+            extracted
+                .iter()
+                .all(|e| *e == Extracted::NotInspectable(extract::Why::TooLarge)),
+            "{:?}",
+            extracted.last()
+        );
+        assert!(elapsed.as_secs() < 20, "{elapsed:?}");
+    }
+
+    /// Past a number of attachments the rest aren't read: they can't be
+    /// inspected.
+    #[test]
+    fn attachments_read_per_message_are_capped() {
+        let parts: Vec<_> = (0..MAX_INSPECTED_ATTACHMENTS + 3)
+            .map(|i| {
+                (
+                    "text/plain",
+                    format!("{i}.txt"),
+                    format!("note {i}").into_bytes(),
+                )
+            })
+            .collect();
+        let extracted = inspect(&with_attachments(parts));
+        assert_eq!(extracted.len(), MAX_INSPECTED_ATTACHMENTS + 3);
+        assert!(
+            extracted[..MAX_INSPECTED_ATTACHMENTS]
+                .iter()
+                .all(|e| matches!(e, Extracted::Text(_)))
+        );
+        assert!(
+            extracted[MAX_INSPECTED_ATTACHMENTS..]
+                .iter()
+                .all(|e| *e == Extracted::NotInspectable(extract::Why::TooLarge)),
+            "{:?}",
+            &extracted[MAX_INSPECTED_ATTACHMENTS..]
+        );
+    }
 
     #[test]
     fn override_tags() {

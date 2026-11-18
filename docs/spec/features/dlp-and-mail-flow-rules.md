@@ -225,7 +225,8 @@ Office documents (DOCX, XLSX, PPTX, ODT, ODS, ODP) are read too (settled
 answer 2): they're ZIP files of XML, unpacked and read in-house with limits on
 unpacked size and entry count. PDF files count as **can't be inspected** in
 this version, so a policy can still act on them. Inspection stops at
-a limit per message (proposed 10 MB of text), and what's past it counts as
+a limit per message (10 MiB, of text and of data unpacked from attachments
+together) and after 100 attachments, and what's past either counts as
 can't be inspected too.
 
 ### 2.4 Actions
@@ -370,7 +371,11 @@ rules after every node is upgraded.
 Rules are compiled once when they change (regexes, word lists as an
 Aho-Corasick automaton) and shared by every session. Detectors only run on
 mail that some enabled rule could match (direction, sender, recipient checks
-first). The inspection limit caps the worst case.
+first), and bodies and attachments are read only when such a rule has a
+condition on what they say (words, a pattern, a detector, can't be
+inspected). The inspection limit is one budget per message, shared by
+every attachment, so it caps the worst case; the reading runs off the
+async workers.
 
 ## 3. Console
 

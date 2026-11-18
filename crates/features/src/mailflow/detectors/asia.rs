@@ -64,7 +64,8 @@ fn re(pattern: &str) -> Regex {
 }
 
 /// Twelve digits written in fours, or bare.
-static TWELVE: LazyLock<Regex> = LazyLock::new(|| re(r"\b(\d{4})( ?)(\d{4})( ?)(\d{4})\b"));
+static TWELVE: LazyLock<Regex> =
+    LazyLock::new(|| re(r"\b([0-9]{4})( ?)([0-9]{4})( ?)([0-9]{4})\b"));
 
 const VERHOEFF_D: [[u8; 10]; 10] = [
     [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
@@ -91,6 +92,9 @@ const VERHOEFF_P: [[u8; 10]; 8] = [
 
 /// The Verhoeff check (dihedral group D5).
 pub fn verhoeff(n: &str) -> bool {
+    if !n.bytes().all(|b| b.is_ascii_digit()) {
+        return false;
+    }
     let mut c = 0u8;
     for (i, b) in n.bytes().rev().enumerate() {
         c = VERHOEFF_D[c as usize][VERHOEFF_P[i % 8][(b - b'0') as usize] as usize];
@@ -116,7 +120,7 @@ fn in_aadhaar(text: &str, findings: &mut Findings) {
 }
 
 /// Five letters (the fourth names the holder's type), four digits, a letter.
-static PAN: LazyLock<Regex> = LazyLock::new(|| re(r"\b[A-Z]{3}[ABCFGHLJPTK][A-Z]\d{4}[A-Z]\b"));
+static PAN: LazyLock<Regex> = LazyLock::new(|| re(r"\b[A-Z]{3}[ABCFGHLJPTK][A-Z][0-9]{4}[A-Z]\b"));
 
 const PAN_WORDS: &[&str] = &["pan", "pan card", "permanent account number", "income tax"];
 
@@ -130,12 +134,16 @@ fn in_pan(text: &str, findings: &mut Findings) {
 
 /// Region, birth date `YYYYMMDD`, sequence, then the ISO 7064 MOD 11-2
 /// check (0–9 or X).
-static CN_ID: LazyLock<Regex> =
-    LazyLock::new(|| re(r"(?i)\b[1-8]\d{5}(\d{4})(\d{2})(\d{2})\d{3}[\dX]\b"));
+static CN_ID: LazyLock<Regex> = LazyLock::new(|| {
+    re(r"(?i)\b(?-u:[1-8][0-9]{5}([0-9]{4})([0-9]{2})([0-9]{2})[0-9]{3}[0-9X])\b")
+});
 
 pub fn cn_id_valid(id: &str) -> bool {
     const WEIGHTS: [u32; 17] = [7, 9, 10, 5, 8, 4, 2, 1, 6, 3, 7, 9, 10, 5, 8, 4, 2];
     const CHECKS: &[u8] = b"10X98765432";
+    if id.len() != 18 || !id.is_ascii() {
+        return false;
+    }
     let sum: u32 = digit_values(&id[..17])
         .iter()
         .zip(WEIGHTS)
@@ -158,6 +166,9 @@ fn cn_resident_id(text: &str, findings: &mut Findings) {
 /// gives 0, else 11 minus it.
 pub fn my_number_valid(n: &str) -> bool {
     let d = digit_values(n);
+    if d.len() != 12 {
+        return false;
+    }
     let sum: u32 = (1..=11)
         .map(|i| d[11 - i] * if i <= 6 { i as u32 + 1 } else { i as u32 - 5 })
         .sum();
@@ -189,7 +200,7 @@ fn jp_my_number(text: &str, findings: &mut Findings) {
     }
 }
 
-static NRIC: LazyLock<Regex> = LazyLock::new(|| re(r"(?i)\b([STFGM])(\d{7})([A-Z])\b"));
+static NRIC: LazyLock<Regex> = LazyLock::new(|| re(r"(?i)\b(?-u:([STFGM])([0-9]{7})([A-Z]))\b"));
 
 /// Weights 2, 7, 6, 5, 4, 3, 2; T and G add 4, M adds 3; each series has its
 /// own table of check letters.
@@ -223,7 +234,8 @@ fn sg_nric(text: &str, findings: &mut Findings) {
 }
 
 /// `YYMMDD-GNNNNNN`, the seventh digit giving sex and century.
-static RRN: LazyLock<Regex> = LazyLock::new(|| re(r"\b(\d{2})(\d{2})(\d{2})-?([1-8])\d{6}\b"));
+static RRN: LazyLock<Regex> =
+    LazyLock::new(|| re(r"\b([0-9]{2})([0-9]{2})([0-9]{2})-?([1-8])[0-9]{6}\b"));
 
 const RRN_WORDS: &[&str] = &["주민등록번호", "주민번호", "resident registration", "rrn"];
 

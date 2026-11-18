@@ -64,7 +64,8 @@ fn re(pattern: &str) -> Regex {
 }
 
 /// `AAA-GG-SSSS` (dashes or spaces), or nine bare digits.
-static NINE: LazyLock<Regex> = LazyLock::new(|| re(r"\b(\d{3})([ -]?)(\d{2})([ -]?)(\d{4})\b"));
+static NINE: LazyLock<Regex> =
+    LazyLock::new(|| re(r"\b([0-9]{3})([ -]?)([0-9]{2})([ -]?)([0-9]{4})\b"));
 
 /// Numbers the SSA has published as never valid: widely printed examples.
 const SSN_EXAMPLES: &[&str] = &["078051120", "219099999"];
@@ -112,7 +113,7 @@ fn itin(text: &str, findings: &mut Findings) {
     }
 }
 
-static EIN: LazyLock<Regex> = LazyLock::new(|| re(r"\b(\d{2})-?(\d{7})\b"));
+static EIN: LazyLock<Regex> = LazyLock::new(|| re(r"\b([0-9]{2})-?([0-9]{7})\b"));
 
 /// The prefixes the IRS assigns to its campuses and internet EINs.
 fn ein_prefix(prefix: u32) -> bool {
@@ -137,7 +138,7 @@ fn ein(text: &str, findings: &mut Findings) {
     }
 }
 
-static ROUTING: LazyLock<Regex> = LazyLock::new(|| re(r"\b\d{9}\b"));
+static ROUTING: LazyLock<Regex> = LazyLock::new(|| re(r"\b[0-9]{9}\b"));
 
 /// The ABA check: 3, 7 and 1 weights, mod 10; and a Federal Reserve prefix.
 pub fn aba_valid(n: &str) -> bool {
@@ -161,7 +162,7 @@ fn aba_routing(text: &str, findings: &mut Findings) {
 
 /// The shapes states issue: up to two letters, then 5–14 digits, dashes
 /// allowed (Florida and Illinois print them).
-static LICENSE: LazyLock<Regex> = LazyLock::new(|| re(r"\b[A-Z]{0,2}\d[\d-]{3,16}\d\b"));
+static LICENSE: LazyLock<Regex> = LazyLock::new(|| re(r"\b[A-Z]{0,2}[0-9][0-9-]{3,16}[0-9]\b"));
 
 const LICENSE_WORDS: &[&str] = &[
     "driver's license",
@@ -201,7 +202,7 @@ fn mbi(text: &str, findings: &mut Findings) {
     }
 }
 
-static TEN: LazyLock<Regex> = LazyLock::new(|| re(r"\b[12]\d{9}\b"));
+static TEN: LazyLock<Regex> = LazyLock::new(|| re(r"\b[12][0-9]{9}\b"));
 
 const NPI_WORDS: &[&str] = &["npi", "national provider", "provider id", "provider number"];
 
@@ -216,7 +217,7 @@ fn npi(text: &str, findings: &mut Findings) {
     }
 }
 
-static DEA: LazyLock<Regex> = LazyLock::new(|| re(r"\b([ABCDEFGHJKLMPRSTUX][A-Z9])(\d{7})\b"));
+static DEA: LazyLock<Regex> = LazyLock::new(|| re(r"\b([ABCDEFGHJKLMPRSTUX][A-Z9])([0-9]{7})\b"));
 
 /// DEA: (1st + 3rd + 5th) + 2 × (2nd + 4th + 6th) ends in the 7th digit.
 fn dea(text: &str, findings: &mut Findings) {

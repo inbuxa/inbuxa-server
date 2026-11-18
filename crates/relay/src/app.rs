@@ -22,7 +22,7 @@ use inbuxa_relay_proto::{
 };
 use std::{
     collections::HashMap,
-    net::IpAddr,
+    net::{IpAddr, Ipv6Addr},
     sync::{
         Arc, Mutex, RwLock,
         atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
@@ -65,6 +65,10 @@ pub struct App {
     pub started_at: u64,
     pub last_error: Mutex<Option<String>>,
     pub limiter: Mutex<Limiter>,
+    /// SMTP sessions open now, against `maxSmtpSessions`.
+    pub smtp_sessions: AtomicU32,
+    /// Bytes of inbound mail being received, not yet in the spool.
+    pub receiving: AtomicU64,
     pub self_upgrade: bool,
     /// The keys a release must be signed by (RL-29).
     pub release_keys: Vec<[u8; 32]>,
@@ -117,6 +121,8 @@ impl App {
             started_at: time::now(),
             last_error: Mutex::new(None),
             limiter: Mutex::new(Limiter::default()),
+            smtp_sessions: AtomicU32::new(0),
+            receiving: AtomicU64::new(0),
             self_upgrade: std::env::var_os("INBUXA_RELAY_CONTAINER").is_none(),
             release_keys: inbuxa_relay_proto::release::RELEASE_KEYS.to_vec(),
             exe: crate::upgrade::current_exe(),
@@ -266,13 +272,25 @@ impl App {
         }
     }
 
+    /// The spool's bytes, both ways, with the mail being received.
+    fn spool_bytes(&self) -> u64 {
+        self.spool.lock().expect("spool").bytes()
+            + self.outbox.lock().expect("outbox").bytes()
+            + self.receiving.load(Ordering::Relaxed)
+    }
+
     /// Whether the spool is too full for new mail, either way: past 90% of
-    /// the cap.
+    /// the cap, or its disk past 90%.
     pub fn spool_full(&self, settings: &RelaySettings) -> bool {
-        let bytes =
-            self.spool.lock().expect("spool").bytes() + self.outbox.lock().expect("outbox").bytes();
-        bytes.saturating_mul(10) >= settings.spool_max_bytes.saturating_mul(9)
-            || disk_nearly_full(&self.paths.spool_in())
+        self.spool_bytes().saturating_mul(10) >= settings.spool_max_bytes.saturating_mul(9)
+            || disk_nearly_full(&self.paths.spool_in(), 10)
+    }
+
+    /// Whether `more` bytes of a message being received still fit: under
+    /// the cap itself, and, when `disk` asks, with 5% of the disk free.
+    pub fn spool_has_room(&self, settings: &RelaySettings, more: u64, disk: bool) -> bool {
+        self.spool_bytes().saturating_add(more) <= settings.spool_max_bytes
+            && !(disk && disk_nearly_full(&self.paths.spool_in(), 5))
     }
 
     /// Writes `status.json`, for `inbuxa-relay status`.
@@ -283,8 +301,9 @@ impl App {
     }
 }
 
+/// Whether less than `percent_free` of the disk holding `path` is free.
 #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
-fn disk_nearly_full(path: &std::path::Path) -> bool {
+fn disk_nearly_full(path: &std::path::Path, percent_free: u64) -> bool {
     use std::{ffi::CString, os::unix::ffi::OsStrExt};
     unsafe extern "C" {
         fn statvfs(path: *const std::ffi::c_char, buf: *mut std::ffi::c_void) -> i32;
@@ -300,15 +319,16 @@ fn disk_nearly_full(path: &std::path::Path) -> bool {
     // SAFETY: a valid C string, and a buffer larger than struct statvfs.
     let rc = unsafe { statvfs(cpath.as_ptr(), buf.as_mut_ptr().cast()) };
     let (blocks, avail) = (buf[2], buf[4]);
-    rc == 0 && blocks > 0 && avail.saturating_mul(10) < blocks
+    rc == 0 && blocks > 0 && avail.saturating_mul(100) < blocks.saturating_mul(percent_free)
 }
 
 #[cfg(not(all(target_os = "linux", target_pointer_width = "64")))]
-fn disk_nearly_full(_: &std::path::Path) -> bool {
+fn disk_nearly_full(_: &std::path::Path, _: u64) -> bool {
     false
 }
 
 /// Per-IP limits at the door (spec "At the door, always", step 1).
+/// An IPv6 sender is its /64: one host can have every address in it.
 #[derive(Default)]
 pub struct Limiter {
     ips: HashMap<IpAddr, IpCount>,
@@ -322,10 +342,19 @@ struct IpCount {
     open: u32,
 }
 
+/// What `ip` is counted as: its /64 for IPv6, and the IPv4 address for an
+/// IPv4-mapped one.
+fn sender(ip: IpAddr) -> IpAddr {
+    match ip.to_canonical() {
+        IpAddr::V6(v6) => IpAddr::V6(Ipv6Addr::from(u128::from(v6) & !u128::from(u64::MAX))),
+        v4 => v4,
+    }
+}
+
 impl Limiter {
     fn entry(&mut self, ip: IpAddr, now: u64) -> &mut IpCount {
         let minute = now / 60;
-        let count = self.ips.entry(ip).or_default();
+        let count = self.ips.entry(sender(ip)).or_default();
         if count.minute != minute {
             count.minute = minute;
             count.connections = 0;
@@ -348,7 +377,7 @@ impl Limiter {
     }
 
     pub fn disconnect(&mut self, ip: IpAddr) {
-        if let Some(count) = self.ips.get_mut(&ip) {
+        if let Some(count) = self.ips.get_mut(&sender(ip)) {
             count.open = count.open.saturating_sub(1);
         }
     }
@@ -400,5 +429,37 @@ mod tests {
         assert!(!l.message(ip, &s, 60));
         l.sweep(200);
         assert!(l.ips.contains_key(&ip), "still open");
+    }
+
+    /// An IPv6 /64 is one sender, and an IPv4-mapped address is
+    /// the IPv4 address.
+    #[test]
+    fn ipv6_counts_by_64() {
+        let s = RelaySettings {
+            rate_limits: RateLimits {
+                connections_per_minute: 100,
+                messages_per_minute: 100,
+                concurrent_sessions: 2,
+            },
+            ..Default::default()
+        };
+        let ip = |text: &str| text.parse::<IpAddr>().unwrap();
+        let mut l = Limiter::default();
+        assert!(l.connect(ip("2001:db8:1:2::1"), &s, 0));
+        assert!(l.connect(ip("2001:db8:1:2:ffff::9"), &s, 0));
+        assert!(
+            !l.connect(ip("2001:db8:1:2::77"), &s, 0),
+            "a third address in the same /64"
+        );
+        assert!(l.connect(ip("2001:db8:1:3::1"), &s, 0), "another /64");
+        l.disconnect(ip("2001:db8:1:2:ffff::9"));
+        assert!(l.connect(ip("2001:db8:1:2::77"), &s, 0));
+
+        assert!(l.connect(ip("192.0.2.7"), &s, 0));
+        assert!(l.connect(ip("::ffff:192.0.2.7"), &s, 0));
+        assert!(
+            !l.connect(ip("192.0.2.7"), &s, 0),
+            "the mapped address is the same sender"
+        );
     }
 }

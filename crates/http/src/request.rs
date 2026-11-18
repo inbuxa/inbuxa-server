@@ -397,6 +397,7 @@ impl ParseHttp for Server {
                         .into_bytes(),
                     )
                     .into_http_response()
+                    .with_sandbox_policy()
                     .with_cors_unrestricted());
                 }
                 ("mail-v1.xml", &Method::GET) => {
@@ -407,7 +408,7 @@ impl ParseHttp for Server {
                     return self
                         .handle_autoconfig_request(req.uri().query())
                         .await
-                        .map(|resource| resource.into_http_response());
+                        .map(|resource| resource.into_http_response().with_sandbox_policy());
                 }
                 ("autoconfig", &Method::GET)
                     if path.next().unwrap_or_default() == "mail"
@@ -417,10 +418,14 @@ impl ParseHttp for Server {
                     self.is_http_anonymous_request_allowed(session.remote_ip)
                         .await?;
 
-                    return self
-                        .handle_autoconfig_request(req.uri().query())
-                        .await
-                        .map(|resource| resource.into_http_response().with_cors_unrestricted());
+                    return self.handle_autoconfig_request(req.uri().query()).await.map(
+                        |resource| {
+                            resource
+                                .into_http_response()
+                                .with_sandbox_policy()
+                                .with_cors_unrestricted()
+                        },
+                    );
                 }
                 (_, &Method::OPTIONS) => {
                     return Ok(HttpResponse::new(StatusCode::NO_CONTENT).with_cors_unrestricted());
@@ -500,7 +505,7 @@ impl ParseHttp for Server {
                     return self
                         .handle_autoconfig_request(req.uri().query())
                         .await
-                        .map(|resource| resource.into_http_response());
+                        .map(|resource| resource.into_http_response().with_sandbox_policy());
                 }
             }
             "calendar" => {
@@ -542,7 +547,7 @@ impl ParseHttp for Server {
                             fetch_body(&mut req, 8192, session.session_id).await,
                         )
                         .await
-                        .map(|resource| resource.into_http_response());
+                        .map(|resource| resource.into_http_response().with_sandbox_policy());
                 } else if document_name.eq_ignore_ascii_case("autodiscover.json") {
                     // Limit anonymous requests
                     self.is_http_anonymous_request_allowed(session.remote_ip)
@@ -555,11 +560,14 @@ impl ParseHttp for Server {
                     return self
                         .handle_autodiscover_v2_request(req.uri().query(), path_email.as_deref())
                         .await
-                        .map(|result| match result {
-                            Ok(resource) => resource.into_http_response(),
-                            Err(err) => HttpResponse::new(StatusCode::BAD_REQUEST)
-                                .with_content_type("application/json; charset=utf-8")
-                                .with_text_body(err),
+                        .map(|result| {
+                            match result {
+                                Ok(resource) => resource.into_http_response(),
+                                Err(err) => HttpResponse::new(StatusCode::BAD_REQUEST)
+                                    .with_content_type("application/json; charset=utf-8")
+                                    .with_text_body(err),
+                            }
+                            .with_sandbox_policy()
                         });
                 }
             }
@@ -839,6 +847,10 @@ async fn handle_session<T: SessionStream>(inner: Arc<Inner>, session: SessionDat
                             headers.insert(header.clone(), value.clone());
                         }
                     }
+
+                    // inbuxa: L-2: anti-framing on pages, nosniff, and HSTS
+                    // on TLS, unless the answer or the operator set them
+                    crate::security_headers::add_security_headers(response.headers_mut(), is_tls);
 
                     // inbuxa: echo an allowed front end's origin, never `*`
                     // (contract C-14). Responses that already set their own

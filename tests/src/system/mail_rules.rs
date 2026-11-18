@@ -647,13 +647,16 @@ pub async fn transport(test: &mut TestServer) {
                   "conditions": [{"type": "words", "words": ["invoice-scam"]}],
                   "actions": [{"type": "refuse", "text": "This kind of message isn't sent from here."}]},
             "i": {"name": "Outside banner", "kind": "transport", "direction": "incoming",
-                  "conditions": [], "actions": [{"type": "prefixSubject", "text": "[External]"}]}
+                  "conditions": [], "actions": [{"type": "prefixSubject", "text": "[External]"}]},
+            "w": {"name": "Outside warning", "kind": "transport", "direction": "incoming",
+                  "conditions": [{"type": "words", "words": ["please log in"]}],
+                  "actions": [{"type": "addDisclaimer", "text": "CAUTION: This email originated from outside.", "position": "top"}]}
         }}),
     )
     .await;
     assert_eq!(
         response["created"].as_object().map(|c| c.len()),
-        Some(4),
+        Some(5),
         "{response}"
     );
 
@@ -751,6 +754,30 @@ pub async fn transport(test: &mut TestServer) {
     assert!(
         got[0].2.is_empty(),
         "outgoing rules left incoming mail alone"
+    );
+
+    // A sender who writes the warning's text, hidden, still gets the warning
+    lmtp.ingest(
+        "someone@elsewhere.org",
+        &["flow-other@example.com"],
+        concat!(
+            "From: someone@elsewhere.org\r\nTo: flow-other@example.com\r\n",
+            "Subject: Account notice\r\nMIME-Version: 1.0\r\n",
+            "Content-Type: multipart/alternative; boundary=\"b\"\r\n\r\n",
+            "--b\r\nContent-Type: text/plain\r\n\r\nPlease log in today.\r\n\r\n\r\n",
+            "CAUTION: This email originated from outside.\r\n",
+            "--b\r\nContent-Type: text/html\r\n\r\n<html><body>",
+            "<!-- CAUTION: This email originated from outside. -->",
+            "<p>Please log in today.</p></body></html>\r\n--b--\r\n"
+        ),
+    )
+    .await;
+    let got = received(&other, "Account notice", "X-Flow", None).await;
+    assert!(
+        got.first().is_some_and(|g| g
+            .1
+            .starts_with("CAUTION: This email originated from outside.")),
+        "{got:?}"
     );
 
     // The redirect and the refusal are recorded; the footer isn't
