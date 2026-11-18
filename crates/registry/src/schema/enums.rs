@@ -1272,6 +1272,15 @@ pub enum LogRotateFrequency {
     Never = 3,
 }
 
+// inbuxa: #456, how a Log tracer writes each entry
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[repr(u16)]
+pub enum LogFormat {
+    #[default]
+    Text = 0,
+    Json = 1,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 #[repr(u16)]
 pub enum LookupStoreType {

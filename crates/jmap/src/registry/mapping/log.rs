@@ -252,6 +252,17 @@ struct LogHeader<'x> {
 }
 
 fn log_header(line: &str) -> Option<LogHeader<'_>> {
+    // inbuxa (#456): a Log tracer writing JSON lines
+    if line.starts_with('{') {
+        let entry = serde_json::from_str::<JsonLogHead<'_>>(line).ok()?;
+        return Some(LogHeader {
+            timestamp: DateTime::parse_from_rfc3339(entry.timestamp)
+                .ok()?
+                .timestamp(),
+            level: TracingLevel::parse(&entry.level.to_ascii_lowercase()).map(|l| l as u8),
+            event: entry.event,
+        });
+    }
     if !line.as_bytes().first()?.is_ascii_digit() {
         return None;
     }
@@ -409,7 +420,53 @@ pub(crate) fn read_log_entries(
     Ok(entries)
 }
 
+/// inbuxa (#456): the fields of a JSON log line that a query filters on.
+#[derive(serde::Deserialize)]
+struct JsonLogHead<'x> {
+    #[serde(borrow)]
+    timestamp: &'x str,
+    #[serde(borrow)]
+    level: &'x str,
+    #[serde(borrow)]
+    event: &'x str,
+}
+
+/// inbuxa (#456): a JSON log line, its `data` handed back as a JSON object
+/// in `details`, so a reader gets the fields exactly as they were written.
+#[derive(serde::Deserialize)]
+struct JsonLogEntry<'x> {
+    #[serde(borrow)]
+    timestamp: &'x str,
+    #[serde(borrow)]
+    level: &'x str,
+    #[serde(borrow)]
+    event: &'x str,
+    #[serde(default)]
+    data: serde_json::Map<String, serde_json::Value>,
+}
+
+fn log_from_json_line(line: &str) -> Option<Log> {
+    let entry = serde_json::from_str::<JsonLogEntry<'_>>(line.trim_end()).ok()?;
+    Some(Log {
+        timestamp: UTCDateTime::from_timestamp(
+            DateTime::parse_from_rfc3339(entry.timestamp)
+                .ok()?
+                .timestamp(),
+        ),
+        level: TracingLevel::parse(&entry.level.to_ascii_lowercase()).unwrap_or(TracingLevel::Info),
+        event: EventType::parse(entry.event)?,
+        details: if entry.data.is_empty() {
+            String::new()
+        } else {
+            serde_json::Value::Object(entry.data).to_string()
+        },
+    })
+}
+
 fn log_from_line(line: &str) -> Option<Log> {
+    if line.starts_with('{') {
+        return log_from_json_line(line);
+    }
     let line = strip_ansi(line);
     let (timestamp, rest) = line.split_once(' ')?;
     let timestamp = DateTime::parse_from_rfc3339(timestamp).ok()?;
@@ -636,7 +693,7 @@ impl<R: Read + Seek> Iterator for RevLines<R> {
 
 #[cfg(test)]
 mod tests {
-    use super::{LogFilter, read_log_offsets};
+    use super::{LogFilter, read_log_entries, read_log_offsets};
 
     #[test]
     fn limit_zero_reads_no_entries() {
@@ -701,5 +758,134 @@ mod tests {
         assert_eq!(exact, 1);
         assert_eq!(window, 2);
         assert_eq!(after, 2);
+    }
+
+    // inbuxa (#456): files written as JSON lines are queried and read like
+    // text ones, and a mix of both (a tracer switched over) reads in order
+    #[test]
+    fn reads_json_lines() {
+        let dir = std::env::temp_dir().join(format!("inbuxa-log-json-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("inbuxa.log.2026-11-18"),
+            concat!(
+                "2026-11-18T10:00:00Z INFO SMTP connection started (smtp.connection-start) remoteIp = 192.0.2.1\n",
+                r#"{"timestamp":"2026-11-18T10:00:01Z","level":"warn","event":"store.data-corruption","description":"Data corruption","data":{"details":"a \"quoted\" word, with a comma"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-11-18T10:00:02Z","level":"error","event":"imap.connection-end","description":"x","data":{}}"#,
+                "\n",
+                r#"{"timestamp":"2026-11-18T10:00:03Z","level":"debug","event":"smtp.rcpt-to","description":"y","data":{"to":["a@example.org"],"size":12}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        let ids = |filter: LogFilter| read_log_offsets(&dir, &filter, 0, 10).unwrap();
+
+        let all = ids(LogFilter::default());
+        let at_least_warn = ids(LogFilter {
+            level: Some(1),
+            ..Default::default()
+        });
+        let smtp = ids(LogFilter {
+            event: Some("smtp".into()),
+            ..Default::default()
+        });
+        let window = ids(LogFilter {
+            from: 1_794_996_001,
+            to: 1_794_996_002,
+            ..Default::default()
+        });
+        let text = ids(LogFilter {
+            text: Some("comma".into()),
+            ..Default::default()
+        });
+        let entries = read_log_entries(&dir, Some(all.clone()), 10).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        assert_eq!(all.len(), 4);
+        assert_eq!(at_least_warn.len(), 2, "warn and error");
+        assert_eq!(smtp.len(), 2, "smtp.* only");
+        assert_eq!(window.len(), 2);
+        assert_eq!(text.len(), 1);
+
+        // Newest first
+        let events = entries
+            .iter()
+            .map(|(_, log)| log.event.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            events,
+            [
+                "smtp.rcpt-to",
+                "imap.connection-end",
+                "store.data-corruption",
+                "smtp.connection-start"
+            ]
+        );
+        let details = |i: usize| entries[i].1.details.as_str();
+        let rcpt: serde_json::Value = serde_json::from_str(details(0)).unwrap();
+        assert_eq!(
+            rcpt,
+            serde_json::json!({"to": ["a@example.org"], "size": 12})
+        );
+        assert_eq!(details(1), "", "no fields, no details");
+        let corruption: serde_json::Value = serde_json::from_str(details(2)).unwrap();
+        assert_eq!(corruption["details"], "a \"quoted\" word, with a comma");
+        assert_eq!(details(3), "remoteIp = 192.0.2.1");
+        assert_eq!(entries[2].1.level as u8, 1);
+    }
+
+    // inbuxa (#456): what the Log tracer writes as JSON reads back exactly
+    #[test]
+    fn json_tracer_output_reads_back() {
+        use trc::{Event, EventDetails, EventType, Key, Level, SmtpEvent, Value};
+
+        let event = Event {
+            inner: EventDetails {
+                typ: EventType::Smtp(SmtpEvent::RcptTo),
+                timestamp: 1_794_996_000,
+                level: Level::Debug,
+                span: Some(std::sync::Arc::new(Event {
+                    inner: EventDetails {
+                        typ: EventType::Smtp(SmtpEvent::ConnectionStart),
+                        timestamp: 1_794_995_999,
+                        level: Level::Info,
+                        span: None,
+                    },
+                    keys: vec![(Key::RemoteIp, Value::String("192.0.2.1".into()))],
+                })),
+            },
+            keys: vec![(Key::To, Value::String("a \"b\", c@example.org".into()))],
+        };
+        let mut line = serde_json::to_string(&trc::serializers::json::JsonLogLine(&event)).unwrap();
+        line.push('\n');
+
+        let dir = std::env::temp_dir().join(format!("inbuxa-log-rt-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("inbuxa.log"), &line).unwrap();
+        let ids = read_log_offsets(
+            &dir,
+            &LogFilter {
+                level: Some(3),
+                event: Some("smtp.rcpt-to".into()),
+                ..Default::default()
+            },
+            0,
+            10,
+        )
+        .unwrap();
+        let entries = read_log_entries(&dir, Some(ids), 10).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        assert_eq!(entries.len(), 1);
+        let log = &entries[0].1;
+        assert_eq!(log.event, EventType::Smtp(SmtpEvent::RcptTo));
+        assert_eq!(log.level as u8, 3);
+        assert_eq!(log.timestamp.timestamp(), 1_794_996_000);
+        let data: serde_json::Value = serde_json::from_str(&log.details).unwrap();
+        assert_eq!(
+            data,
+            serde_json::json!({"to": "a \"b\", c@example.org", "remoteIp": "192.0.2.1"})
+        );
     }
 }

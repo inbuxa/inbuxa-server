@@ -9,11 +9,11 @@
 use crate::{
     pickle::{Pickle, PickledStream},
     schema::{
-        enums::{MtaRouteType, OidcOpaqueTokens},
+        enums::{LogFormat, MtaRouteType, OidcOpaqueTokens},
         prelude::{ObjectImpl, ObjectInner, ObjectType},
         structs::{
             Bootstrap, Directory, DirectoryBootstrap, Domain, Enterprise, MtaRoute, MtaRouteCommon,
-            MtaRouteInbuxaRelay, OidcDirectory, Tenant,
+            MtaRouteInbuxaRelay, OidcDirectory, Tenant, Tracer, TracerLog,
         },
     },
     types::{EnumImpl, map::Map},
@@ -30,6 +30,26 @@ fn pickle_without_opaque_tokens(directory: &OidcDirectory, out: &mut Vec<u8>) {
     directory.claim_name.pickle(out);
     directory.claim_groups.pickle(out);
     directory.member_tenant_id.pickle(out);
+}
+
+/// A tracer as it was stored before a Log tracer had a format (#456).
+fn pickle_tracer_before_format(tracer: &Tracer, out: &mut Vec<u8>) {
+    match tracer {
+        Tracer::Log(log) => {
+            0u16.pickle(out);
+            log.path.pickle(out);
+            log.prefix.pickle(out);
+            log.rotate.pickle(out);
+            log.ansi.pickle(out);
+            log.multiline.pickle(out);
+            log.enable.pickle(out);
+            log.level.pickle(out);
+            log.lossy.pickle(out);
+            log.events.pickle(out);
+            log.events_policy.pickle(out);
+        }
+        other => other.pickle(out),
+    }
 }
 
 fn read(object: ObjectType, bytes: &[u8]) -> ObjectInner {
@@ -77,7 +97,7 @@ fn oidc_directories_saved_before_the_opaque_token_policy_keep_userinfo() {
     bootstrap.in_memory_store.pickle(&mut bytes);
     3u16.pickle(&mut bytes);
     pickle_without_opaque_tokens(&saved, &mut bytes);
-    bootstrap.tracer.pickle(&mut bytes);
+    pickle_tracer_before_format(&bootstrap.tracer, &mut bytes);
     bootstrap.dns_server.pickle(&mut bytes);
     assert_eq!(
         read(ObjectType::Bootstrap, &bytes),
@@ -217,5 +237,69 @@ fn logos_saved_before_dark_mode_read_back_without_a_dark_logo() {
     assert_eq!(
         read(ObjectType::Enterprise, &enterprise.to_pickled_vec()),
         ObjectInner::Enterprise(enterprise)
+    );
+}
+
+// #456: Log tracers saved before the format setting read back as text, in a
+// tracer of their own and in the bootstrap, where more fields follow the
+// tracer; saved now, a JSON one reads back as JSON
+#[test]
+fn log_tracers_saved_before_the_format_read_back_as_text() {
+    let log = TracerLog {
+        path: "/var/log/inbuxa".to_string(),
+        prefix: "inbuxa.log".to_string(),
+        ansi: false,
+        ..Default::default()
+    };
+    assert_eq!(log.format, LogFormat::Text);
+    let tracer = Tracer::Log(log.clone());
+
+    // x:Tracer, version 0
+    let mut bytes = vec![0u8];
+    pickle_tracer_before_format(&tracer, &mut bytes);
+    assert_eq!(
+        read(ObjectType::Tracer, &bytes),
+        ObjectInner::Tracer(tracer.clone())
+    );
+
+    // x:Bootstrap, version 2
+    let bootstrap = Bootstrap {
+        server_hostname: "mx.example.org".to_string(),
+        tracer: tracer.clone(),
+        ..Default::default()
+    };
+    let mut bytes = vec![2u8];
+    bootstrap.server_hostname.pickle(&mut bytes);
+    bootstrap.default_domain.pickle(&mut bytes);
+    bootstrap.request_tls_certificate.pickle(&mut bytes);
+    bootstrap.generate_dkim_keys.pickle(&mut bytes);
+    bootstrap.data_store.pickle(&mut bytes);
+    bootstrap.blob_store.pickle(&mut bytes);
+    bootstrap.search_store.pickle(&mut bytes);
+    bootstrap.in_memory_store.pickle(&mut bytes);
+    bootstrap.directory.pickle(&mut bytes);
+    pickle_tracer_before_format(&bootstrap.tracer, &mut bytes);
+    bootstrap.dns_server.pickle(&mut bytes);
+    assert_eq!(
+        read(ObjectType::Bootstrap, &bytes),
+        ObjectInner::Bootstrap(bootstrap.clone())
+    );
+
+    // Saved now
+    let tracer = Tracer::Log(TracerLog {
+        format: LogFormat::Json,
+        ..log
+    });
+    let bootstrap = Bootstrap {
+        tracer: tracer.clone(),
+        ..bootstrap
+    };
+    assert_eq!(
+        read(ObjectType::Tracer, &tracer.to_pickled_vec()),
+        ObjectInner::Tracer(tracer)
+    );
+    assert_eq!(
+        read(ObjectType::Bootstrap, &bootstrap.to_pickled_vec()),
+        ObjectInner::Bootstrap(bootstrap)
     );
 }

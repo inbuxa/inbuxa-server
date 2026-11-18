@@ -14,7 +14,7 @@ use crate::utils::{
 };
 use registry::{
     schema::{
-        enums::{EventPolicy, LogRotateFrequency, TracingLevel},
+        enums::{EventPolicy, LogFormat, LogRotateFrequency, TracingLevel},
         prelude::ObjectType,
         structs::{Expression, MtaStageAuth, Tracer, TracerLog},
     },
@@ -92,6 +92,7 @@ async fn test_log_tracer_moves(test: &TestServer) {
             lossy: false,
             events: Map::new(vec![EventType::Server(ServerEvent::Licensing)]),
             events_policy: EventPolicy::Include,
+            format: LogFormat::Text,
         })])
         .await;
     assert_applied(&response);
@@ -149,6 +150,34 @@ async fn test_log_tracer_moves(test: &TestServer) {
     assert!(
         new_seq.iter().any(|c| *c > 0),
         "no event of the stream reached the new file"
+    );
+
+    // inbuxa (#456): switched to JSON lines, the tracer writes one object
+    // per line after the text it wrote before
+    let response = admin
+        .registry_update(ObjectType::Tracer, [(tracer_id, json!({"format": "json"}))])
+        .await;
+    assert_applied(&response);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    emit("marker-json \"quoted\"");
+    wait_for(&new_file, "marker-json").await;
+    let text = read(&new_file);
+    let line = text
+        .lines()
+        .find(|line| line.contains("marker-json"))
+        .unwrap();
+    let entry: serde_json::Value = serde_json::from_str(line).unwrap_or_else(|err| {
+        panic!("not a JSON line ({err}): {line}");
+    });
+    assert_eq!(entry["event"], "server.licensing", "{entry}");
+    assert_eq!(
+        entry["data"]["details"], "marker-json \"quoted\"",
+        "{entry}"
+    );
+    assert!(
+        text.lines()
+            .any(|line| line.contains("marker-after") && !line.starts_with('{')),
+        "the text written before stays text"
     );
 
     // Removing the tracer stops it
