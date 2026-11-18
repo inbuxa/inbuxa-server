@@ -58,7 +58,7 @@ RUN export DEBIAN_FRONTEND=noninteractive && \
 FROM mirror.gcr.io/library/debian:trixie-slim
 RUN export DEBIAN_FRONTEND=noninteractive && \
     apt-get update && \
-    apt-get install -yq --no-install-recommends ca-certificates curl libcap2-bin && \
+    apt-get install -yq --no-install-recommends ca-certificates curl && \
     rm -rf /var/lib/apt/lists/* && \
     groupadd -r -g 2000 inbuxa && \
     useradd -r -u 2000 -g 2000 -s /usr/sbin/nologin -M inbuxa && \
@@ -68,7 +68,11 @@ COPY --from=builder --chmod=0755 /output/inbuxa /usr/local/bin/inbuxa
 COPY --from=migrate --chmod=0755 /migrate/inbuxa-migrate /usr/local/bin/inbuxa-migrate
 COPY --from=migrate /migrate/LICENSES /usr/share/doc/inbuxa-migrate/LICENSES
 COPY --from=migrate /migrate/README.md /usr/share/doc/inbuxa-migrate/README.md
-RUN setcap 'cap_net_bind_service=+ep' /usr/local/bin/inbuxa
+# inbuxa: K-S1: no file capability on the binary. One would make exec fail
+# where every capability is dropped (Kubernetes' restricted pods). Docker
+# lets an unprivileged user bind ports below 1024 on its own networks
+# (net.ipv4.ip_unprivileged_port_start=0); elsewhere, grant that sysctl or
+# CAP_NET_BIND_SERVICE, or move the listeners with INBUXA_LISTENER_PORTS.
 USER inbuxa
 WORKDIR /var/lib/inbuxa
 VOLUME ["/etc/inbuxa", "/var/lib/inbuxa"]

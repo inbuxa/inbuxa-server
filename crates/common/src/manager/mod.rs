@@ -24,6 +24,7 @@ pub mod console;
 pub mod defaults;
 pub mod first_party;
 pub mod granted_permissions; // inbuxa: permissions added after roles were stored
+pub mod listener_ports; // inbuxa: K-S1, default listener ports from the environment
 pub mod restore;
 pub mod spam_rules; // inbuxa: rules bundled with the server
 #[cfg(target_os = "linux")]

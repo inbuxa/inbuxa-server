@@ -339,9 +339,20 @@ impl Listeners {
         for server in &self.servers {
             for listener in &server.listeners {
                 if let Err(err) = listener.socket.bind(listener.addr) {
+                    // inbuxa: K-S1: the image no longer carries the capability
+                    // to bind low ports, so say what grants it
+                    let hint = if err.kind() == std::io::ErrorKind::PermissionDenied
+                        && listener.addr.port() < 1024
+                    {
+                        " (ports below 1024 need CAP_NET_BIND_SERVICE, or the sysctl \
+                         net.ipv4.ip_unprivileged_port_start=0; or move the listener to \
+                         a higher port)"
+                    } else {
+                        ""
+                    };
                     bp.build_error(
                         server.registry_id,
-                        format!("Failed to bind to {}: {}", listener.addr, err),
+                        format!("Failed to bind to {}: {}{hint}", listener.addr, err),
                     );
                 }
             }
