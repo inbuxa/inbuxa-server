@@ -62,7 +62,10 @@ async fn main() -> std::io::Result<()> {
 
     // inbuxa: K-S3: --upgrade-store upgrades the store's layout and exits
     if init.upgrade_store {
-        std::process::exit(upgrade_store_and_exit(&init.inner.build_server()).await);
+        // Boxed: inline, its future made main's too deep to lay out once
+        // every store backend is compiled in (the release image's features)
+        let server = init.inner.build_server();
+        std::process::exit(Box::pin(upgrade_store_and_exit(&server)).await);
     }
 
     // Migrate database
