@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
@@ -347,6 +349,83 @@ async fn dkim2_inbound_dsn_validation() {
             "550",
         )
         .await;
+}
+
+// inbuxa: every value of a DKIM2 signature's s= list is a key lookup and a
+// signature check over the signed headers, which include the list itself,
+// so the work grew with the square of the list. A signature with more than
+// four values, or a chain or header past the other limits, isn't checked
+// and the message has no DKIM2 result.
+#[tokio::test]
+#[serial_test::serial]
+async fn dkim2_signature_work_is_limited() {
+    let mut server = TestServerBuilder::new("dkim2_limits")
+        .await
+        .with_http_listener(19061)
+        .await
+        .disable_services()
+        .capture_queue()
+        .build()
+        .await;
+
+    let admin = server.account("admin");
+    admin.mta_allow_relaying().await;
+    admin.mta_no_auth().await;
+    admin.mta_all_extensions().await;
+    admin.mta_disable_spam_filter().await;
+    admin.mta_add_all_headers().await;
+    admin.configure_sender_auth("''").await;
+    admin.reload_settings().await;
+    server.reload_core();
+    server.expect_reload_settings().await;
+    server
+        .server
+        .txt_add("ed._domainkey.example.com", dkim_dns_record(), valid());
+
+    let sign = |values: usize| {
+        let mut signer = Dkim2Signer::from_key(ed25519_key())
+            .domain("example.com")
+            .selector("ed");
+        for _ in 1..values {
+            signer = signer.additional_key(ed25519_key(), "ed");
+        }
+        let signed = signer
+            .sign(
+                RETURNED_PLAIN.as_bytes(),
+                Hop::real("john@example.com", ["bob@foobar.org"]),
+            )
+            .expect("dkim2 sign");
+        let mut out = signed.to_header();
+        out.push_str(RETURNED_PLAIN);
+        out
+    };
+
+    let mut session = server.new_mta_session();
+    session.data.remote_ip_str = "10.0.0.1".into();
+    session.eval_session_params().await;
+    session.ehlo("mx.example.com").await;
+
+    let cases = match std::env::var("TEST_DKIM2_VALUES") {
+        Ok(values) => vec![(values.parse::<usize>().unwrap(), None)],
+        Err(_) => vec![(1, Some(true)), (4, Some(true)), (5, Some(false))],
+    };
+    for (values, passes) in cases {
+        let message = sign(values);
+        let started = Instant::now();
+        session
+            .send_message("john@example.com", &["bob@foobar.org"], &message, "250")
+            .await;
+        let elapsed = started.elapsed();
+        let delivered = server.consume_message().await.read_message(&server).await;
+        let pass = without_whitespace(&delivered).contains("dkim2=pass");
+        println!(
+            "{values} values, {} bytes: dkim2 pass={pass} in {elapsed:?}",
+            message.len()
+        );
+        if let Some(passes) = passes {
+            assert_eq!(pass, passes, "{values} values: {delivered}");
+        }
+    }
 }
 
 impl Account {
