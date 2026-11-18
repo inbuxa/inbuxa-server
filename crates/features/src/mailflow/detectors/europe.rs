@@ -29,7 +29,7 @@ pub static DETECTORS: &[Detector] = &[
 ];
 
 static ELEVEN: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\b\d{6} ?\d{5}\b").expect("detector pattern"));
+    LazyLock::new(|| Regex::new(r"\b[0-9]{6} ?[0-9]{5}\b").expect("detector pattern"));
 
 /// Two mod 11 check digits over a birth date (D-numbers add 40 to the day,
 /// H-numbers 40 to the month): strong enough to count alone.
@@ -64,7 +64,7 @@ fn no_fnr(text: &str, findings: &mut Findings) {
 
 /// `756.1234.5678.97`: the country prefix, then an EAN-13 check digit.
 static AHV: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\b756[. ]?\d{4}[. ]?\d{4}[. ]?\d{2}\b").expect("detector pattern")
+    Regex::new(r"\b756[. ]?[0-9]{4}[. ]?[0-9]{4}[. ]?[0-9]{2}\b").expect("detector pattern")
 });
 
 pub fn ean13_valid(n: &str) -> bool {

@@ -115,7 +115,8 @@ Each requirement has an ID, and tests name the IDs they check.
   rewritten, and never refused on read. **Decision** on odd ones: a bare
   base64 string (the schema says "base64-encoded image") is treated as a data
   URL whose type is sniffed from its first bytes, and an `http:` URL is used
-  like an `https:` one. A value that is none of these is skipped as if unset,
+  like an `https:` one, except that `/logo` never redirects to it and uses the
+  next logo instead (BT-5). A value that is none of these is skipped as if unset,
   with a `registry.build-warning` event naming the object.
 
 ### Logos: serving and embedding
@@ -123,11 +124,19 @@ Each requirement has an ID, and tests name the IDs they check.
 - **BT-5.** `GET /logo`, anonymous, rate-limited like the other anonymous
   endpoints. It resolves a logo per BT-1 and BT-2 and answers:
   - a data-URL logo: `200` with the decoded bytes and their type;
-  - a URL logo: `302` to that URL;
+  - a URL logo: `302` to that URL when the browser loads it as an image
+    (`Sec-Fetch-Dest: image`, BT-26), else `404`;
   - no custom logo at any level: `404`, and the page draws its own.
-  Every answer carries `Cache-Control: public, max-age=300`,
-  `X-Content-Type-Options: nosniff`, and `Access-Control-Allow-Origin: *`.
-  **Decision** on the shape (see open question 3).
+  Every answer carries `X-Content-Type-Options: nosniff` and
+  `Access-Control-Allow-Origin: *`. A URL logo's answer carries
+  `Cache-Control: no-store` and `Vary: Sec-Fetch-Dest`; every other answer
+  `Cache-Control: public, max-age=300`.
+  **Decision** on the shape (see open question 3). **Decision**, a security
+  requirement: a domain's administrator chooses a URL logo, so `/logo` must
+  not redirect a link opened in the browser to it, or anyone hosting a domain
+  could send people from the server's address to a page of their choosing. A
+  browser that doesn't send `Sec-Fetch-Dest` shows the built-in logo instead
+  of a URL logo.
 - **BT-6.** An unknown domain answers exactly as a known domain with no logo
   of its own would: the server-wide logo or `404`. **Decision**: `/logo` isn't
   a way to test which domains are hosted, beyond what a domain's own logo

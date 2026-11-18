@@ -43,6 +43,22 @@ fn requested_domain(req: &HttpRequest) -> String {
         .unwrap_or_default()
 }
 
+/// Whether the browser is loading `/logo` as an image, as an `<img>` does
+/// (BT-26). A link opened, a frame, a script or a client that doesn't say
+/// isn't.
+fn loads_as_image(req: &HttpRequest) -> bool {
+    req.headers()
+        .get("sec-fetch-dest")
+        .is_some_and(|dest| dest.as_bytes().eq_ignore_ascii_case(b"image"))
+}
+
+/// An `https:` URL; an `http:` one stored before the fork (BT-4) is never
+/// redirected to.
+fn is_https(url: &str) -> bool {
+    url.get(..6)
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("https:"))
+}
+
 /// `GET /logo`: the image, a redirect to a URL logo, or `404` when no
 /// custom logo applies. The server never fetches a URL (BT-7).
 pub async fn logo(server: &Server, req: &HttpRequest) -> trc::Result<HttpResponse> {
@@ -50,7 +66,7 @@ pub async fn logo(server: &Server, req: &HttpRequest) -> trc::Result<HttpRespons
         .logos_for(&requested_domain(req))
         .await?
         .into_iter()
-        .next()
+        .find(|logo| !matches!(logo, Logo::Url(url) if !is_https(url)))
     {
         Some(Logo::Image {
             content_type,
@@ -65,14 +81,23 @@ pub async fn logo(server: &Server, req: &HttpRequest) -> trc::Result<HttpRespons
             } else {
                 response
             }
+            .with_cache_control(LOGO_CACHE)
         }
         Some(Logo::Url(url)) => {
-            HttpResponse::new(StatusCode::FOUND).with_header(header::LOCATION, url)
+            // A domain's administrator chooses the URL: only an image load
+            // follows it, so /logo can't send a person to any page it likes.
+            // The answer depends on who asks, so no cache keeps it
+            if loads_as_image(req) {
+                HttpResponse::new(StatusCode::FOUND).with_header(header::LOCATION, url)
+            } else {
+                HttpResponse::new(StatusCode::NOT_FOUND)
+            }
+            .with_no_store()
+            .with_header(header::VARY, "Sec-Fetch-Dest")
         }
-        None => HttpResponse::new(StatusCode::NOT_FOUND),
+        None => HttpResponse::new(StatusCode::NOT_FOUND).with_cache_control(LOGO_CACHE),
     };
     Ok(response
-        .with_cache_control(LOGO_CACHE)
         .with_header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
         .with_header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"))
 }

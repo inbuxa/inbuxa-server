@@ -223,7 +223,7 @@ pub async fn test(test: &mut TestServer) {
             json!({"logo": "https://logo.example.org/t.png"}),
         )
         .await;
-    let answer = get(&admin, "/logo?domain=t-brand.example.org", None).await;
+    let answer = get_image(&admin, "/logo?domain=t-brand.example.org").await;
     assert_eq!(answer.status, StatusCode::FOUND, "test 3");
     assert_eq!(answer.header("location"), "https://logo.example.org/t.png");
     let gif = data_url("image/gif", b"GIF89a\x01\0\x01\0\0\0\0;");
@@ -254,14 +254,52 @@ pub async fn test(test: &mut TestServer) {
         )
         .await;
     let started = std::time::Instant::now();
-    let answer = get(&admin, "/logo?domain=plain-brand.example.org", None).await;
-    assert_eq!(answer.status, StatusCode::FOUND, "test 5");
-    assert_eq!(answer.header("location"), "https://192.0.2.1/logo.png");
+    let redirect = get_image(&admin, "/logo?domain=plain-brand.example.org").await;
+    assert_eq!(redirect.status, StatusCode::FOUND, "test 5");
+    assert_eq!(redirect.header("location"), "https://192.0.2.1/logo.png");
     // TEST-NET-1 never answers: a fetch would hang, a redirect is instant
     assert!(
         started.elapsed() < Duration::from_secs(2),
         "test 5: no fetch"
     );
+    // Only an image load is redirected: a link opened in the browser, a page
+    // framing it, a script or a client that doesn't say isn't, so /logo
+    // can't send people to the URL a domain's administrator chose
+    for dest in [Some("document"), Some("iframe"), Some("empty"), None] {
+        let mut request = http().get(format!(
+            "{}/logo?domain=plain-brand.example.org",
+            admin.base_url()
+        ));
+        if let Some(dest) = dest {
+            request = request.header("sec-fetch-dest", dest);
+        }
+        let answer = Answer::read(request.send().await.unwrap()).await;
+        assert_eq!(answer.status, StatusCode::NOT_FOUND, "test 5: {dest:?}");
+        assert_eq!(answer.header("location"), "", "test 5: {dest:?}");
+        answer.assert_url_logo_headers("test 5");
+    }
+    redirect.assert_url_logo_headers("test 5");
+    // An http: URL stored before the fork is never redirected to
+    store_directly(
+        test,
+        ObjectInner::Enterprise(Enterprise {
+            logo_url: Some("http://logo.example.org/old.png".to_string()),
+            ..Default::default()
+        }),
+    )
+    .await;
+    let answer = get_image(&admin, "/logo?domain=nowhere.example.net").await;
+    assert_eq!(answer.status, StatusCode::NOT_FOUND, "test 5: http");
+    assert_eq!(answer.header("location"), "", "test 5: http");
+    admin
+        .registry_update_setting(
+            Enterprise {
+                logo_url: Some(png_url.clone()),
+                ..Default::default()
+            },
+            &[Property::LogoUrl],
+        )
+        .await;
     let resource = test
         .server
         .logo_resource("plain-brand.example.org")
@@ -760,7 +798,19 @@ impl Answer {
             .to_string()
     }
 
-    /// BT-5: every `/logo` answer carries these.
+    /// BT-5: a URL logo's answer depends on who asks, so no cache keeps it.
+    fn assert_url_logo_headers(&self, test: &str) {
+        assert_eq!(
+            self.header("cache-control"),
+            "no-store, no-cache, must-revalidate",
+            "{test}"
+        );
+        assert_eq!(self.header("vary"), "Sec-Fetch-Dest", "{test}");
+        assert_eq!(self.header("x-content-type-options"), "nosniff", "{test}");
+        assert_eq!(self.header("access-control-allow-origin"), "*", "{test}");
+    }
+
+    /// BT-5: every other `/logo` answer carries these.
     fn assert_logo_headers(&self, test: &str) {
         assert_eq!(
             self.header("cache-control"),
@@ -787,11 +837,24 @@ async fn get(account: &Account, path: &str, host: Option<&str>) -> Answer {
     if let Some(host) = host {
         request = request.header("host", host);
     }
-    let response = request.send().await.unwrap();
-    Answer {
-        status: response.status(),
-        headers: response.headers().clone(),
-        body: response.bytes().await.unwrap().to_vec(),
+    Answer::read(request.send().await.unwrap()).await
+}
+
+/// An anonymous GET as a browser's `<img>` makes it (BT-26).
+async fn get_image(account: &Account, path: &str) -> Answer {
+    let request = http()
+        .get(format!("{}{path}", account.base_url()))
+        .header("sec-fetch-dest", "image");
+    Answer::read(request.send().await.unwrap()).await
+}
+
+impl Answer {
+    async fn read(response: reqwest::Response) -> Answer {
+        Answer {
+            status: response.status(),
+            headers: response.headers().clone(),
+            body: response.bytes().await.unwrap().to_vec(),
+        }
     }
 }
 

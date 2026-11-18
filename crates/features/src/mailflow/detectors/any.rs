@@ -109,7 +109,7 @@ fn is_card(number: &str) -> bool {
     (12..=19).contains(&number.len()) && card_network(number) && checks::luhn(number)
 }
 
-static CARD: LazyLock<Regex> = LazyLock::new(|| re(r"\b\d(?:[ -]?\d){11,18}\b"));
+static CARD: LazyLock<Regex> = LazyLock::new(|| re(r"\b[0-9](?:[ -]?[0-9]){11,18}\b"));
 
 fn payment_card(text: &str, findings: &mut Findings) {
     for m in CARD.find_iter(text) {
@@ -140,7 +140,7 @@ fn payment_card(text: &str, findings: &mut Findings) {
 // --- IBAN -----------------------------------------------------------------
 
 static IBAN: LazyLock<Regex> =
-    LazyLock::new(|| re(r"\b[A-Za-z]{2}\d{2}(?:[ ]?[A-Za-z0-9]){11,30}"));
+    LazyLock::new(|| re(r"\b[A-Za-z]{2}[0-9]{2}(?:[ ]?[A-Za-z0-9]){11,30}"));
 
 fn iban(text: &str, findings: &mut Findings) {
     // The pattern can run on into the next words, even the next IBAN: after
@@ -213,9 +213,10 @@ fn email_addresses(text: &str, findings: &mut Findings) {
 }
 
 /// International form: found alone. National form: only with a word.
-static PHONE_INTL: LazyLock<Regex> = LazyLock::new(|| re(r"\+\d{1,3}(?:[ .-]?\(?\d{1,4}\)?){2,5}"));
+static PHONE_INTL: LazyLock<Regex> =
+    LazyLock::new(|| re(r"\+[0-9]{1,3}(?:[ .-]?\(?[0-9]{1,4}\)?){2,5}"));
 static PHONE_NATIONAL: LazyLock<Regex> =
-    LazyLock::new(|| re(r"\(?\d{2,4}\)?[ .-]\d{3,4}[ .-]\d{3,4}"));
+    LazyLock::new(|| re(r"\(?[0-9]{2,4}\)?[ .-][0-9]{3,4}[ .-][0-9]{3,4}"));
 
 const PHONE_WORDS: &[&str] = &[
     "phone",
@@ -262,12 +263,12 @@ fn phone_numbers(text: &str, findings: &mut Findings) {
 
 // --- Date of birth --------------------------------------------------------
 
-static DATE_ISO: LazyLock<Regex> = LazyLock::new(|| re(r"\b(\d{4})-(\d{2})-(\d{2})\b"));
+static DATE_ISO: LazyLock<Regex> = LazyLock::new(|| re(r"\b([0-9]{4})-([0-9]{2})-([0-9]{2})\b"));
 static DATE_NUMERIC: LazyLock<Regex> =
-    LazyLock::new(|| re(r"\b(\d{1,2})[./-](\d{1,2})[./-](\d{4})\b"));
+    LazyLock::new(|| re(r"\b([0-9]{1,2})[./-]([0-9]{1,2})[./-]([0-9]{4})\b"));
 static DATE_WORDS: LazyLock<Regex> = LazyLock::new(|| {
     re(
-        r"(?i)\b(?:(\d{1,2})\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?,?\s+(\d{4})|(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2}),?\s+(\d{4}))\b",
+        r"(?i)\b(?:([0-9]{1,2})\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?,?\s+([0-9]{4})|(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+([0-9]{1,2}),?\s+([0-9]{4}))\b",
     )
 });
 

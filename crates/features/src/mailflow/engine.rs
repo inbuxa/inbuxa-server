@@ -95,6 +95,35 @@ enum Check {
     AttachmentName(Pattern),
 }
 
+impl Check {
+    /// Reads the message's text, or whether all of it could be read.
+    fn reads_content(&self) -> bool {
+        matches!(
+            self,
+            Check::Words(..)
+                | Check::Pattern(..)
+                | Check::Plain(Condition::Detected { .. } | Condition::CantBeInspected)
+        )
+    }
+
+    /// Decided by the sender and recipients alone.
+    fn envelope_only(&self) -> bool {
+        matches!(
+            self,
+            Check::Plain(
+                Condition::SenderAddress { .. }
+                    | Condition::SenderDomain { .. }
+                    | Condition::SenderGroup { .. }
+                    | Condition::SenderTenant { .. }
+                    | Condition::RecipientAddress { .. }
+                    | Condition::RecipientDomain { .. }
+                    | Condition::RecipientGroup { .. }
+                    | Condition::RecipientOutside
+            )
+        )
+    }
+}
+
 struct CompiledRule {
     rule: Rule,
     conditions: Vec<Check>,
@@ -224,6 +253,32 @@ impl Compiled {
         self.rules
             .iter()
             .any(|c| direction_matches(c.rule.direction, outgoing))
+    }
+
+    /// Whether any rule that could match this envelope reads what the
+    /// message says (words, a pattern, a detector, or whether some of it
+    /// can't be inspected), so a caller can skip reading the bodies and
+    /// unpacking attachments when none does. A rule's sender and recipient
+    /// conditions are checked here; the others are assumed to match.
+    pub fn reads_content(&self, envelope: &Envelope<'_>) -> bool {
+        let nothing = Content::default();
+        let mut state = State {
+            content: &nothing,
+            detected: AHashMap::new(),
+        };
+        self.rules.iter().any(|compiled| {
+            direction_matches(compiled.rule.direction, envelope.outgoing)
+                && compiled
+                    .conditions
+                    .iter()
+                    .chain(&compiled.exceptions)
+                    .any(Check::reads_content)
+                && compiled
+                    .conditions
+                    .iter()
+                    .filter(|check| check.envelope_only())
+                    .all(|check| state.check(check, envelope, &mut Vec::new()))
+        })
     }
 
     pub fn evaluate(&self, envelope: &Envelope<'_>, content: &Content<'_>) -> Outcome {
@@ -536,6 +591,57 @@ mod tests {
             rules.evaluate(&envelope(false), &cards(5)).decision(false),
             Decision::Pass
         );
+    }
+
+    /// Attachments are unpacked only for a rule that reads them and could
+    /// match this sender and these recipients.
+    #[test]
+    fn content_read_only_when_a_rule_reads_it() {
+        let header = rule(
+            1,
+            Kind::Transport,
+            vec![Condition::RecipientOutside],
+            Action::AddHeader {
+                name: "X-Outside".into(),
+                value: "yes".into(),
+            },
+        );
+        let (rules, _) = Compiled::new(std::slice::from_ref(&header));
+        assert!(rules.applies_to(true));
+        assert!(!rules.reads_content(&envelope(true)));
+
+        let (rules, _) = Compiled::new(&[
+            header.clone(),
+            five_cards_outside(Action::Block {
+                notice: "No".into(),
+            }),
+        ]);
+        assert!(rules.reads_content(&envelope(true)));
+        // The DLP rule only looks at mail leaving the organization
+        assert!(!rules.reads_content(&envelope(false)));
+        // Nor at incoming mail
+        let mut incoming = envelope(true);
+        incoming.outgoing = false;
+        assert!(!rules.reads_content(&incoming));
+
+        // An exception that reads the text counts too
+        let mut excepted = header;
+        excepted.exceptions = vec![Condition::Words {
+            words: vec!["internal".into()],
+            at_least: 1,
+        }];
+        let (rules, _) = Compiled::new(&[excepted]);
+        assert!(rules.reads_content(&envelope(true)));
+        let (rules, _) = Compiled::new(&[rule(
+            1,
+            Kind::Transport,
+            vec![Condition::CantBeInspected],
+            Action::AddHeader {
+                name: "X-Unread".into(),
+                value: "yes".into(),
+            },
+        )]);
+        assert!(rules.reads_content(&envelope(false)));
     }
 
     #[test]
