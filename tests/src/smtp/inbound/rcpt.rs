@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
@@ -195,6 +197,44 @@ async fn rcpt() {
     let rcpt = session.data.rcpt_to.last().unwrap();
     assert!((rcpt.flags & (RCPT_NOTIFY_DELAY | RCPT_NOTIFY_SUCCESS | RCPT_NOTIFY_FAILURE)) != 0);
     assert_eq!(rcpt.dsn_info.as_ref().unwrap(), "Jane.Doe@Foobar.org");
+
+    // inbuxa: an ENVID or ORCPT that decodes to anything but printable ASCII
+    // (RFC 3461) is refused, so a line break can't reach a later command
+    session.rset().await;
+    session
+        .ingest(b"MAIL FROM:<john@example.net> ENVID=x+0D+0ARSET+0D+0AMAIL+20FROM:<ceo@example.org>\r\n")
+        .await
+        .unwrap();
+    session
+        .response()
+        .assert_code("501 5.5.4")
+        .assert_contains("ENVID");
+    assert!(session.data.mail_from.is_none());
+    session.mail_from("john@example.net", "250").await;
+    session
+        .ingest(b"RCPT TO:<jane@foobar.org> ORCPT=rfc822;jane+0D+0ARSET@foobar.org\r\n")
+        .await
+        .unwrap();
+    session
+        .response()
+        .assert_code("501 5.5.4")
+        .assert_contains("ORCPT");
+    assert!(session.data.rcpt_to.is_empty());
+    session
+        .ingest(b"MAIL FROM:<john@example.net> ENVID=abc+2B123\r\n")
+        .await
+        .unwrap();
+    session.response().assert_code("503 5.5.1");
+    session.rset().await;
+    session
+        .ingest(b"MAIL FROM:<john@example.net> ENVID=abc+2B123\r\n")
+        .await
+        .unwrap();
+    session.response().assert_code("250");
+    assert_eq!(
+        session.data.mail_from.as_ref().unwrap().dsn_info.as_deref(),
+        Some("abc+123")
+    );
 
     let mut session = test.new_mta_session();
     session.data.remote_ip_str = "10.0.0.1".into();
