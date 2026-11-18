@@ -15,7 +15,7 @@ inbuxa-features = { path = "../features" }
 smtp-proto = { version = "0.2", features = ["rkyv"] }
 mail-parser = { version = "0.11", features = ["full_encoding"] } 
 mail-auth = { version = "0.13" }
-tokio = { version = "1.53", features = ["net", "macros"] }
+tokio = { version = "1.53", features = ["net", "macros", "rt"] }
 futures = "0.3"
 psl = "2"
 hyper = { version = "1.11.1", features = ["server", "http1", "http2"] }
@@ -30,6 +30,10 @@ rkyv = { version = "0.8.18", features = ["little_endian"] }
 serde = { version = "1.0", features = ["derive"]}
 unicode-general-category = "1.1.0"
 unicode-normalization = "0.1.25"
+# inbuxa: #401, links in QR codes: the four image formats mail uses, and a
+# QR reader that takes greyscale pixels (no image dependency of its own)
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+rqrr = { version = "0.11", default-features = false }
 
 [features]
 test_mode = []

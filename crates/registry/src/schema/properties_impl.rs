@@ -1189,6 +1189,7 @@ impl EnumImpl for Property {
             b"scoreDiscard" => Property::ScoreDiscard,
             b"scoreReject" => Property::ScoreReject,
             b"scoreSpam" => Property::ScoreSpam,
+            b"scanQrCodes" => Property::ScanQrCodes,
             b"script" => Property::Script,
             b"searchStore" => Property::SearchStore,
             b"secret" => Property::Secret,
@@ -2137,6 +2138,7 @@ impl EnumImpl for Property {
             Property::ScoreDiscard => "scoreDiscard",
             Property::ScoreReject => "scoreReject",
             Property::ScoreSpam => "scoreSpam",
+            Property::ScanQrCodes => "scanQrCodes",
             Property::Script => "script",
             Property::SearchStore => "searchStore",
             Property::Secret => "secret",
@@ -3045,6 +3047,7 @@ impl EnumImpl for Property {
             940 => Some(Property::Kind),
             941 => Some(Property::LogoDark),
             942 => Some(Property::LogoUrlDark),
+            943 => Some(Property::ScanQrCodes),
             615 => Some(Property::RequireClientRegistration),
             608 => Some(Property::RequireScopes),
             525 => Some(Property::RequireTls),
@@ -3256,7 +3259,7 @@ impl EnumImpl for Property {
         }
     }
 
-    const COUNT: usize = 943;
+    const COUNT: usize = 944;
 }
 
 impl serde::Serialize for Property {

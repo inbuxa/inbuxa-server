@@ -40507,7 +40507,8 @@ impl RegistryJsonPropertyPatch for SpamRuleUrl {
 
 impl ObjectImpl for SpamSettings {
     const FLAGS: u64 = OBJ_SINGLETON;
-    const VERSION: u8 = 0;
+    // inbuxa: version 1 adds scanQrCodes (#401)
+    const VERSION: u8 = 1;
     const OBJECT: ObjectType = ObjectType::SpamSettings;
 
     fn validate(&self, errors: &mut Vec<ValidationError>) -> bool {
@@ -40554,6 +40555,7 @@ impl Pickle for SpamSettings {
         self.score_spam.pickle(out);
         self.trust_replies.pickle(out);
         self.spam_filter_rules_url.pickle(out);
+        self.scan_qr_codes.pickle(out);
     }
 
     fn unpickle(stream: &mut crate::pickle::PickledStream<'_>) -> Option<Self> {
@@ -40566,6 +40568,10 @@ impl Pickle for SpamSettings {
         this.score_spam = Pickle::unpickle(stream)?;
         this.trust_replies = Pickle::unpickle(stream)?;
         this.spam_filter_rules_url = Pickle::unpickle(stream)?;
+        // inbuxa: #401, stored from version 1
+        if stream.version() >= 1 {
+            this.scan_qr_codes = Pickle::unpickle(stream)?;
+        }
         Some(this)
     }
 }
@@ -40581,6 +40587,7 @@ impl Default for SpamSettings {
             score_spam: Float::new(5.0f64),
             trust_replies: true,
             spam_filter_rules_url: None,
+            scan_qr_codes: false,
         }
     }
 }
@@ -40599,6 +40606,7 @@ impl IntoValue for SpamSettings {
             Property::SpamFilterRulesUrl,
             self.spam_filter_rules_url.into_value(),
         );
+        map.insert_unchecked(Property::ScanQrCodes, self.scan_qr_codes.into_value());
         JmapValue::Object(map)
     }
 }
@@ -40617,6 +40625,7 @@ impl RegistryJsonPropertyPatch for SpamSettings {
             Some(Property::ScoreReject) => self.score_reject.patch(pointer, value),
             Some(Property::ScoreSpam) => self.score_spam.patch(pointer, value),
             Some(Property::TrustReplies) => self.trust_replies.patch(pointer, value),
+            Some(Property::ScanQrCodes) => self.scan_qr_codes.patch(pointer, value),
             Some(Property::SpamFilterRulesUrl) => self
                 .spam_filter_rules_url
                 .patch(pointer.with_validators(&[StringValidator::Trim]), value),

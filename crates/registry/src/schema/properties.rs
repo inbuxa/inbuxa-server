@@ -996,6 +996,8 @@ pub enum Property {
     // inbuxa: branding BT-27, dark-mode logos
     LogoDark = 941,
     LogoUrlDark = 942,
+    // inbuxa: #401, links in QR codes
+    ScanQrCodes = 943,
     RequireClientRegistration = 615,
     RequireScopes = 608,
     RequireTls = 525,

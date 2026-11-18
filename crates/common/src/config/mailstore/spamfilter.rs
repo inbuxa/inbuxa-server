@@ -60,6 +60,8 @@ pub struct SpamFilterConfig {
     pub scores: SpamFilterScoreConfig,
     pub spam_rules_url: Option<String>,
     pub url_client: reqwest::Client,
+    // inbuxa: #401, read links in QR codes in a message's images
+    pub scan_qr_codes: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -218,6 +220,8 @@ pub enum Location {
     BodyHtml,
     Attachment,
     Tcp,
+    // inbuxa: #401, a link read from a QR code in an image
+    QrCode,
 }
 
 #[derive(Debug, Clone)]
@@ -249,6 +253,7 @@ impl SpamFilterConfig {
             grey_list_expiry: spam.greylist_for.map(|d| d.into_inner().as_secs()),
             // inbuxa: unset, empty or upstream's old default means the bundled rules
             spam_rules_url: crate::manager::spam_rules::rules_url(spam.spam_filter_rules_url),
+            scan_qr_codes: spam.scan_qr_codes,
             // inbuxa: redirectors are looked up over verified https, at
             // public addresses only
             url_client: utils::http::http_client_builder(false)
@@ -623,6 +628,7 @@ impl Location {
             Location::BodyHtml => "body_html",
             Location::Attachment => "attachment",
             Location::Tcp => "tcp",
+            Location::QrCode => "qr_code",
         }
     }
 }

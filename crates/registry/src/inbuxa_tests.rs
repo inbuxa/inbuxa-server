@@ -13,7 +13,7 @@ use crate::{
         prelude::{ObjectImpl, ObjectInner, ObjectType},
         structs::{
             Bootstrap, Directory, DirectoryBootstrap, Domain, Enterprise, MtaRoute, MtaRouteCommon,
-            MtaRouteInbuxaRelay, OidcDirectory, Tenant, Tracer, TracerLog,
+            MtaRouteInbuxaRelay, OidcDirectory, SpamSettings, Tenant, Tracer, TracerLog,
         },
     },
     types::{EnumImpl, map::Map},
@@ -301,5 +301,35 @@ fn log_tracers_saved_before_the_format_read_back_as_text() {
     assert_eq!(
         read(ObjectType::Bootstrap, &bootstrap.to_pickled_vec()),
         ObjectInner::Bootstrap(bootstrap)
+    );
+}
+
+// #401: spam settings saved before scanQrCodes read back with it off; saved
+// now, with it
+#[test]
+fn spam_settings_saved_before_qr_codes_read_back_with_scanning_off() {
+    let settings = SpamSettings {
+        trust_contacts: false,
+        spam_filter_rules_url: Some("https://example.org/rules.json.gz".to_string()),
+        ..Default::default()
+    };
+    let mut unset = Vec::new();
+    false.pickle(&mut unset);
+    let mut old = settings.to_pickled_vec();
+    assert!(old.ends_with(&unset));
+    old.truncate(old.len() - unset.len());
+    old[0] = 0;
+    assert_eq!(
+        read(ObjectType::SpamSettings, &old),
+        ObjectInner::SpamSettings(settings.clone())
+    );
+
+    let settings = SpamSettings {
+        scan_qr_codes: true,
+        ..settings
+    };
+    assert_eq!(
+        read(ObjectType::SpamSettings, &settings.to_pickled_vec()),
+        ObjectInner::SpamSettings(settings)
     );
 }

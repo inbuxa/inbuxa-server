@@ -31,6 +31,7 @@ pub mod messageid;
 pub mod mime;
 mod mime_types;
 pub mod pyzor;
+pub mod qr; // inbuxa: #401, links in QR codes
 pub mod received;
 pub mod recipient;
 pub mod replyto;
