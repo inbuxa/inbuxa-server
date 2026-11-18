@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::network::acme::ParsedCert;
@@ -194,6 +196,23 @@ pub(crate) async fn parse_certificates(
         }
     }
 
+    // No default certificate set: pick one now, once per load, so handshakes
+    // without SNI or for an unknown name get a predictable certificate.
+    if !certificates.contains_key("*") && certificates.len() > 1 {
+        let (key, covers_hostname) =
+            fallback_default_certificate(certificates, &system.default_hostname);
+        if !covers_hostname {
+            trc::event!(
+                Tls(trc::TlsEvent::MultipleCertificatesAvailable),
+                Total = certificates.len(),
+                Hostname = system.default_hostname.clone(),
+            );
+        }
+        if let Some(key) = key {
+            certificates.insert("*".into(), key);
+        }
+    }
+
     // Remove expired certificates
     if !certs_expired.is_empty() {
         for (id, sans, object) in certs_expired {
@@ -214,6 +233,34 @@ pub(crate) async fn parse_certificates(
             }
         }
     }
+}
+
+/// The certificate to use when no default is set: the one for the server's
+/// hostname (exact, then a wildcard on its parent domain), otherwise the one
+/// whose name sorts first, so the choice doesn't depend on hash-map order.
+/// The flag says whether the hostname was covered.
+pub(crate) fn fallback_default_certificate<T: Clone>(
+    certificates: &AHashMap<Box<str>, T>,
+    hostname: &str,
+) -> (Option<T>, bool) {
+    let hostname = hostname.trim_end_matches('.').to_ascii_lowercase();
+    if !hostname.is_empty()
+        && let Some(cert) = certificates.get(hostname.as_str()).or_else(|| {
+            hostname
+                .split_once('.')
+                .and_then(|(_, domain)| certificates.get(domain))
+        })
+    {
+        return (Some(cert.clone()), true);
+    }
+    (
+        certificates
+            .iter()
+            .filter(|(name, _)| name.as_ref() != "*")
+            .min_by(|a, b| a.0.cmp(b.0))
+            .map(|(_, cert)| cert.clone()),
+        false,
+    )
 }
 
 pub(crate) fn build_certified_key(
@@ -275,4 +322,56 @@ pub(crate) fn build_self_signed_cert(
         cert.pem().into_bytes(),
         signing_key.serialize_pem().into_bytes(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fallback_default_certificate;
+    use ahash::AHashMap;
+
+    fn certs(names: &[(&str, u32)]) -> AHashMap<Box<str>, u32> {
+        names
+            .iter()
+            .map(|(name, id)| (Box::<str>::from(*name), *id))
+            .collect()
+    }
+
+    #[test]
+    fn fallback_prefers_the_server_hostname() {
+        let map = certs(&[("a.example.org", 1), ("mail.example.com", 2), ("z.test", 3)]);
+        assert_eq!(
+            fallback_default_certificate(&map, "mail.example.com"),
+            (Some(2), true)
+        );
+        assert_eq!(
+            fallback_default_certificate(&map, "MAIL.example.com."),
+            (Some(2), true)
+        );
+    }
+
+    #[test]
+    fn fallback_uses_a_wildcard_on_the_hostname_domain() {
+        // A "*.example.com" SAN is stored under "example.com".
+        let map = certs(&[("a.example.org", 1), ("example.com", 2)]);
+        assert_eq!(
+            fallback_default_certificate(&map, "mail.example.com"),
+            (Some(2), true)
+        );
+    }
+
+    #[test]
+    fn fallback_without_a_match_is_the_same_every_time() {
+        let names: Vec<(String, u32)> = (0..64).map(|i| (format!("d{i:02}.test"), i)).collect();
+        for _ in 0..20 {
+            let map: AHashMap<Box<str>, u32> = names
+                .iter()
+                .map(|(n, i)| (Box::<str>::from(n.as_str()), *i))
+                .collect();
+            assert_eq!(
+                fallback_default_certificate(&map, "mail.other.net"),
+                (Some(0), false)
+            );
+            assert_eq!(fallback_default_certificate(&map, ""), (Some(0), false));
+        }
+    }
 }
