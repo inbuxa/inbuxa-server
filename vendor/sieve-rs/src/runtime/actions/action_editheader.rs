@@ -140,13 +140,15 @@ impl DeleteHeader {
         if !deleted_headers.is_empty() {
             ctx.has_changes = true;
             for (part_id, header_pos) in deleted_headers.iter().rev() {
-                ctx.message.parts[*part_id as usize]
-                    .headers
-                    .remove(*header_pos);
+                if let Some(part) = ctx.message.parts.get_mut(*part_id as usize)
+                    && *header_pos < part.headers.len()
+                {
+                    part.headers.remove(*header_pos);
+                }
             }
         }
 
-        ctx.message_size -= deleted_bytes;
+        ctx.message_size = ctx.message_size.saturating_sub(deleted_bytes);
     }
 }
 
@@ -178,6 +180,10 @@ impl<'x> Context<'x> {
         header_value: impl Into<Cow<'static, str>>,
         last: bool,
     ) {
+        // inbuxa: a part that is gone gets no header, rather than a panic
+        let Some(part) = self.message.parts.get_mut(part_id as usize) else {
+            return;
+        };
         let header_value = header_value.into();
         self.message_size += header_name.len() + header_value.len() + 4;
         let header = Header {
@@ -189,11 +195,9 @@ impl<'x> Context<'x> {
         };
 
         if !last {
-            self.message.parts[part_id as usize]
-                .headers
-                .insert(0, header);
+            part.headers.insert(0, header);
         } else {
-            self.message.parts[part_id as usize].headers.push(header);
+            part.headers.push(header);
         }
     }
 }
