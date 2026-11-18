@@ -26,7 +26,7 @@ use std::{
     io::{self, BufRead, BufReader, Read, Seek, SeekFrom},
     path::Path,
 };
-use store::ahash::AHashMap;
+use store::{ahash::AHashMap, registry::RegistryFilterOp};
 use tokio::sync::oneshot;
 use trc::EventType;
 use types::id::Id;
@@ -80,13 +80,59 @@ pub(crate) async fn log_query(
             .details("No log tracers configured on the server"));
     };
 
-    let mut filter = None;
+    let mut filter = LogFilter::default();
 
     req.request
-        .extract_filters(|property, _, value| match property {
+        .extract_filters(|property, op, value| match property {
             Property::Text => {
-                if let serde_json::Value::String(due) = value {
-                    filter = Some(due);
+                if let serde_json::Value::String(text) = value {
+                    filter.text = Some(text);
+                    true
+                } else {
+                    false
+                }
+            }
+            // inbuxa: the level picked and everything more severe, the way
+            // `journalctl -p` reads a priority
+            Property::Level => {
+                if let Some(level) = value
+                    .as_str()
+                    .and_then(|v| TracingLevel::parse(&v.to_ascii_lowercase()))
+                {
+                    filter.level = Some(level as u8);
+                    true
+                } else {
+                    false
+                }
+            }
+            // inbuxa: a component (`smtp`, `store`) or a whole event id
+            // (`smtp.connection-start`): the events whose id starts with it
+            Property::Event => {
+                if let Some(event) = value.as_str().map(|v| v.trim().to_ascii_lowercase())
+                    && !event.is_empty()
+                {
+                    filter.event = Some(event);
+                    true
+                } else {
+                    false
+                }
+            }
+            Property::Timestamp => {
+                if let Some(ts) = value
+                    .as_str()
+                    .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+                {
+                    let ts = ts.timestamp();
+                    let (from, to) = match op {
+                        RegistryFilterOp::Equal => (ts, ts),
+                        RegistryFilterOp::GreaterThan => (ts.saturating_add(1), i64::MAX),
+                        RegistryFilterOp::GreaterEqualThan => (ts, i64::MAX),
+                        RegistryFilterOp::LowerThan => (i64::MIN, ts.saturating_sub(1)),
+                        RegistryFilterOp::LowerEqualThan => (i64::MIN, ts),
+                        RegistryFilterOp::TextMatch => return false,
+                    };
+                    filter.from = filter.from.max(from);
+                    filter.to = filter.to.min(to);
                     true
                 } else {
                     false
@@ -120,7 +166,7 @@ pub(crate) async fn log_query(
     let (tx, rx) = oneshot::channel();
 
     tokio::task::spawn_blocking(move || {
-        let _ = tx.send(read_log_offsets(path, filter.as_deref(), anchor, limit));
+        let _ = tx.send(read_log_offsets(path, &filter, anchor, limit));
     });
 
     // Build response
@@ -158,9 +204,75 @@ pub(crate) async fn log_query(
     Ok(response)
 }
 
+/// inbuxa: what an x:Log/query asks for besides its anchor and limit.
+#[derive(Debug)]
+pub(crate) struct LogFilter {
+    text: Option<String>,
+    /// The least severe level wanted (0 = error ... 4 = trace).
+    level: Option<u8>,
+    /// An event id prefix.
+    event: Option<String>,
+    /// Seconds since the epoch, both inclusive.
+    from: i64,
+    to: i64,
+}
+
+impl Default for LogFilter {
+    fn default() -> Self {
+        LogFilter {
+            text: None,
+            level: None,
+            event: None,
+            from: i64::MIN,
+            to: i64::MAX,
+        }
+    }
+}
+
+impl LogFilter {
+    fn matches(&self, line: &str, header: &LogHeader<'_>) -> bool {
+        (header.timestamp >= self.from && header.timestamp <= self.to)
+            && self
+                .level
+                .is_none_or(|wanted| header.level.is_some_and(|level| level <= wanted))
+            && self.event.as_deref().is_none_or(|prefix| {
+                header.event.strip_prefix(prefix).is_some_and(|rest| {
+                    rest.is_empty() || rest.starts_with('.') || prefix.ends_with('.')
+                })
+            })
+            && self.text.as_deref().is_none_or(|text| line.contains(text))
+    }
+}
+
+/// inbuxa: the start of a log line: `<RFC 3339> <LEVEL> <description> (<event id>)`.
+struct LogHeader<'x> {
+    timestamp: i64,
+    level: Option<u8>,
+    event: &'x str,
+}
+
+fn log_header(line: &str) -> Option<LogHeader<'_>> {
+    if !line.as_bytes().first()?.is_ascii_digit() {
+        return None;
+    }
+    let (timestamp, rest) = line.split_once(' ')?;
+    let timestamp = DateTime::parse_from_rfc3339(timestamp).ok()?.timestamp();
+    let (level, rest) = rest.trim_start().split_once(' ').unwrap_or((rest, ""));
+    let level = TracingLevel::parse(&level.to_ascii_lowercase()).map(|level| level as u8);
+    let event = rest
+        .split_once(" (")
+        .and_then(|(_, rest)| rest.split_once(')'))
+        .map_or("", |(event, _)| event);
+    Some(LogHeader {
+        timestamp,
+        level,
+        event,
+    })
+}
+
 fn read_log_offsets(
     path: impl AsRef<Path>,
-    filter: Option<&str>,
+    filter: &LogFilter,
     anchor: u64,
     limit: usize,
 ) -> io::Result<Vec<Id>> {
@@ -198,9 +310,10 @@ fn read_log_offsets(
             let line = line?;
             offset = offset.saturating_sub(line.len() as u64 + 1); // +1 for the newline character
 
-            if !is_log_header(&line) {
+            let plain = strip_ansi(&line);
+            let Some(header) = log_header(&plain) else {
                 continue;
-            }
+            };
 
             let id = (file_number << 48) | offset;
 
@@ -209,7 +322,15 @@ fn read_log_offsets(
                 continue;
             }
 
-            if filter.is_none_or(|filter| line.contains(filter)) {
+            // inbuxa: files are read newest first, so the first entry older
+            // than the range ends the search. A line or two out of order at
+            // a rotation can be missed; reading every older file for them
+            // would cost far more.
+            if header.timestamp < filter.from {
+                break 'outer;
+            }
+
+            if filter.matches(&plain, &header) {
                 entries.push(Id::from(id));
                 if entries.len() == limit {
                     break 'outer;
@@ -233,7 +354,7 @@ pub(crate) fn read_log_entries(
         ids.truncate(limit);
         ids
     } else {
-        read_log_offsets(path, None, 0, limit)?
+        read_log_offsets(path, &LogFilter::default(), 0, limit)?
     };
 
     let mut logs = fs::read_dir(path)?.collect::<Result<Vec<_>, _>>()?;
@@ -286,18 +407,6 @@ pub(crate) fn read_log_entries(
     }
 
     Ok(entries)
-}
-
-fn is_log_header(line: &str) -> bool {
-    let line = strip_ansi(line);
-    let bytes = line.as_bytes();
-    if bytes.is_empty() || !bytes[0].is_ascii_digit() {
-        return false;
-    }
-    let Some((timestamp, _)) = line.split_once(' ') else {
-        return false;
-    };
-    DateTime::parse_from_rfc3339(timestamp).is_ok()
 }
 
 fn log_from_line(line: &str) -> Option<Log> {
@@ -527,7 +636,7 @@ impl<R: Read + Seek> Iterator for RevLines<R> {
 
 #[cfg(test)]
 mod tests {
-    use super::read_log_offsets;
+    use super::{LogFilter, read_log_offsets};
 
     #[test]
     fn limit_zero_reads_no_entries() {
@@ -539,11 +648,58 @@ mod tests {
         )
         .unwrap();
 
-        let none = read_log_offsets(&dir, None, 0, 0).unwrap();
-        let all = read_log_offsets(&dir, None, 0, 10).unwrap();
+        let none = read_log_offsets(&dir, &LogFilter::default(), 0, 0).unwrap();
+        let all = read_log_offsets(&dir, &LogFilter::default(), 0, 10).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
 
         assert!(none.is_empty(), "limit 0 returned {none:?}");
         assert_eq!(all.len(), 2);
+    }
+
+    // inbuxa (#229): level, component and time range filters
+    #[test]
+    fn filters_by_level_component_and_time() {
+        let dir = std::env::temp_dir().join(format!("inbuxa-log-filter-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("inbuxa.log.2026-11-18"),
+            concat!(
+                "2026-11-18T10:00:00Z INFO SMTP connection started (smtp.connection-start) remoteIp = 192.0.2.1\n",
+                "2026-11-18T10:00:01Z WARN Store error (store.data-corruption) details = \"x\"\n",
+                "2026-11-18T10:00:02Z ERROR SMTPS thing (smtps.error) reason = \"y\"\n",
+                "2026-11-18T10:00:03Z \u{1b}[1;34mDEBUG\u{1b}[0m SMTP rcpt (smtp.rcpt-to) to = \"a@example.org\"\n",
+            ),
+        )
+        .unwrap();
+        let count = |filter: LogFilter| read_log_offsets(&dir, &filter, 0, 10).unwrap().len();
+
+        let at_least_warn = count(LogFilter {
+            level: Some(1),
+            ..Default::default()
+        });
+        let smtp = count(LogFilter {
+            event: Some("smtp".into()),
+            ..Default::default()
+        });
+        let exact = count(LogFilter {
+            event: Some("smtp.rcpt-to".into()),
+            ..Default::default()
+        });
+        let window = count(LogFilter {
+            from: 1_794_996_001,
+            to: 1_794_996_002,
+            ..Default::default()
+        });
+        let after = count(LogFilter {
+            from: 1_794_996_002,
+            ..Default::default()
+        });
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        assert_eq!(at_least_warn, 2, "warn and error");
+        assert_eq!(smtp, 2, "smtp.* but not smtps.*");
+        assert_eq!(exact, 1);
+        assert_eq!(window, 2);
+        assert_eq!(after, 2);
     }
 }
