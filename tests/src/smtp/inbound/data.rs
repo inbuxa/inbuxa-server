@@ -321,6 +321,28 @@ async fn data() {
         .send_message("bill@doe.org", &["mike@test.com"], &message, "552 5.3.4")
         .await;
 
+    // inbuxa: a message whose header fields the parser would leave out, or
+    // with more than 1,000 fields in one part, is refused at DATA
+    let mut message = String::from("From: bill@doe.org\r\n");
+    for i in 0..1_000 {
+        message.push_str(&format!("X-{i}: x\r\n"));
+    }
+    message.push_str("\r\ntest\r\n");
+    session
+        .send_message("bill@doe.org", &["mike@test.com"], &message, "552 5.3.4")
+        .await;
+    let mut message = String::from(concat!(
+        "From: bill@doe.org\r\nContent-Type: multipart/mixed; boundary=b\r\n\r\n",
+        "--b\r\n"
+    ));
+    for i in 0..1_001 {
+        message.push_str(&format!("X-{i}: x\r\n"));
+    }
+    message.push_str("\r\ntest\r\n--b--\r\n");
+    session
+        .send_message("bill@doe.org", &["mike@test.com"], &message, "552 5.3.4")
+        .await;
+
     // Naive Loop detection
     session
         .send_message(

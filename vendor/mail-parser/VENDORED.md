@@ -33,13 +33,21 @@ Every changed file carries a Coffey Labs notice in its header.
   mailbox with a Sieve script. With both limits no tree is more than 80
   deep. The `deeply_nested_messages_drop_on_a_small_stack` test in
   `crates/email` covers it.
+- `src/parsers/message.rs` and `src/parsers/header.rs`: a part keeps at
+  most `MAX_HEADERS_PER_PART` (10,000) header fields and a message, with
+  all its parts and nested messages (encoded ones too), at most
+  `MAX_HEADERS_PER_MESSAGE` (262,144). Fields past either limit are read
+  past and left out. Upstream kept every field, each a struct of over a
+  hundred bytes for as little as four bytes of input, so a 100 MB header
+  block took gigabytes. SMTP DATA refuses a message the parser left fields
+  out of. The `header_fields_are_capped` test in `crates/email` covers it.
 
 ## Updating
 
 When the server's `Cargo.lock` moves mail-parser to a new version, Cargo
 stops using this copy and only warns that the patch went unused, so check
-`Cargo.lock` has no `mail-parser` entry with a `source` line; the test
-above also fails once a version without the limit is in use. Re-vendor the new
+`Cargo.lock` has no `mail-parser` entry with a `source` line; the tests
+above also fail once a version without the limit is in use. Re-vendor the new
 version from `~/.cargo/registry/src/*/mail-parser-*`, leaving out what's
 listed above, repeat the changes, and update the version here and in the root
 `Cargo.toml` comment.

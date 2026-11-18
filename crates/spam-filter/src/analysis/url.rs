@@ -30,6 +30,33 @@ const HTTPS_SCHEME: &str = "https://";
 // inbuxa: the most redirector lookups one message can cause
 const MAX_REDIRECT_LOOKUPS: usize = 10;
 
+// inbuxa: the most distinct names one message's URLs can have looked up
+// for the homograph check. Each lookup is one or two DNS queries at a name
+// the sender picks, and every distinct non-ASCII host used to cause one, so
+// a message listing a million of them made up to two million queries.
+const MAX_HOMOGRAPH_LOOKUPS: usize = 10;
+
+// inbuxa: the ASCII names whose existence the homograph check looks up for
+// one message: each only once, and no more than MAX_HOMOGRAPH_LOOKUPS
+#[derive(Default)]
+pub(crate) struct HomographLookups {
+    names: HashSet<String>,
+}
+
+impl HomographLookups {
+    // The name to look up for a non-ASCII host, if it reads as a different
+    // ASCII name and the message's lookups aren't used up
+    pub(crate) fn next(&mut self, fqdn: &str) -> Option<String> {
+        if self.names.len() >= MAX_HOMOGRAPH_LOOKUPS {
+            return None;
+        }
+        let cured = decancer::cure(fqdn, decancer::Options::default())
+            .ok()?
+            .to_string();
+        (cured != fqdn && self.names.insert(cured.clone())).then_some(cured)
+    }
+}
+
 pub trait SpamFilterAnalyzeUrl: Sync + Send {
     fn spam_filter_analyze_url(
         &self,
@@ -273,6 +300,8 @@ impl SpamFilterAnalyzeUrl for Server {
 
             urls.extend(redirected_urls);
 
+            let mut homograph_lookups = HomographLookups::default();
+
             for (el, url_parsed) in urls.iter().filter_map(|el| {
                 el.element
                     .url_parsed
@@ -284,15 +313,11 @@ impl SpamFilterAnalyzeUrl for Server {
 
                 if host.ip.is_none() {
                     if !host.fqdn.is_ascii() {
-                        if let Ok(cured_host) =
-                            decancer::cure(&host.fqdn, decancer::Options::default())
+                        if !ctx.result.has_tag("HOMOGRAPH_URL")
+                            && let Some(cured_host) = homograph_lookups.next(&host.fqdn)
+                            && matches!(self.dns_exists_ip(&cured_host).await, Ok(true))
                         {
-                            let cured_host = cured_host.to_string();
-                            if cured_host != host.fqdn
-                                && matches!(self.dns_exists_ip(&cured_host).await, Ok(true))
-                            {
-                                ctx.result.add_tag("HOMOGRAPH_URL");
-                            }
+                            ctx.result.add_tag("HOMOGRAPH_URL");
                         }
 
                         if host.fqdn.is_mixed_charset() {
@@ -560,5 +585,27 @@ mod tests {
         let url = UrlParts::no_scheme("Bit.ly/3AbCdEf");
         assert_eq!(url.url, "https://bit.ly/3abcdef");
         assert_eq!(url.request_url(), "https://Bit.ly/3AbCdEf");
+    }
+
+    // inbuxa: a message's URLs cause at most MAX_HOMOGRAPH_LOOKUPS homograph
+    // lookups, each name once, however many non-ASCII hosts they name
+    #[test]
+    fn homograph_lookups_are_capped() {
+        let mut lookups = HomographLookups::default();
+        assert_eq!(lookups.next("ехаmрle.com").as_deref(), Some("example.com"));
+        assert_eq!(lookups.next("ехаmрle.com"), None);
+        assert_eq!(lookups.next("example.com"), None);
+
+        let mut lookups = HomographLookups::default();
+        let names = (0..1_000)
+            .filter_map(|i| lookups.next(&format!("ехаmрle{i}.com")))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names.len(),
+            MAX_HOMOGRAPH_LOOKUPS,
+            "{} lookups",
+            names.len()
+        );
+        assert_eq!(names[0], "example0.com");
     }
 }

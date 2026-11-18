@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: Apache-2.0 OR MIT
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use super::MessageStream;
@@ -10,7 +12,14 @@ use std::borrow::Cow;
 const MAX_HEADER_NAME_LEN: usize = 34;
 
 impl<'x> MessageStream<'x> {
-    pub fn parse_headers(&mut self, conf: &MessageParser, headers: &mut Vec<Header<'x>>) -> bool {
+    // inbuxa: keeps at most `max_headers` fields in `headers`; fields past
+    // that are read past and left out
+    pub fn parse_headers(
+        &mut self,
+        conf: &MessageParser,
+        headers: &mut Vec<Header<'x>>,
+        max_headers: usize,
+    ) -> bool {
         loop {
             loop {
                 match self.peek() {
@@ -31,6 +40,10 @@ impl<'x> MessageStream<'x> {
             let offset_field = self.offset();
 
             if let Some(header_name) = self.parse_header_name() {
+                if headers.len() >= max_headers {
+                    self.parse_and_ignore();
+                    continue;
+                }
                 let from_offset = self.offset();
                 let value = if conf.header_map.is_empty() {
                     match &header_name {
