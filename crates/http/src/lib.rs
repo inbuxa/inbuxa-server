@@ -21,6 +21,7 @@ pub mod request;
 pub mod scim; // inbuxa: SCIM 2.0 provisioning
 pub mod security_headers; // inbuxa: L-2, default security headers
 pub mod source; // inbuxa: /.well-known/source
+pub mod timeouts; // inbuxa: HTTP-JMAP-PREAUTH-1, stalled clients
 
 use common::Inner;
 use std::sync::Arc;

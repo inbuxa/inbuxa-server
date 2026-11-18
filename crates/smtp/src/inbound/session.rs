@@ -129,6 +129,19 @@ impl<T: SessionStream> Session<T> {
                                     );
 
                                     self.write(b"503 5.5.1 Already authenticated.\r\n").await?;
+                                } else if self.data.mail_from.is_some() {
+                                    // inbuxa: no AUTH during a mail transaction (RFC 4954,
+                                    // Section 4): the sender was checked without it
+                                    trc::event!(
+                                        Smtp(SmtpEvent::AuthNotAllowed),
+                                        SpanId = self.data.session_id,
+                                        Details = "During a mail transaction",
+                                    );
+
+                                    self.write(
+                                        b"503 5.5.1 AUTH not permitted during a mail transaction.\r\n",
+                                    )
+                                    .await?;
                                 } else if mechanism & AUTH_BEARER != 0 && !self.stream.is_tls() {
                                     trc::event!(
                                         Smtp(SmtpEvent::AuthMechanismNotSupported),

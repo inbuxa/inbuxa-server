@@ -800,6 +800,11 @@ impl Session {
         if self.mail_from.is_some() {
             return self.error("503 5.5.1 A transaction is already open");
         }
+        let env_id = match from.env_id.as_deref().map(xtext_param) {
+            Some(None) => return self.error("501 5.5.4 Invalid ENVID parameter"),
+            Some(Some(env_id)) => Some(env_id),
+            None => None,
+        };
         if self.settings.max_message_size > 0 && from.size as u64 > self.settings.max_message_size {
             return self.reply("552 5.3.4 Message too big");
         }
@@ -841,7 +846,7 @@ impl Session {
         } else if from.flags & MAIL_RET_HDRS != 0 {
             params.insert("RET".into(), Some("HDRS".into()));
         }
-        if let Some(env_id) = from.env_id {
+        if let Some(env_id) = env_id {
             params.insert("ENVID".into(), Some(env_id));
         }
         self.mail_from = Some(Address {
@@ -858,6 +863,11 @@ impl Session {
         if self.rcpt_to.len() as u32 >= self.settings.max_recipients {
             return self.reply("452 4.5.3 Too many recipients");
         }
+        let orcpt = match to.orcpt.as_deref().map(xtext_param) {
+            Some(None) => return self.error("501 5.5.4 Invalid ORCPT parameter"),
+            Some(Some(orcpt)) => Some(format!("rfc822;{orcpt}")),
+            None => None,
+        };
         if self
             .rcpt_to
             .iter()
@@ -892,7 +902,7 @@ impl Session {
                 } else if !notify.is_empty() {
                     params.insert("NOTIFY".into(), Some(notify.join(",")));
                 }
-                if let Some(orcpt) = to.orcpt {
+                if let Some(orcpt) = orcpt {
                     params.insert("ORCPT".into(), Some(orcpt));
                 }
                 self.rcpt_to.push(Address {
@@ -953,6 +963,24 @@ impl Session {
     }
 }
 
+/// ENVID and ORCPT as the parser decoded them, back in their SMTP form
+/// (xtext, RFC 3461, Section 4), the form the link and the next hop take
+/// them in. None when the decoded value isn't printable US-ASCII: "+0D+0A"
+/// decodes to a line break.
+fn xtext_param(value: &str) -> Option<String> {
+    if !value.bytes().all(|byte| (0x21..=0x7e).contains(&byte)) {
+        return None;
+    }
+    let mut encoded = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '+' | '=' => encoded.push_str(&format!("+{:02X}", ch as u8)),
+            ch => encoded.push(ch),
+        }
+    }
+    Some(encoded)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1004,6 +1032,42 @@ mod tests {
         assert!(
             ended.is_ok(),
             "an hour on, the session is still writing to a client that doesn't read"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// ENVID must decode to printable ASCII (RFC 3461), and is kept as xtext,
+    /// the form the link and the next hop take it in.
+    #[tokio::test]
+    async fn envelope_id_is_kept_as_xtext() {
+        let (dir, app) = test_app("xtext", relay_settings());
+        let peer: SocketAddr = "192.0.2.1:40000".parse().unwrap();
+        let mut session = Session::new(app.clone(), app.settings().unwrap(), peer, peer);
+        session.helo = Some("client.test".into());
+        session.mail(MailFrom {
+            address: "a@example.com".to_string(),
+            env_id: Some("x\r\nRSET".to_string()),
+            ..Default::default()
+        });
+        let reply = String::from_utf8_lossy(&session.out).to_string();
+        assert!(reply.starts_with("501 5.5.4"), "{reply}");
+        assert!(session.mail_from.is_none());
+        session.out.clear();
+        session.mail(MailFrom {
+            address: "a@example.com".to_string(),
+            env_id: Some("abc+1".to_string()),
+            ..Default::default()
+        });
+        let reply = String::from_utf8_lossy(&session.out).to_string();
+        assert!(reply.starts_with("250 "), "{reply}");
+        let params = session.mail_from.as_ref().unwrap().parameters.as_ref();
+        assert_eq!(
+            params
+                .and_then(|p| p.get("ENVID"))
+                .cloned()
+                .flatten()
+                .as_deref(),
+            Some("abc+2B1")
         );
         std::fs::remove_dir_all(dir).unwrap();
     }

@@ -13,7 +13,7 @@ use super::{
 };
 use crate::inbound::dkim::DkimSign;
 use crate::queue::spool::{DSN_RETRY, QueueParams};
-use crate::queue::{MessageWrapper, UnexpectedResponse};
+use crate::queue::{MessageWrapper, UnexpectedResponse, xtext};
 use common::Server;
 use email::message::delivery::ORCPT_ADDR_TYPE;
 use mail_builder::MessageBuilder;
@@ -549,7 +549,8 @@ impl Message {
         dsn.push_str(&DateTime::from_timestamp(self.created as i64).to_rfc822());
         dsn.push_str("\r\n");
         if let Some(env_id) = &self.env_id {
-            let _ = write!(dsn, "Original-Envelope-Id: {env_id}\r\n");
+            // inbuxa: as xtext, so nothing in it can start a field of its own
+            let _ = write!(dsn, "Original-Envelope-Id: {}\r\n", xtext(env_id));
         }
         dsn.push_str("\r\n");
     }
@@ -558,7 +559,11 @@ impl Message {
 impl Recipient {
     fn write_dsn(&self, dsn: &mut String) {
         if let Some(orcpt) = &self.orcpt {
-            let _ = write!(dsn, "Original-Recipient: {ORCPT_ADDR_TYPE}{orcpt}\r\n");
+            let _ = write!(
+                dsn,
+                "Original-Recipient: {ORCPT_ADDR_TYPE}{}\r\n",
+                xtext(orcpt)
+            );
         }
         let _ = write!(dsn, "Final-Recipient: rfc822;{}\r\n", self.address);
     }
@@ -701,4 +706,44 @@ trait WriteDsn {
     fn write_dsn_status(&self, dsn: &mut String);
     fn write_dsn_diagnostic(&self, dsn: &mut String);
     fn write_response(&self, dsn: &mut String);
+}
+
+#[cfg(test)]
+mod envelope_field_tests {
+    use super::*;
+
+    // inbuxa: the envelope id and the original recipient go into a DSN as
+    // xtext, so a line break in them can't add a field of its own
+    #[test]
+    fn envelope_fields_stay_on_their_line() {
+        let message = Message {
+            created: 0,
+            blob_hash: Default::default(),
+            return_path: "".into(),
+            recipients: vec![],
+            received_from_ip: "127.0.0.1".parse().unwrap(),
+            received_via_port: 0,
+            flags: 0,
+            env_id: Some("x\r\nX-Injected: yes".into()),
+            priority: 0,
+            size: 0,
+            metadata: Box::new([]),
+        };
+        let mut dsn = String::new();
+        message.write_dsn_headers(&mut dsn, "mx.example.org");
+        assert!(
+            dsn.contains("Original-Envelope-Id: x+0D+0AX-Injected:+20yes\r\n"),
+            "{dsn:?}"
+        );
+
+        let recipient = Recipient::new("jane@example.org")
+            .with_orcpt(Some("jane\r\nX-Injected: yes@example.org".into()));
+        let mut dsn = String::new();
+        recipient.write_dsn(&mut dsn);
+        assert!(!dsn.contains("\r\nX-Injected"), "{dsn:?}");
+        assert!(
+            dsn.contains("Original-Recipient: rfc822;jane+0D+0AX-Injected:+20yes@example.org\r\n"),
+            "{dsn:?}"
+        );
+    }
 }

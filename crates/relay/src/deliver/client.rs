@@ -325,6 +325,12 @@ fn parameter<'a>(address: &'a Address, name: &str) -> Option<Option<&'a str>> {
         .map(|(_, v)| v.as_deref())
 }
 
+/// Printable US-ASCII only, as a parameter value in SMTP form is (RFC 3461,
+/// Section 4).
+fn is_xtext(value: &str) -> bool {
+    value.bytes().all(|byte| (0x21..=0x7e).contains(&byte))
+}
+
 /// MAIL FROM, with only the parameters this server takes (RFC 1870, 6152,
 /// 6531, 3461, 8689). The size is the relay's own count.
 fn mail_from(from: &Address, ehlo: &Ehlo, size: u64, utf8: bool) -> String {
@@ -347,7 +353,11 @@ fn mail_from(from: &Address, ehlo: &Ehlo, size: u64, utf8: bool) -> String {
     }
     if ehlo.dsn {
         for name in ["RET", "ENVID"] {
-            if let Some(Some(value)) = parameter(from, name) {
+            // A value goes out as the SMTP form it is kept in: one with a
+            // space or a line break would end the command, so it is left out
+            if let Some(Some(value)) = parameter(from, name)
+                && is_xtext(value)
+            {
                 line.push_str(&format!(" {name}={value}"));
             }
         }
@@ -360,7 +370,11 @@ fn rcpt_to(rcpt: &Address, ehlo: &Ehlo) -> String {
     let mut line = format!("RCPT TO:<{}>", rcpt.email);
     if ehlo.dsn {
         for name in ["NOTIFY", "ORCPT"] {
-            if let Some(Some(value)) = parameter(rcpt, name) {
+            // A value goes out as the SMTP form it is kept in: one with a
+            // space or a line break would end the command, so it is left out
+            if let Some(Some(value)) = parameter(rcpt, name)
+                && is_xtext(value)
+            {
                 line.push_str(&format!(" {name}={value}"));
             }
         }
@@ -614,5 +628,36 @@ mod tests {
             rcpt_to(&rcpt, &full),
             "RCPT TO:<b@example.org> NOTIFY=NEVER\r\n"
         );
+    }
+
+    // A parameter value that isn't xtext (a line break, a space) is left
+    // out, so it can't end the command and start another
+    #[test]
+    fn parameters_stay_inside_the_command() {
+        let dsn = Ehlo {
+            dsn: true,
+            ..Default::default()
+        };
+        let mut from = Address::new("a@example.com");
+        from.parameters = Some(
+            [(
+                "ENVID".to_string(),
+                Some("x\r\nRSET\r\nMAIL FROM:<ceo@example.org>".to_string()),
+            )]
+            .into(),
+        );
+        assert_eq!(
+            mail_from(&from, &dsn, 10, false),
+            "MAIL FROM:<a@example.com>\r\n"
+        );
+        from.parameters = Some([("ENVID".to_string(), Some("abc+2B1".to_string()))].into());
+        assert_eq!(
+            mail_from(&from, &dsn, 10, false),
+            "MAIL FROM:<a@example.com> ENVID=abc+2B1\r\n"
+        );
+        let mut rcpt = Address::new("b@example.org");
+        rcpt.parameters =
+            Some([("ORCPT".to_string(), Some("rfc822;b\r\nRSET".to_string()))].into());
+        assert_eq!(rcpt_to(&rcpt, &dsn), "RCPT TO:<b@example.org>\r\n");
     }
 }

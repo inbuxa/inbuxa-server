@@ -11,7 +11,7 @@ use crate::outbound::DeliveryResult;
 use crate::outbound::client::{BoxResponse, from_error_status, from_mail_send_error};
 use crate::outbound::error::ClientError;
 use crate::queue::journal::FROM_JOURNAL;
-use crate::queue::{Error, MessageWrapper, Recipient, Status, is_smtp_path};
+use crate::queue::{Error, MessageWrapper, Recipient, Status, is_smtp_path, xtext};
 use crate::queue::{ErrorDetails, HostResponse, UnexpectedResponse};
 use common::Server;
 use common::config::smtp::queue::ConnectionStrategy;
@@ -493,7 +493,8 @@ impl MessageWrapper {
                 mail_from.push_str(" RET=HDRS");
             }
             if let Some(env_id) = &self.message.env_id {
-                let _ = write!(mail_from, " ENVID={env_id}");
+                // inbuxa: as xtext, so the value stays inside this line
+                let _ = write!(mail_from, " ENVID={}", xtext(env_id));
             }
         }
 
@@ -609,6 +610,23 @@ mod tests {
         let plain = wrapper(FROM_JOURNAL);
         assert!(plain.journal_body_fits(&server(0)));
         assert!(!plain.build_mail_from(&server(0)).contains("BODY="));
+    }
+
+    // inbuxa: the envelope id goes out as xtext, so whatever it holds stays
+    // inside the MAIL FROM line
+    #[test]
+    fn envelope_id_goes_out_as_xtext() {
+        let mut message = wrapper(0);
+        message.message.env_id = Some("x\r\nRSET\r\nMAIL FROM:<ceo@example.org>".into());
+        let line = message.build_mail_from(&server(EXT_DSN));
+        assert_eq!(line.matches('\n').count(), 1, "{line:?}");
+        assert!(
+            line.ends_with(" ENVID=x+0D+0ARSET+0D+0AMAIL+20FROM:<ceo@example.org>\r\n"),
+            "{line:?}"
+        );
+        message.message.env_id = Some("abc+123=x".into());
+        let line = message.build_mail_from(&server(EXT_DSN));
+        assert!(line.ends_with(" ENVID=abc+2B123+3Dx\r\n"), "{line:?}");
     }
 
     #[test]

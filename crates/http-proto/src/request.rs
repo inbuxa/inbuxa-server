@@ -2,9 +2,11 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
-use std::borrow::Cow;
+use std::{borrow::Cow, time::Duration};
 
 use compact_str::ToCompactString;
 use http_body_util::BodyExt;
@@ -18,13 +20,30 @@ pub fn decode_path_element(item: &str) -> Cow<'_, str> {
         .unwrap_or_else(|_| item.into())
 }
 
+/// inbuxa: the longest a request body may go without sending anything
+/// before the request is given up (HTTP-JMAP-PREAUTH-1)
+pub const BODY_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+
 pub async fn fetch_body(
     req: &mut HttpRequest,
     max_size: usize,
     session_id: u64,
 ) -> Option<Vec<u8>> {
     let mut bytes = Vec::with_capacity(1024);
-    while let Some(Ok(frame)) = req.frame().await {
+    loop {
+        let frame = match tokio::time::timeout(BODY_IDLE_TIMEOUT, req.frame()).await {
+            Ok(Some(Ok(frame))) => frame,
+            Ok(_) => break,
+            Err(_) => {
+                trc::event!(
+                    Http(trc::HttpEvent::Error),
+                    SpanId = session_id,
+                    Reason = "The request body stopped arriving",
+                    Size = bytes.len(),
+                );
+                return None;
+            }
+        };
         if let Some(data) = frame.data_ref() {
             if bytes.len() + data.len() <= max_size || max_size == 0 {
                 bytes.extend_from_slice(data);

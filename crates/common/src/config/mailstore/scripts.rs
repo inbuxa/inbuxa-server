@@ -443,4 +443,76 @@ if header :regex "x-h" "${p}" { discard; }
             assert!(!matched(test), "{test} should not match");
         }
     }
+
+    // inbuxa: replace and enclose inside foreverypart change the message's
+    // parts under the loop; the loop and the parts left stay in step, and
+    // nothing panics
+    #[test]
+    fn sieve_replace_inside_foreverypart() {
+        let runtime = sieve::Runtime::new();
+        let run = |script: &str, message: &str| -> String {
+            let script =
+                std::sync::Arc::new(sieve::Compiler::new().compile(script.as_bytes()).unwrap());
+            let mut ctx = runtime.filter(message.as_bytes());
+            let mut input = sieve::Input::script("test", script);
+            let mut created = None;
+            while let Some(event) = ctx.run(input) {
+                if let sieve::Event::CreatedMessage { message, .. } = event.unwrap() {
+                    created = Some(String::from_utf8(message).unwrap());
+                }
+                input = sieve::Input::True;
+            }
+            created.expect("no message was created")
+        };
+        let nested = concat!(
+            "From: a@example.org\r\nSubject: hi\r\n",
+            "Content-Type: multipart/mixed; boundary=\"o\"\r\n\r\n",
+            "--o\r\nContent-Type: multipart/mixed; boundary=\"i1\"\r\n",
+            "Content-Disposition: attachment; filename=\"a.exe\"\r\n\r\n",
+            "--i1\r\nContent-Type: text/plain\r\n\r\npart two\r\n",
+            "--i1\r\nContent-Type: text/plain\r\n\r\npart three\r\n",
+            "--i1--\r\n",
+            "--o\r\nContent-Type: multipart/mixed; boundary=\"i2\"\r\n",
+            "Content-Disposition: attachment; filename=\"b.exe\"\r\n\r\n",
+            "--i2\r\nContent-Type: text/plain\r\n\r\npart five\r\n",
+            "--i2\r\nContent-Type: text/plain\r\n\r\npart six\r\n",
+            "--i2--\r\n",
+            "--o\r\nContent-Type: text/plain\r\n\r\npart seven\r\n",
+            "--o--\r\n"
+        );
+        let built = run(
+            concat!(
+                "require [\"foreverypart\", \"mime\", \"replace\"];\n",
+                "foreverypart { if header :mime :param \"filename\" :matches ",
+                "\"Content-Disposition\" \"*.exe\" { replace \"removed\"; } }\n"
+            ),
+            nested,
+        );
+        assert_eq!(built.matches("removed").count(), 2, "{built}");
+        for gone in ["part two", "part three", "part five", "part six"] {
+            assert!(!built.contains(gone), "{gone} kept: {built}");
+        }
+        assert!(built.contains("part seven"), "{built}");
+
+        let two_parts = concat!(
+            "From: a@example.org\r\nSubject: hi\r\n",
+            "Content-Type: multipart/mixed; boundary=\"o\"\r\n\r\n",
+            "--o\r\nContent-Type: text/plain\r\n\r\none\r\n",
+            "--o\r\nContent-Type: text/plain\r\n\r\ntwo\r\n",
+            "--o--\r\n"
+        );
+        let built = run(
+            "require [\"foreverypart\", \"replace\"];\nforeverypart { replace \"x\"; }\n",
+            two_parts,
+        );
+        assert!(!built.contains("two"), "{built}");
+        let built = run(
+            concat!(
+                "require [\"foreverypart\", \"enclose\", \"editheader\"];\n",
+                "foreverypart { enclose \"wrapped\"; addheader \"X-Seen\" \"yes\"; }\n"
+            ),
+            nested,
+        );
+        assert!(built.contains("wrapped"), "{built}");
+    }
 }

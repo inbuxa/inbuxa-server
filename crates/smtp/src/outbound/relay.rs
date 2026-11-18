@@ -192,7 +192,11 @@ impl MessageWrapper {
             from.insert("REQUIRETLS".to_string(), None);
         }
         if let Some(env_id) = &self.message.env_id {
-            from.insert("ENVID".to_string(), Some(env_id.to_string()));
+            // inbuxa: in its wire form (xtext), as the relay sends it on
+            from.insert(
+                "ENVID".to_string(),
+                Some(crate::queue::xtext(env_id).into_owned()),
+            );
         }
         let rcpt_to = rcpt_idxs
             .iter()

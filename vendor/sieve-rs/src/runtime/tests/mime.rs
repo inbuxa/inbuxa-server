@@ -2,9 +2,11 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
-use std::slice::Iter;
+use std::{slice::Iter, vec::IntoIter};
 
 use mail_parser::{Message, MessagePart, MimeHeaders, PartType};
 
@@ -178,6 +180,55 @@ impl<'x> Context<'x> {
 
             part_ids
         }
+    }
+
+    // inbuxa: removes parts by id and renumbers the ones left: every
+    // multipart's child list, the body and attachment lists, and every
+    // foreverypart iterator with the part it returns to. A removed id is
+    // dropped from the iterators, so a loop never yields it.
+    pub(crate) fn remove_parts(&mut self, mut part_ids: Vec<u32>) {
+        part_ids.retain(|id| (*id as usize) < self.message.parts.len());
+        part_ids.sort_unstable();
+        part_ids.dedup();
+        if part_ids.is_empty() {
+            return;
+        }
+        for part_id in part_ids.iter().rev() {
+            self.message.parts.remove(*part_id as usize);
+        }
+
+        let renumber = |id: u32| match part_ids.binary_search(&id) {
+            Ok(_) => None,
+            Err(pos) => Some(id - pos as u32),
+        };
+        let renumber_list = |ids: &mut Vec<u32>| {
+            ids.retain_mut(|id| {
+                renumber(*id).map(|new_id| *id = new_id).is_some()
+            });
+        };
+        let renumber_iter = |iter: &mut IntoIter<u32>| {
+            *iter = iter
+                .as_slice()
+                .iter()
+                .filter_map(|id| renumber(*id))
+                .collect::<Vec<_>>()
+                .into_iter();
+        };
+
+        for part in &mut self.message.parts {
+            if let PartType::Multipart(subparts) = &mut part.body {
+                renumber_list(subparts);
+            }
+        }
+        renumber_list(&mut self.message.text_body);
+        renumber_list(&mut self.message.html_body);
+        renumber_list(&mut self.message.attachments);
+        renumber_iter(&mut self.part_iter);
+        for (part, part_iter) in &mut self.part_iter_stack {
+            *part = renumber(*part).unwrap_or(0);
+            renumber_iter(part_iter);
+        }
+        self.part = renumber(self.part).unwrap_or(0);
     }
 }
 
