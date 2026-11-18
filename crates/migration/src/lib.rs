@@ -23,6 +23,17 @@ pub mod layout;
 pub mod v016;
 
 pub async fn try_migrate(server: &Server) -> trc::Result<()> {
+    migrate(server, layout::Run::Boot).await.map(|_| ())
+}
+
+/// inbuxa: K-S3: `--upgrade-store`. What a start would do to the store
+/// before serving, and nothing else; another node's upgrade is refused
+/// rather than waited for.
+pub async fn upgrade_store(server: &Server) -> trc::Result<layout::Outcome> {
+    migrate(server, layout::Run::UpgradeOnly).await
+}
+
+async fn migrate(server: &Server, run: layout::Run) -> trc::Result<layout::Outcome> {
     // inbuxa: a store a newer release has changed is refused before anything
     // below writes to it.
     let store_version = layout::store_version(server.store()).await?;
@@ -47,7 +58,7 @@ pub async fn try_migrate(server: &Server) -> trc::Result<()> {
     {
         Some(DATABASE_SCHEMA_VERSION) => {
             if !std::env::var("DANGER_FORCE_MIGRATE").is_ok_and(|v| v == "1") {
-                return layout::upgrade_layout(server, store_version, false).await;
+                return layout::upgrade_layout(server, store_version, false, run).await;
             }
         }
         Some(0..=4) => {
@@ -74,7 +85,7 @@ pub async fn try_migrate(server: &Server) -> trc::Result<()> {
         _ => {
             if is_new_install(server).await.caused_by(trc::location!())? {
                 write_schema_version(server).await?;
-                return layout::upgrade_layout(server, store_version, true).await;
+                return layout::upgrade_layout(server, store_version, true, run).await;
             } else {
                 abort(concat!(
                     "You must first upgrade to version 0.15, please read ",
@@ -86,7 +97,7 @@ pub async fn try_migrate(server: &Server) -> trc::Result<()> {
 
     migrate_v0_16(server).await?;
     write_schema_version(server).await?;
-    layout::upgrade_layout(server, store_version, false).await
+    layout::upgrade_layout(server, store_version, false, run).await
 }
 
 async fn write_schema_version(server: &Server) -> trc::Result<()> {

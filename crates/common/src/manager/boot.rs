@@ -30,6 +30,9 @@ pub struct BootManager {
     pub inner: Arc<Inner>,
     pub servers: Listeners,
     pub ipc_rxs: IpcReceivers,
+    /// inbuxa: K-S3: started with `--upgrade-store`: no listeners, no
+    /// services; main upgrades the store's layout and exits
+    pub upgrade_store: bool,
 }
 
 pub struct IpcReceivers {
@@ -52,6 +55,7 @@ Options:
   -e, --export <PATH>              Export all store data to a specific path
   -i, --import <PATH>              Import store data from a specific path
   -o, --console                    Open the store console
+  -u, --upgrade-store              Upgrade the store's layout, then exit
   -h, --help                       Print help
   -V, --version                    Print version
 
@@ -61,6 +65,12 @@ index, which belongs to one search backend. An import into an empty store
 queues the index to be rebuilt when the server next starts. EXPORT_TYPES
 limits an export to some of: data, registry, blob, changelog, queue, report,
 telemetry, tasks.
+
+--upgrade-store does what a start does to the store before it serves, and
+exits: 0 when the store is at this release's layout (whether it upgraded it
+or found it there), 1 when the upgrade failed, 2 when it refused because
+another node holds the upgrade lease, or still runs when a step needs every
+other node stopped. It opens no ports and starts no services.
 "#
 );
 
@@ -69,6 +79,8 @@ enum StoreOp {
     Export(BackupParams),
     Import(PathBuf),
     Console,
+    // inbuxa: K-S3
+    UpgradeStore,
     None,
 }
 
@@ -77,67 +89,88 @@ impl BootManager {
         let mut config_path = std::env::var("CONFIG_PATH").ok();
         let mut import_export = StoreOp::None;
 
-        if config_path.is_none() {
-            let mut args = std::env::args().skip(1);
+        // inbuxa: K-S3: the arguments are read with CONFIG_PATH set too, so
+        // `--upgrade-store` works where the path comes from the environment;
+        // and an option that takes no value no longer swallows the next one,
+        // so `--upgrade-store --config <PATH>` works in that order
+        let mut args = std::env::args().skip(1);
+        let has_args = args.len() > 0;
+        while let Some(arg) = args.next().and_then(|arg| {
+            arg.strip_prefix("--")
+                .or_else(|| arg.strip_prefix('-'))
+                .map(|arg| arg.to_string())
+        }) {
+            let (key, inline) = match arg.split_once('=') {
+                Some((key, value)) => (key.to_string(), Some(value.trim().to_string())),
+                None => (arg, None),
+            };
+            let takes_value = matches!(
+                key.as_str(),
+                "config" | "c" | "export" | "e" | "import" | "i"
+            );
+            let value = if takes_value {
+                inline.or_else(|| args.next())
+            } else {
+                inline
+            };
 
-            while let Some(arg) = args.next().and_then(|arg| {
-                arg.strip_prefix("--")
-                    .or_else(|| arg.strip_prefix('-'))
-                    .map(|arg| arg.to_string())
-            }) {
-                let (key, value) = if let Some((key, value)) = arg.split_once('=') {
-                    (key.to_string(), Some(value.trim().to_string()))
-                } else {
-                    (arg, args.next())
-                };
-
-                match (key.as_str(), value) {
-                    ("help" | "h", _) => {
-                        eprintln!("{HELP}");
-                        std::process::exit(0);
-                    }
-                    ("version" | "V", _) => {
-                        println!("{}", types::brand_version!());
-                        std::process::exit(0);
-                    }
-                    ("config" | "c", Some(value)) => {
-                        config_path = Some(value);
-                    }
-                    ("export" | "e", Some(value)) => {
-                        import_export = StoreOp::Export(BackupParams::new(value.into()));
-                    }
-                    ("import" | "i", Some(value)) => {
-                        import_export = StoreOp::Import(value.into());
-                    }
-                    ("console" | "o", None) => {
-                        import_export = StoreOp::Console;
-                    }
-                    (_, None) => {
-                        failed(&format!("Unrecognized command '{key}', try '--help'."));
-                    }
-                    (_, Some(_)) => failed(&format!(
-                        "Missing value for argument '{key}', try '--help'."
-                    )),
-                }
-            }
-
-            if config_path.is_none() {
-                if import_export == StoreOp::None {
+            match (key.as_str(), value) {
+                ("help" | "h", _) => {
                     eprintln!("{HELP}");
-                } else {
-                    eprintln!("Missing '--config' argument for import/export.")
+                    std::process::exit(0);
                 }
-                std::process::exit(0);
+                ("version" | "V", _) => {
+                    println!("{}", types::brand_version!());
+                    std::process::exit(0);
+                }
+                ("config" | "c", Some(value)) => {
+                    config_path = Some(value);
+                }
+                ("export" | "e", Some(value)) => {
+                    import_export = StoreOp::Export(BackupParams::new(value.into()));
+                }
+                ("import" | "i", Some(value)) => {
+                    import_export = StoreOp::Import(value.into());
+                }
+                ("console" | "o", None) => {
+                    import_export = StoreOp::Console;
+                }
+                ("upgrade-store" | "u", None) => {
+                    import_export = StoreOp::UpgradeStore;
+                }
+                (_, None) if takes_value => failed(&format!(
+                    "Missing value for argument '{key}', try '--help'."
+                )),
+                (_, None) => {
+                    failed(&format!("Unrecognized command '{key}', try '--help'."));
+                }
+                (_, Some(_)) => failed(&format!("Argument '{key}' takes no value, try '--help'.")),
             }
         }
 
+        if config_path.is_none() {
+            if import_export == StoreOp::None {
+                eprintln!("{HELP}");
+                std::process::exit(if has_args { 1 } else { 0 });
+            }
+            // A job that asked for a store operation must not pass without one
+            failed("Missing '--config' argument (or CONFIG_PATH) for this command.");
+        }
+
         // Initialize registry
+        let upgrade_store = import_export == StoreOp::UpgradeStore;
         let registry = RegistryStore::init(
             PathBuf::from(config_path.unwrap()),
-            import_export == StoreOp::None,
+            import_export == StoreOp::None || upgrade_store,
         )
         .await
         .failed("⚠️ Startup failed");
+        if upgrade_store && (registry.is_bootstrap_mode() || registry.is_recovery_mode()) {
+            failed(
+                "--upgrade-store needs a configured server: there is no data store to \
+                 upgrade in bootstrap mode, and recovery mode is for a person at the console.",
+            );
+        }
         let mut bootstrap = Bootstrap::new(registry).await;
 
         // Add safe defaults if missing
@@ -146,8 +179,14 @@ impl BootManager {
         }
 
         // Start listeners
-        let mut servers = Listeners::parse(&mut bootstrap).await;
-        servers.bind_and_drop_priv(&mut bootstrap);
+        // inbuxa: K-S3: not for --upgrade-store, which serves nothing
+        let mut servers = if upgrade_store {
+            Listeners::default()
+        } else {
+            let servers = Listeners::parse(&mut bootstrap).await;
+            servers.bind_and_drop_priv(&mut bootstrap);
+            servers
+        };
 
         // Parse storage
         let storage = Storage::parse(&mut bootstrap).await;
@@ -156,7 +195,7 @@ impl BootManager {
         let telemetry = Telemetry::parse(&mut bootstrap, &storage).await;
 
         match import_export {
-            StoreOp::None => {
+            StoreOp::None | StoreOp::UpgradeStore => {
                 // Parse components
                 let core: Box<Core> =
                     Box::new(Box::pin(Core::parse(&mut bootstrap, storage)).await);
@@ -167,7 +206,14 @@ impl BootManager {
 
                 telemetry.enable();
 
-                if bootstrap.registry.is_bootstrap_mode() {
+                if upgrade_store {
+                    trc::event!(
+                        Server(trc::ServerEvent::Startup),
+                        Details = "Started with --upgrade-store: upgrading the store layout, then exiting",
+                        Hostname = bootstrap.registry.local_hostname().to_string(),
+                        Version = types::brand_version!(),
+                    );
+                } else if bootstrap.registry.is_bootstrap_mode() {
                     trc::event!(
                         Server(trc::ServerEvent::BootstrapMode),
                         Hostname = bootstrap.registry.local_hostname().to_string(),
@@ -216,7 +262,7 @@ impl BootManager {
                     cache,
                 });
 
-                if !bootstrap.registry.is_recovery_mode() {
+                if !bootstrap.registry.is_recovery_mode() && !upgrade_store {
                     // Load spam model
                     if let Err(err) = inner.build_server().spam_model_reload().await {
                         trc::error!(
@@ -235,9 +281,11 @@ impl BootManager {
                 }
 
                 // Parse TCP acceptors
-                servers
-                    .parse_tcp_acceptors(&mut bootstrap, inner.clone())
-                    .await;
+                if !upgrade_store {
+                    servers
+                        .parse_tcp_acceptors(&mut bootstrap, inner.clone())
+                        .await;
+                }
 
                 // inbuxa: a reload isn't refused over objects that failed here
                 inner.build_server().record_build_errors(&bootstrap.errors);
@@ -251,6 +299,7 @@ impl BootManager {
                     bootstrap,
                     servers,
                     ipc_rxs,
+                    upgrade_store,
                 }
             }
             StoreOp::Export(path) => {
