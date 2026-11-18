@@ -6,6 +6,7 @@
  * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
+use crate::timeouts::{WRITE_STALL_TIMEOUT, WriteDeadline};
 use crate::{
     HttpSessionManager,
     api::{AuthChallenge, ManagementApi, ToManageHttpResponse, UnauthorizedResponse},
@@ -52,6 +53,7 @@ use percent_encoding::percent_decode_str;
 use registry::schema::enums::Permission;
 use std::{str::FromStr, sync::Arc};
 use store::dispatch::lookup::KeyValue;
+use tokio::io::{AsyncRead, AsyncWrite};
 use trc::SecurityEvent;
 use types::{blob::BlobId, id::Id};
 
@@ -707,179 +709,197 @@ impl ParseHttp for Server {
     }
 }
 
+// inbuxa: one HTTP/1 connection, as every HTTP listener serves it. hyper
+// times the request head; a client that stops reading its answer is dropped
+// after WRITE_STALL_TIMEOUT (HTTP-JMAP-PREAUTH-1)
+pub(crate) fn serve_http1<S, Svc, B>(
+    stream: S,
+    service: Svc,
+) -> impl Future<Output = hyper::Result<()>>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    Svc: hyper::service::HttpService<body::Incoming, ResBody = B>,
+    Svc::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+    B: hyper::body::Body + 'static,
+    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+{
+    http1::Builder::new()
+        .timer(TokioTimer::new())
+        .keep_alive(true)
+        .serve_connection(
+            TokioIo::new(WriteDeadline::new(stream, WRITE_STALL_TIMEOUT)),
+            service,
+        )
+        .with_upgrades()
+}
+
 async fn handle_session<T: SessionStream>(inner: Arc<Inner>, session: SessionData<T>) {
     let _in_flight = session.in_flight;
     let is_tls = session.stream.is_tls();
 
-    if let Err(http_err) = http1::Builder::new()
-        .timer(TokioTimer::new())
-        .keep_alive(true)
-        .serve_connection(
-            TokioIo::new(session.stream),
-            service_fn(|req: hyper::Request<body::Incoming>| {
-                let instance = session.instance.clone();
-                let inner = inner.clone();
+    if let Err(http_err) = serve_http1(
+        session.stream,
+        service_fn(|req: hyper::Request<body::Incoming>| {
+            let instance = session.instance.clone();
+            let inner = inner.clone();
 
-                async move {
-                    let server = inner.build_server();
+            async move {
+                let server = inner.build_server();
 
-                    // Obtain remote IP
-                    let remote_ip = if !server.core.network.http.use_forwarded {
-                        trc::event!(
-                            Http(trc::HttpEvent::RequestUrl),
-                            SpanId = session.session_id,
-                            Url = req.uri().to_string(),
-                        );
-
-                        session.remote_ip
-                    } else if let Some(forwarded_for) = client_ip::forwarded_client(
-                        session.remote_ip,
-                        req.headers(),
-                        &server.core.network.http.trusted_proxies,
-                        server.core.network.http.forwarded_header,
-                    ) {
-                        trc::event!(
-                            Http(trc::HttpEvent::RequestUrl),
-                            SpanId = session.session_id,
-                            RemoteIp = forwarded_for,
-                            Url = req.uri().to_string(),
-                        );
-
-                        forwarded_for
-                    } else {
-                        trc::event!(
-                            Http(trc::HttpEvent::XForwardedMissing),
-                            SpanId = session.session_id,
-                        );
-                        session.remote_ip
-                    };
-
-                    // Check if the remote IP has been blocked
-                    if server.is_ip_blocked(remote_ip) {
-                        trc::event!(
-                            Security(trc::SecurityEvent::IpBlocked),
-                            ListenerId = instance.id.clone(),
-                            RemoteIp = remote_ip,
-                            SpanId = session.session_id,
-                        );
-
-                        return Ok::<_, hyper::Error>(
-                            JsonProblemResponse(StatusCode::FORBIDDEN)
-                                .into_http_response()
-                                .build(),
-                        );
-                    }
-
-                    // inbuxa: kept for the cross-origin allowlist (contract C-14)
-                    let origin = req.headers().get(hyper::header::ORIGIN).cloned();
-
-                    // inbuxa: offer Basic only where it's accepted (contract C-23)
-                    let challenge = if server.core.network.http.basic_auth_everywhere
-                        || !is_token_only_path(req.uri().path())
-                    {
-                        AuthChallenge::BearerAndBasic
-                    } else {
-                        AuthChallenge::Bearer
-                    };
-
-                    // Parse HTTP request
-                    let response = match Box::pin(server.parse_http_request(
-                        req,
-                        HttpSessionData {
-                            instance,
-                            local_ip: session.local_ip,
-                            local_port: session.local_port,
-                            remote_ip,
-                            remote_port: session.remote_port,
-                            is_tls,
-                            session_id: session.session_id,
-                        },
-                    ))
-                    .await
-                    {
-                        Ok(response) => response,
-                        Err(err) => {
-                            let response = err.into_http_response(challenge);
-                            trc::error!(err.span_id(session.session_id));
-                            response
-                        }
-                    };
-
+                // Obtain remote IP
+                let remote_ip = if !server.core.network.http.use_forwarded {
                     trc::event!(
-                        Http(trc::HttpEvent::ResponseBody),
+                        Http(trc::HttpEvent::RequestUrl),
                         SpanId = session.session_id,
-                        Contents = match response.body() {
-                            HttpResponseBody::Text(value) =>
-                                trc::Value::String(value.as_str().into()),
-                            HttpResponseBody::Binary(_) =>
-                                trc::Value::String("[binary data]".into()),
-                            HttpResponseBody::Stream(_) => trc::Value::String("[stream]".into()),
-                            _ => trc::Value::None,
-                        },
-                        Code = response.status().as_u16(),
-                        Size = response.size(),
+                        Url = req.uri().to_string(),
                     );
 
-                    // Build response
-                    let mut response = response.build();
-
-                    // Add custom headers
-                    if !server.core.network.http.response_headers.is_empty() {
-                        let headers = response.headers_mut();
-
-                        for (header, value) in &server.core.network.http.response_headers {
-                            headers.insert(header.clone(), value.clone());
-                        }
-                    }
-
-                    // inbuxa: L-2: anti-framing on pages, nosniff, and HSTS
-                    // on TLS, unless the answer or the operator set them
-                    crate::security_headers::add_security_headers(response.headers_mut(), is_tls);
-
-                    // inbuxa: echo an allowed front end's origin, never `*`
-                    // (contract C-14). Responses that already set their own
-                    // CORS headers, such as public discovery metadata, keep
-                    // them (C-15).
-                    // inbuxa: Vary goes on every response, not only when an
-                    // origin list exists. A response cached while the list was
-                    // empty -- before the front ends were configured -- would
-                    // otherwise carry neither CORS headers nor Vary, and a
-                    // cache would replay it to an origin that should have been
-                    // allowed. With `immutable` on some of these, that is a
-                    // year of an opaque failure the server never sees.
-                    let cors_origins = &server.core.network.http.cors_origins;
-                    response.headers_mut().append(
-                        hyper::header::VARY,
-                        hyper::header::HeaderValue::from_static("Origin"),
+                    session.remote_ip
+                } else if let Some(forwarded_for) = client_ip::forwarded_client(
+                    session.remote_ip,
+                    req.headers(),
+                    &server.core.network.http.trusted_proxies,
+                    server.core.network.http.forwarded_header,
+                ) {
+                    trc::event!(
+                        Http(trc::HttpEvent::RequestUrl),
+                        SpanId = session.session_id,
+                        RemoteIp = forwarded_for,
+                        Url = req.uri().to_string(),
                     );
-                    if !cors_origins.is_empty() {
-                        let headers = response.headers_mut();
-                        if let Some(origin) = origin.filter(|origin| {
-                            cors_origins.contains(origin)
-                                && !headers.contains_key(hyper::header::ACCESS_CONTROL_ALLOW_ORIGIN)
-                        }) {
-                            headers.insert(hyper::header::ACCESS_CONTROL_ALLOW_ORIGIN, origin);
-                            headers.insert(
-                                hyper::header::ACCESS_CONTROL_ALLOW_HEADERS,
-                                hyper::header::HeaderValue::from_static(
-                                    "Authorization, Content-Type, Accept, X-Requested-With",
-                                ),
-                            );
-                            headers.insert(
-                                hyper::header::ACCESS_CONTROL_ALLOW_METHODS,
-                                hyper::header::HeaderValue::from_static(
-                                    "POST, GET, PATCH, PUT, DELETE, HEAD, OPTIONS",
-                                ),
-                            );
-                        }
-                    }
 
-                    Ok::<_, hyper::Error>(response)
+                    forwarded_for
+                } else {
+                    trc::event!(
+                        Http(trc::HttpEvent::XForwardedMissing),
+                        SpanId = session.session_id,
+                    );
+                    session.remote_ip
+                };
+
+                // Check if the remote IP has been blocked
+                if server.is_ip_blocked(remote_ip) {
+                    trc::event!(
+                        Security(trc::SecurityEvent::IpBlocked),
+                        ListenerId = instance.id.clone(),
+                        RemoteIp = remote_ip,
+                        SpanId = session.session_id,
+                    );
+
+                    return Ok::<_, hyper::Error>(
+                        JsonProblemResponse(StatusCode::FORBIDDEN)
+                            .into_http_response()
+                            .build(),
+                    );
                 }
-            }),
-        )
-        .with_upgrades()
-        .await
+
+                // inbuxa: kept for the cross-origin allowlist (contract C-14)
+                let origin = req.headers().get(hyper::header::ORIGIN).cloned();
+
+                // inbuxa: offer Basic only where it's accepted (contract C-23)
+                let challenge = if server.core.network.http.basic_auth_everywhere
+                    || !is_token_only_path(req.uri().path())
+                {
+                    AuthChallenge::BearerAndBasic
+                } else {
+                    AuthChallenge::Bearer
+                };
+
+                // Parse HTTP request
+                let response = match Box::pin(server.parse_http_request(
+                    req,
+                    HttpSessionData {
+                        instance,
+                        local_ip: session.local_ip,
+                        local_port: session.local_port,
+                        remote_ip,
+                        remote_port: session.remote_port,
+                        is_tls,
+                        session_id: session.session_id,
+                    },
+                ))
+                .await
+                {
+                    Ok(response) => response,
+                    Err(err) => {
+                        let response = err.into_http_response(challenge);
+                        trc::error!(err.span_id(session.session_id));
+                        response
+                    }
+                };
+
+                trc::event!(
+                    Http(trc::HttpEvent::ResponseBody),
+                    SpanId = session.session_id,
+                    Contents = match response.body() {
+                        HttpResponseBody::Text(value) => trc::Value::String(value.as_str().into()),
+                        HttpResponseBody::Binary(_) => trc::Value::String("[binary data]".into()),
+                        HttpResponseBody::Stream(_) => trc::Value::String("[stream]".into()),
+                        _ => trc::Value::None,
+                    },
+                    Code = response.status().as_u16(),
+                    Size = response.size(),
+                );
+
+                // Build response
+                let mut response = response.build();
+
+                // Add custom headers
+                if !server.core.network.http.response_headers.is_empty() {
+                    let headers = response.headers_mut();
+
+                    for (header, value) in &server.core.network.http.response_headers {
+                        headers.insert(header.clone(), value.clone());
+                    }
+                }
+
+                // inbuxa: L-2: anti-framing on pages, nosniff, and HSTS
+                // on TLS, unless the answer or the operator set them
+                crate::security_headers::add_security_headers(response.headers_mut(), is_tls);
+
+                // inbuxa: echo an allowed front end's origin, never `*`
+                // (contract C-14). Responses that already set their own
+                // CORS headers, such as public discovery metadata, keep
+                // them (C-15).
+                // inbuxa: Vary goes on every response, not only when an
+                // origin list exists. A response cached while the list was
+                // empty -- before the front ends were configured -- would
+                // otherwise carry neither CORS headers nor Vary, and a
+                // cache would replay it to an origin that should have been
+                // allowed. With `immutable` on some of these, that is a
+                // year of an opaque failure the server never sees.
+                let cors_origins = &server.core.network.http.cors_origins;
+                response.headers_mut().append(
+                    hyper::header::VARY,
+                    hyper::header::HeaderValue::from_static("Origin"),
+                );
+                if !cors_origins.is_empty() {
+                    let headers = response.headers_mut();
+                    if let Some(origin) = origin.filter(|origin| {
+                        cors_origins.contains(origin)
+                            && !headers.contains_key(hyper::header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                    }) {
+                        headers.insert(hyper::header::ACCESS_CONTROL_ALLOW_ORIGIN, origin);
+                        headers.insert(
+                            hyper::header::ACCESS_CONTROL_ALLOW_HEADERS,
+                            hyper::header::HeaderValue::from_static(
+                                "Authorization, Content-Type, Accept, X-Requested-With",
+                            ),
+                        );
+                        headers.insert(
+                            hyper::header::ACCESS_CONTROL_ALLOW_METHODS,
+                            hyper::header::HeaderValue::from_static(
+                                "POST, GET, PATCH, PUT, DELETE, HEAD, OPTIONS",
+                            ),
+                        );
+                    }
+                }
+
+                Ok::<_, hyper::Error>(response)
+            }
+        }),
+    )
+    .await
         && !http_err.is_timeout()
     {
         if http_err.is_parse() {
