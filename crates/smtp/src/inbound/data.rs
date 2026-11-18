@@ -33,6 +33,7 @@ use common::{
 use mail_auth::{
     AuthenticatedMessage, AuthenticationResults, Dkim2Result, DkimResult, DmarcOutput, DmarcResult,
     ReceivedSpf, SpfOutput, SpfResult,
+    arc::ArcError,
     common::to_a_label,
     common::{
         crypto::Algorithm,
@@ -127,6 +128,9 @@ impl<T: SessionStream> Session<T> {
             .eval_if(&ac.dmarc.verify, self, self.data.session_id)
             .await
             .unwrap_or(VerifyStrategy::Relaxed);
+        // inbuxa: leave out signatures too costly to check
+        limit_signature_work(&mut auth_message);
+
         let dkim_output = if dkim.verify() || dmarc.verify() {
             // Remove insecure DKIM signatures before verification
             auth_message.dkim_headers.retain(|header| {
@@ -1270,6 +1274,46 @@ fn parse_dkim2_dsn<'x, 'r>(
 // check each of them
 const MAX_DMARC_AUTHOR_DOMAINS: usize = 10;
 
+// inbuxa: the most DKIM-Signature fields checked in one message, the most
+// h= entries in a DKIM or ARC signature, and the most header fields a
+// message may have for its signatures to be checked. Finding the signed
+// headers takes time proportional to the h= entries times the header
+// fields, for every signature, so without these one message held a worker
+// thread for minutes.
+pub const MAX_DKIM_SIGNATURES: usize = 10;
+pub const MAX_SIGNED_HEADERS: usize = 128;
+pub const MAX_SIGNED_MESSAGE_HEADERS: usize = 1_000;
+
+// inbuxa: leaves out the DKIM signatures past the limits above, which are
+// then not checked at all (RFC 6376, Section 6.1, lets a verifier limit the
+// signatures it checks), and marks an ARC chain with a set past them as
+// broken.
+pub fn limit_signature_work(message: &mut AuthenticatedMessage<'_>) {
+    if message.headers.len() > MAX_SIGNED_MESSAGE_HEADERS {
+        message.dkim_headers.clear();
+    } else {
+        message.dkim_headers.truncate(MAX_DKIM_SIGNATURES);
+        message
+            .dkim_headers
+            .retain(|header| header.header.h.len() <= MAX_SIGNED_HEADERS);
+    }
+
+    if !message.ams_headers.is_empty()
+        && (message.headers.len() > MAX_SIGNED_MESSAGE_HEADERS
+            || message
+                .ams_headers
+                .iter()
+                .any(|header| header.header.h.len() > MAX_SIGNED_HEADERS))
+    {
+        message.has_arc_errors = true;
+        message.errors.push(Header {
+            name: b"ARC-Message-Signature",
+            value: b"",
+            header: mail_auth::Error::Arc(ArcError::BrokenChain),
+        });
+    }
+}
+
 // inbuxa: the distinct author domains of the From header, as DMARC compares
 // them, each with its first address. It stops one past
 // MAX_DMARC_AUTHOR_DOMAINS, so a From header naming thousands costs no more.
@@ -1308,7 +1352,7 @@ fn dmarc_strictness(output: &DmarcOutput) -> (u8, u8, u8) {
 
 #[cfg(test)]
 mod tests {
-    use super::dmarc_author_domains;
+    use super::{dmarc_author_domains, limit_signature_work};
     use mail_auth::AuthenticatedMessage;
 
     fn message_from(addresses: &[String]) -> Vec<u8> {
@@ -1341,5 +1385,40 @@ mod tests {
         assert_eq!(message.from.len(), 20_000);
         let domains = dmarc_author_domains(&message);
         assert_eq!(domains.len(), 11);
+    }
+
+    // inbuxa: an ARC chain is marked broken only when one of its signatures
+    // is too costly to check, and a message without one keeps no ARC error
+    #[test]
+    fn signature_limits_leave_arc_alone_without_a_chain() {
+        let ams = |entries: usize| {
+            let h = (0..entries)
+                .map(|i| format!("x-h{i}"))
+                .collect::<Vec<_>>()
+                .join(":");
+            format!(
+                concat!(
+                    "ARC-Message-Signature: i=1; a=rsa-sha256; c=relaxed/relaxed; ",
+                    "d=example.org; s=s; t=1; h={}; bh=AAAA; b=AAAA\r\n",
+                    "From: a@example.org\r\nSubject: test\r\n\r\ntest\r\n"
+                ),
+                h
+            )
+        };
+        for (raw, broken) in [(ams(128), false), (ams(129), true)] {
+            let mut message = AuthenticatedMessage::parse(raw.as_bytes()).unwrap();
+            assert_eq!(message.ams_headers.len(), 1);
+            limit_signature_work(&mut message);
+            assert_eq!(message.has_arc_errors, broken);
+        }
+
+        let mut raw = String::from("From: a@example.org\r\n");
+        for i in 0..1_000 {
+            raw.push_str(&format!("X-H{i}: x\r\n"));
+        }
+        raw.push_str("\r\ntest\r\n");
+        let mut message = AuthenticatedMessage::parse(raw.as_bytes()).unwrap();
+        limit_signature_work(&mut message);
+        assert!(!message.has_arc_errors);
     }
 }
