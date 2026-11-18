@@ -174,6 +174,7 @@ impl RegistryStore {
                 env_cluster_role: cluster_role,
                 env_push_shard_id: push_shard_id,
                 env_hostname: hostname,
+                renamed_from: None,
                 env_public_url: None,
                 id_generator: utils::snowflake::SnowflakeIdGenerator::new(),
                 write_hook: Default::default(),

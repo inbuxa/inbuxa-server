@@ -67,6 +67,7 @@ impl RegistryStoreInner {
                     })
                 }),
             env_hostname,
+            renamed_from: None,
             write_hook: Default::default(),
         }
     }

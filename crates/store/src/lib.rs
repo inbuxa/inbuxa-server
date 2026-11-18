@@ -265,6 +265,9 @@ pub struct RegistryStoreInner {
     pub(crate) env_cluster_role: Option<String>,
     pub(crate) env_push_shard_id: u32,
     pub(crate) env_hostname: String,
+    // inbuxa: #458, the name this node leased under before a rename, if any,
+    // and when this node started (unix seconds)
+    pub(crate) renamed_from: Option<(String, u64)>,
     pub(crate) env_public_url: Option<String>,
     pub(crate) id_generator: SnowflakeIdGenerator,
     // inbuxa: AU-1.10, shared by every clone of this registry
