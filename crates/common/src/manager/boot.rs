@@ -33,6 +33,12 @@ pub struct BootManager {
     /// inbuxa: K-S3: started with `--upgrade-store`: no listeners, no
     /// services; main upgrades the store's layout and exits
     pub upgrade_store: bool,
+    /// inbuxa: K-S5: started with `--seed <PATH>`: like `--upgrade-store`,
+    /// and then main applies the seed and exits
+    pub seed: Option<PathBuf>,
+    /// inbuxa: K-S5: whether the store was new when this process started,
+    /// before the defaults went in
+    pub store_was_new: bool,
 }
 
 pub struct IpcReceivers {
@@ -56,6 +62,7 @@ Options:
   -i, --import <PATH>              Import store data from a specific path
   -o, --console                    Open the store console
   -u, --upgrade-store              Upgrade the store's layout, then exit
+      --seed <PATH>                Set up a new store from a file, then exit
   -h, --help                       Print help
   -V, --version                    Print version
 
@@ -71,6 +78,12 @@ exits: 0 when the store is at this release's layout (whether it upgraded it
 or found it there), 1 when the upgrade failed, 2 when it refused because
 another node holds the upgrade lease, or still runs when a step needs every
 other node stopped. It opens no ports and starts no services.
+
+--seed sets up a new store from a file: a JMAP request body, its calls run
+once as the system administrator, where {"$file": "<PATH>"} stands for that
+file's contents. It upgrades the store's layout first, as --upgrade-store
+does, and exits: 0 when the seed was applied (or was before, to this store),
+1 when it failed, 2 when it refused because the store was set up already.
 "#
 );
 
@@ -81,6 +94,8 @@ enum StoreOp {
     Console,
     // inbuxa: K-S3
     UpgradeStore,
+    // inbuxa: K-S5
+    Seed(PathBuf),
     None,
 }
 
@@ -106,7 +121,7 @@ impl BootManager {
             };
             let takes_value = matches!(
                 key.as_str(),
-                "config" | "c" | "export" | "e" | "import" | "i"
+                "config" | "c" | "export" | "e" | "import" | "i" | "seed"
             );
             let value = if takes_value {
                 inline.or_else(|| args.next())
@@ -138,6 +153,9 @@ impl BootManager {
                 ("upgrade-store" | "u", None) => {
                     import_export = StoreOp::UpgradeStore;
                 }
+                ("seed", Some(value)) => {
+                    import_export = StoreOp::Seed(value.into());
+                }
                 (_, None) if takes_value => failed(&format!(
                     "Missing value for argument '{key}', try '--help'."
                 )),
@@ -159,28 +177,41 @@ impl BootManager {
 
         // Initialize registry
         let upgrade_store = import_export == StoreOp::UpgradeStore;
+        let seed = match &import_export {
+            StoreOp::Seed(path) => Some(path.clone()),
+            _ => None,
+        };
+        // inbuxa: K-S5: a seed run boots as --upgrade-store does
+        let one_shot = upgrade_store || seed.is_some();
         let registry = RegistryStore::init(
             PathBuf::from(config_path.unwrap()),
-            import_export == StoreOp::None || upgrade_store,
+            import_export == StoreOp::None || one_shot,
         )
         .await
         .failed("⚠️ Startup failed");
-        if upgrade_store && (registry.is_bootstrap_mode() || registry.is_recovery_mode()) {
+        if one_shot && (registry.is_bootstrap_mode() || registry.is_recovery_mode()) {
             failed(
-                "--upgrade-store needs a configured server: there is no data store to \
-                 upgrade in bootstrap mode, and recovery mode is for a person at the console.",
+                "--upgrade-store and --seed need a configured server: there is no data \
+                 store in bootstrap mode, and recovery mode is for a person at the console.",
             );
         }
         let mut bootstrap = Bootstrap::new(registry).await;
 
+        // inbuxa: K-S5: a seed is only for a new store, which the defaults
+        // below stop being
+        let store_was_new = seed.is_some()
+            && super::defaults::is_new_install(&bootstrap)
+                .await
+                .failed("⚠️ Startup failed");
+
         // Add safe defaults if missing
-        if import_export == StoreOp::None {
+        if import_export == StoreOp::None || seed.is_some() {
             bootstrap.insert_safe_defaults().await;
         }
 
         // Start listeners
         // inbuxa: K-S3: not for --upgrade-store, which serves nothing
-        let mut servers = if upgrade_store {
+        let mut servers = if one_shot {
             Listeners::default()
         } else {
             let servers = Listeners::parse(&mut bootstrap).await;
@@ -195,7 +226,7 @@ impl BootManager {
         let telemetry = Telemetry::parse(&mut bootstrap, &storage).await;
 
         match import_export {
-            StoreOp::None | StoreOp::UpgradeStore => {
+            StoreOp::None | StoreOp::UpgradeStore | StoreOp::Seed(_) => {
                 // Parse components
                 let core: Box<Core> =
                     Box::new(Box::pin(Core::parse(&mut bootstrap, storage)).await);
@@ -206,10 +237,14 @@ impl BootManager {
 
                 telemetry.enable();
 
-                if upgrade_store {
+                if one_shot {
                     trc::event!(
                         Server(trc::ServerEvent::Startup),
-                        Details = "Started with --upgrade-store: upgrading the store layout, then exiting",
+                        Details = if upgrade_store {
+                            "Started with --upgrade-store: upgrading the store layout, then exiting"
+                        } else {
+                            "Started with --seed: setting up a new store from a file, then exiting"
+                        },
                         Hostname = bootstrap.registry.local_hostname().to_string(),
                         Version = types::brand_version!(),
                     );
@@ -262,7 +297,7 @@ impl BootManager {
                     cache,
                 });
 
-                if !bootstrap.registry.is_recovery_mode() && !upgrade_store {
+                if !bootstrap.registry.is_recovery_mode() && !one_shot {
                     // Load spam model
                     if let Err(err) = inner.build_server().spam_model_reload().await {
                         trc::error!(
@@ -281,7 +316,7 @@ impl BootManager {
                 }
 
                 // Parse TCP acceptors
-                if !upgrade_store {
+                if !one_shot {
                     servers
                         .parse_tcp_acceptors(&mut bootstrap, inner.clone())
                         .await;
@@ -300,6 +335,8 @@ impl BootManager {
                     servers,
                     ipc_rxs,
                     upgrade_store,
+                    seed,
+                    store_was_new,
                 }
             }
             StoreOp::Export(path) => {

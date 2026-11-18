@@ -68,6 +68,12 @@ async fn main() -> std::io::Result<()> {
         std::process::exit(Box::pin(upgrade_store_and_exit(&server)).await);
     }
 
+    // inbuxa: K-S5: --seed sets up a new store from a file and exits
+    if let Some(path) = init.seed.clone() {
+        let server = init.inner.build_server();
+        std::process::exit(Box::pin(seed_and_exit(&server, &path, init.store_was_new)).await);
+    }
+
     // Migrate database
     if let Err(err) = migration::try_migrate(&init.inner.build_server()).await {
         trc::event!(
@@ -199,9 +205,65 @@ fn spawn_listener(
 /// this build's layout (upgraded now or already), 1 when the upgrade failed,
 /// 2 when it was refused because another node is in the way.
 async fn upgrade_store_and_exit(server: &common::Server) -> i32 {
+    let (code, message) = upgrade_store_only(server).await;
+    eprintln!("{message}");
+    flush_and_exit_code(code).await
+}
+
+/// inbuxa: K-S5: `--seed`: the layout upgrade, then the seed
+async fn seed_and_exit(
+    server: &common::Server,
+    path: &std::path::Path,
+    store_was_new: bool,
+) -> i32 {
+    use jmap::inbuxa::seed::{SeedOutcome, apply_seed};
+
+    let (code, message) = upgrade_store_only(server).await;
+    eprintln!("{message}");
+    if code != 0 {
+        return flush_and_exit_code(code).await;
+    }
+
+    let (code, message) = match apply_seed(server, path, store_was_new).await {
+        Ok(SeedOutcome::Applied { calls, created }) => (
+            0,
+            format!("Applied the seed: {calls} calls, {created} objects created or updated."),
+        ),
+        Ok(SeedOutcome::AlreadyApplied { changed: false }) => (
+            0,
+            "This store was seeded before: nothing to do.".to_string(),
+        ),
+        Ok(SeedOutcome::AlreadyApplied { changed: true }) => (
+            0,
+            "This store was seeded before, from a different file. The seed is only \
+             applied once: change the setup in the console or through the API."
+                .to_string(),
+        ),
+        Ok(SeedOutcome::Refused(reason)) => {
+            trc::event!(
+                Server(trc::ServerEvent::StartupError),
+                Details = "Refused to apply the seed",
+                Reason = reason.clone(),
+            );
+            (2, format!("Refused to apply the seed: {reason}"))
+        }
+        Err(reason) => {
+            trc::event!(
+                Server(trc::ServerEvent::StartupError),
+                Details = "Failed to apply the seed",
+                Reason = reason.clone(),
+            );
+            (1, reason)
+        }
+    };
+    eprintln!("{message}");
+    flush_and_exit_code(code).await
+}
+
+async fn upgrade_store_only(server: &common::Server) -> (i32, String) {
     use migration::layout::Outcome;
 
-    let (code, message) = match migration::upgrade_store(server).await {
+    match migration::upgrade_store(server).await {
         Ok(Outcome::Current) => (
             0,
             format!(
@@ -233,9 +295,10 @@ async fn upgrade_store_and_exit(server: &common::Server) -> i32 {
             );
             (1, message)
         }
-    };
-    eprintln!("{message}");
+    }
+}
 
+async fn flush_and_exit_code(code: i32) -> i32 {
     // Let the log reach its collector
     Collector::shutdown();
     tokio::time::sleep(Duration::from_secs(1)).await;
