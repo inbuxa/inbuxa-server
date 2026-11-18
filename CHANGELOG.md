@@ -11,6 +11,91 @@ https://github.com/inbuxa/inbuxa-server/security/advisories.
 Every version PR adds that version's entry here. CI refuses a version this
 file has no entry for (`tools/release/changelog-check.py`).
 
+## [2026.11.18] - 2026-11-18
+
+7 security fixes from our own review of the suite (5 medium, 2 low) and two
+hardening changes. Versions up to and including 2026.11.17, and 27.1-rc.1 to
+27.1-rc.27, are affected. The same fixes are in 27.1-rc.28 for the 27.1
+series.
+
+### Security
+Medium
+- SCIM: a deeply nested filter could stop the server. The filter parser had
+  no nesting limit, so one request from a SCIM credential overflowed the
+  stack and ended the server process. A filter longer than 8 KiB or nested
+  more than 32 levels deep is now refused with `400 invalidFilter`
+  (`invalidPath` for a PATCH path). (GHSA-6rvx-x4wr-558j, #420)
+- Account lock: a limited administrator could lock a fuller account and
+  take over its mail by naming itself as delegate. Creating, changing and
+  ending a lock now need every permission the account has, the rule that
+  changing an account already follows. (GHSA-f3q6-j22f-7cf8, #420)
+- Mail flow: attachments in a few messages could stall the server. Each ZIP
+  or Office attachment was unpacked up to 50 MiB, with no total per message,
+  on the server's async workers. A message now gets one 10 MiB inspection
+  budget across its bodies and attachments, unpacked data included, and at
+  most 100 attachments are read; what's past either limit counts as "can't
+  be inspected". Attachments are opened only when a rule checks content, the
+  work runs off the async workers, and a failure while checking answers 451.
+  (GHSA-qfcc-2hjm-7xjh, #420)
+- DLP: files inside Office packages, renamed text files and other archives
+  went uninspected. Every file in an Office or OpenDocument package is now
+  looked at, a file with no declared text type is read as text when it
+  looks like text, and embedded objects, macro projects and non-ZIP archives
+  (gzip, 7-Zip, RAR, tar and others) count as "can't be inspected".
+  (GHSA-w2g2-f65h-wwhq, #420)
+- HTTP: the sign-in and consent pages could be framed by another site. Every
+  HTML answer (sign-in, device sign-in, RSVP, and the console and account
+  pages the server serves) now sends `X-Frame-Options: DENY`,
+  `Content-Security-Policy: frame-ancestors 'none'` and
+  `Referrer-Policy: strict-origin-when-cross-origin`. Every answer sends
+  `X-Content-Type-Options: nosniff`, and every answer on a TLS listener
+  `Strict-Transport-Security: max-age=15552000`. Headers set in
+  `http.response_headers` take precedence. (GHSA-vxfg-3rh4-wc94, #420)
+
+Low
+- Branding: `/logo` was an open redirect to a domain's or tenant's URL logo.
+  It now redirects only when a browser loads it as an image
+  (`Sec-Fetch-Dest: image`) and answers 404 otherwise; the redirect isn't
+  cached, and a logo stored as an `http:` URL is no longer used.
+  (GHSA-49j4-h9f5-6h3x, #420)
+- Mail flow: an outside sender could keep a disclaimer, such as an
+  external-sender warning, off their message by including its text.
+  Incoming mail now always gets the disclaimer; outgoing mail still skips
+  one that's already there. (GHSA-6p5j-4m95-c6qh, #420)
+
+Hardening
+- DLP: detectors no longer crash on digits from other scripts (Arabic,
+  Persian, Hindi, fullwidth). A message holding them ended the sender's
+  session; it's now checked and sent normally. (#420)
+- Autoconfig and autodiscover: answers carry
+  `Content-Security-Policy: default-src 'none'; sandbox` and
+  `X-Content-Type-Options: nosniff`, so they can't run as a page on the
+  server. (#420)
+
+Found by Coffey Labs.
+
+### Upgrading
+- After a browser has visited the server over HTTPS, it will also use HTTPS
+  for `http://<server name>:8080`. Open the plain listener by IP address, or
+  set your own `Strict-Transport-Security` in `http.response_headers` (e.g.
+  `max-age=0`) if you rely on it by name.
+- To show the server's pages in a frame (a portal, say), set your own
+  `Content-Security-Policy` with `frame-ancestors` in
+  `http.response_headers`.
+- "Can't be inspected" now covers more attachments: gzip, 7-Zip, RAR, tar,
+  xz, bzip2, zstd and CAB files, Office files with embedded objects or macros
+  (`.docm`, `.xlsm`), and attachments past a message's 10 MiB inspection
+  budget or its first 100. Rules on that condition act on them now.
+- A URL logo shows only where a browser loads `/logo` as an image, as the
+  sign-in page and the console do. Opening the link directly gives 404, and
+  browsers that don't send `Sec-Fetch-Dest` (Safari before 16.4) show the
+  built-in logo. Logos stored as `http:` URLs are no longer used; set an
+  `https:` URL or an image.
+- A role that can lock accounts can no longer lock, change the lock of, or
+  unlock an account holding permissions it lacks, administrators included.
+- SCIM filters longer than 8 KiB or nested more than 32 levels deep are
+  refused. Identity providers send far less.
+
 ## [2026.11.17] - 2026-11-17
 
 2 security fixes from a private review of the server (1 medium, 1 low), four
