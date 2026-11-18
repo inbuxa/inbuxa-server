@@ -100,6 +100,9 @@ rpath = false
 # by all the recurrence rules an expansion runs; see its VENDORED.md.
 # Re-vendor when the version in Cargo.lock moves.
 #
+# inbuxa: vendor/mail-parser is the published 0.11.9 with the changes its
+# VENDORED.md lists. Re-vendor when the version in Cargo.lock moves.
+#
 # inbuxa: hickory and opentelemetry are upstream's patched branches, vendored
 # at the commits upstream pins so builds never fetch from upstream's
 # repositories; see vendor/hickory-dns/VENDORED.md and
@@ -107,6 +110,7 @@ rpath = false
 [patch.crates-io]
 sieve-rs = { path = "vendor/sieve-rs" }
 calcard = { path = "vendor/calcard" }
+mail-parser = { path = "vendor/mail-parser" }
 hickory-proto = { path = "vendor/hickory-dns/hickory-proto" }
 hickory-net = { path = "vendor/hickory-dns/hickory-net" }
 hickory-resolver = { path = "vendor/hickory-dns/hickory-resolver" }
