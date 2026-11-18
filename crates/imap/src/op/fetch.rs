@@ -956,14 +956,30 @@ impl AsImapDataItem for ArchivedMessageMetadata {
         let mut message = &self.contents[0];
         let mut root_part = None;
         let mut message_id = 0;
+        // inbuxa: a message stored with wrapped ids can list a part under
+        // itself or under several multiparts, or nest itself, so a walk only
+        // goes on to parts after the multipart and to messages after the
+        // current one, and emits no more parts than the message has
+        let mut budget: usize = self.contents.iter().map(|c| c.parts.len()).sum();
+        let mut multipart_id = None;
 
         loop {
             while let Some(part_id) = parts.next() {
                 let part_id = u16::from(part_id) as usize;
+                if budget == 0
+                    || part_id >= message.parts.len()
+                    || multipart_id.is_some_and(|multipart_id| part_id <= multipart_id)
+                {
+                    continue;
+                }
+                budget -= 1;
                 let mut part = message.as_body_part(decoded, message_id, part_id, is_extended);
 
                 match &message.parts[part_id].body {
-                    ArchivedMetadataPartType::Message(nested_message_id) => {
+                    ArchivedMetadataPartType::Message(nested_message_id)
+                        if (u16::from(*nested_message_id) as usize) > message_id
+                            && (u16::from(*nested_message_id) as usize) < self.contents.len() =>
+                    {
                         let nested_message = self.message_id(*nested_message_id);
                         part.set_envelope(nested_message.envelope());
                         if let Some(root_part) = root_part {
@@ -971,10 +987,16 @@ impl AsImapDataItem for ArchivedMessageMetadata {
                                 debug_assert!(false, "Too much nesting in message metadata");
                                 return root_part;
                             }
-                            stack.push((root_part, parts, (message, message_id).into()));
+                            stack.push((
+                                root_part,
+                                parts,
+                                (message, message_id).into(),
+                                multipart_id,
+                            ));
                         }
                         root_part = part.into();
                         parts = base_part.as_slice().iter();
+                        multipart_id = None;
                         message = nested_message;
                         message_id = u16::from(*nested_message_id) as usize;
                         continue;
@@ -985,10 +1007,11 @@ impl AsImapDataItem for ArchivedMessageMetadata {
                                 debug_assert!(false, "Too much nesting in message metadata");
                                 return root_part;
                             }
-                            stack.push((root_part, parts, None));
+                            stack.push((root_part, parts, None, multipart_id));
                         }
                         root_part = part.into();
                         parts = subparts.iter();
+                        multipart_id = Some(part_id);
                         continue;
                     }
                     _ => (),
@@ -999,11 +1022,14 @@ impl AsImapDataItem for ArchivedMessageMetadata {
                     return part;
                 }
             }
-            if let Some((mut prev_root_part, prev_parts, prev_message)) = stack.pop() {
+            if let Some((mut prev_root_part, prev_parts, prev_message, prev_multipart_id)) =
+                stack.pop()
+            {
                 if let Some((prev_message, prev_message_id)) = prev_message {
                     message = prev_message;
                     message_id = prev_message_id;
                 }
+                multipart_id = prev_multipart_id;
 
                 prev_root_part.add_part(root_part.unwrap());
                 parts = prev_parts;
@@ -1336,5 +1362,104 @@ impl AsImapAddress for ArchivedMetadataHeaderValue {
         }
 
         addresses
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AsImapDataItem;
+    use email::message::metadata::{
+        ArchivedMessageMetadata, DecodedParts, DecodedRawMessage, MessageMetadata,
+        MessageMetadataContents, MessageMetadataPart, MetadataPartType,
+    };
+    use imap_proto::protocol::fetch::BodyPart;
+    use store::rkyv;
+    use utils::chained_bytes::ChainedBytes;
+
+    fn body_parts(contents: Vec<Vec<MetadataPartType>>) -> usize {
+        let messages = contents.len();
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&MessageMetadata {
+            contents: contents
+                .into_iter()
+                .map(|bodies| MessageMetadataContents {
+                    html_body: Box::new([]),
+                    text_body: Box::new([]),
+                    attachments: Box::new([]),
+                    parts: bodies
+                        .into_iter()
+                        .map(|body| MessageMetadataPart {
+                            headers: Box::new([]),
+                            body,
+                            flags: 0,
+                            offset_header: 0,
+                            offset_body: 0,
+                            offset_end: 0,
+                        })
+                        .collect(),
+                })
+                .collect(),
+            rcvd_attach: 0,
+            blob_hash: Default::default(),
+            blob_body_offset: 0,
+            preview: "".into(),
+            raw_headers: Box::new([]),
+        })
+        .unwrap();
+        let metadata =
+            rkyv::access::<ArchivedMessageMetadata, rkyv::rancor::Error>(&bytes).unwrap();
+        let decoded = DecodedParts {
+            raw_messages: (0..messages)
+                .map(|_| DecodedRawMessage::Borrowed(ChainedBytes::new(b"")))
+                .collect(),
+            parts: vec![],
+        };
+        let tree = metadata.body_structure(&decoded, false);
+        let mut count = 0;
+        let mut stack = vec![&tree];
+        while let Some(part) = stack.pop() {
+            count += 1;
+            match part {
+                BodyPart::Multipart { body_parts, .. } => stack.extend(body_parts),
+                BodyPart::Message {
+                    body: Some(body), ..
+                } => stack.push(body),
+                _ => {}
+            }
+        }
+        count
+    }
+
+    // inbuxa: part ids and nested message ids stored as u16 wrapped for a
+    // message of more than 65,535 parts, so a multipart could list itself
+    // or a nested message be the message itself, and BODYSTRUCTURE never
+    // ended; a walk now only goes on to later parts and later messages, and
+    // emits no more parts than the message has
+    #[test]
+    fn body_structure_ends_on_bad_part_ids() {
+        // A multipart that lists itself
+        assert_eq!(
+            body_parts(vec![vec![
+                MetadataPartType::Multipart(vec![1, 0].into()),
+                MetadataPartType::Text,
+            ]]),
+            2
+        );
+
+        // A nested message that is the message itself
+        assert_eq!(
+            body_parts(vec![vec![
+                MetadataPartType::Multipart(vec![1].into()),
+                MetadataPartType::Message(0),
+            ]]),
+            2
+        );
+
+        // Multiparts that share their parts with each other
+        let mut shared = vec![MetadataPartType::Multipart(vec![1; 100].into())];
+        shared.push(MetadataPartType::Multipart(
+            (2..102).collect::<Vec<_>>().into(),
+        ));
+        shared.extend((2..102).map(|_| MetadataPartType::Text));
+        assert!(body_parts(vec![shared]) <= 102);
     }
 }

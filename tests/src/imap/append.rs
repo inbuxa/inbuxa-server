@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use super::{AssertResult, ImapConnection, Type, resources_dir};
@@ -17,6 +19,16 @@ pub async fn test(imap: &mut ImapConnection, _imap_check: &mut ImapConnection, t
     imap.assert_read(Type::Tagged, ResponseType::No)
         .await
         .assert_response_code("TRYCREATE");
+
+    // inbuxa: a message of more than 65,535 parts is refused, since its part
+    // ids don't fit the stored structure
+    let mut message =
+        String::from("From: a@example.org\r\nContent-Type: multipart/mixed; boundary=b\r\n\r\n");
+    for _ in 0..65_536 {
+        message.push_str("--b\r\n\r\nx\r\n");
+    }
+    message.push_str("--b--\r\n");
+    assert_append_message(imap, "INBOX", &message, ResponseType::No).await;
 
     // Import test messages
     let mut entries = fs::read_dir(resources_dir())
