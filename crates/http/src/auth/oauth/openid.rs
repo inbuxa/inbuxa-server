@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use common::{Server, auth::oauth::SUPPORTED_SCOPES, auth::oauth::oidc::Userinfo};
@@ -18,6 +20,9 @@ pub struct OpenIdMetadata {
     pub jwks_uri: String,
     pub registration_endpoint: String,
     pub device_authorization_endpoint: String,
+    // inbuxa: K-S4
+    pub revocation_endpoint: String,
+    pub revocation_endpoint_auth_methods_supported: &'static [&'static str],
     pub scopes_supported: &'static [&'static str],
     pub response_types_supported: &'static [&'static str],
     pub subject_types_supported: &'static [&'static str],
@@ -79,6 +84,12 @@ impl OpenIdHandler for Server {
             jwks_uri: format!("{base_url}/auth/jwks.json"),
             registration_endpoint: format!("{base_url}/auth/register"),
             device_authorization_endpoint: format!("{base_url}/auth/device"),
+            revocation_endpoint: format!("{base_url}/auth/revoke"),
+            revocation_endpoint_auth_methods_supported: &[
+                "none",
+                "client_secret_post",
+                "client_secret_basic",
+            ],
             response_types_supported: &["code"],
             grant_types_supported: &[
                 "authorization_code",

@@ -73,6 +73,25 @@ impl Server {
         revision: u64,
         revision_account: u64,
     ) -> trc::Result<AccessTokenInner> {
+        let mut token = self
+            .build_access_token_inner(account, account_id, revision, revision_account)
+            .await?;
+        // inbuxa: K-S4: the account's revoked OAuth tokens are cached with
+        // it, so revoking one only has to drop this entry on every node
+        token.revoked_tokens = self
+            .revoked_oauth_tokens(account_id)
+            .await
+            .caused_by(trc::location!())?;
+        Ok(token.update_size())
+    }
+
+    async fn build_access_token_inner(
+        &self,
+        account: Account,
+        account_id: u32,
+        revision: u64,
+        revision_account: u64,
+    ) -> trc::Result<AccessTokenInner> {
         // inbuxa: AL-2, AL-5: whether this account is locked, and which
         // locked accounts are handed to it. The token is their cache: every
         // change to a lock invalidates the tokens it touches.
@@ -310,6 +329,7 @@ impl Server {
                     locked,
                     shared_mailbox,
                     delegations: delegations.clone(),
+                    revoked_tokens: Default::default(),
                     revision,
                     revision_account,
                     credential_version,
@@ -364,6 +384,7 @@ impl Server {
                     locked,
                     shared_mailbox,
                     delegations: delegations.clone(),
+                    revoked_tokens: Default::default(),
                     revision,
                     revision_account,
                     credential_version: 0,
@@ -402,16 +423,15 @@ impl Server {
                     Collection = "accessToken",
                 );
 
-                let token: Arc<AccessTokenInner> = if let Some(account) =
+                let mut token: AccessTokenInner = if let Some(account) =
                     self.registry().object::<Account>(account_id.into()).await?
                 {
                     let revision = rand::random::<u64>();
                     let revision_account = hash_account(&account);
                     self.build_access_token(account, account_id, revision, revision_account)
                         .await?
-                        .into()
                 } else if account_id == RECOVERY_ADMIN_ID {
-                    AccessTokenInner::new_admin().into()
+                    AccessTokenInner::new_admin()
                 } else {
                     return Err(trc::SecurityEvent::Unauthorized
                         .into_err()
@@ -419,6 +439,16 @@ impl Server {
                         .account_id(account_id)
                         .caused_by(trc::location!()));
                 };
+
+                if account_id == RECOVERY_ADMIN_ID {
+                    // inbuxa: K-S4: the recovery admin's tokens can be revoked too
+                    token.revoked_tokens = self
+                        .revoked_oauth_tokens(account_id)
+                        .await
+                        .caused_by(trc::location!())?;
+                    token = token.update_size();
+                }
+                let token: Arc<AccessTokenInner> = token.into();
 
                 let _ = guard.insert(token.clone());
                 Ok(token)
@@ -746,6 +776,7 @@ impl AccessToken {
                     locked: old_inner.locked,
                     shared_mailbox: old_inner.shared_mailbox,
                     delegations: old_inner.delegations.clone(),
+                    revoked_tokens: old_inner.revoked_tokens.clone(),
                 };
 
                 access_token = AccessToken {
@@ -1051,6 +1082,7 @@ impl AccessToken {
                 locked: false,
                 shared_mailbox: false,
                 delegations: Default::default(),
+                revoked_tokens: Default::default(),
             }),
         }
     }
@@ -1086,11 +1118,17 @@ impl AccessTokenInner {
         self
     }
 
+    /// inbuxa: K-S4: whether this OAuth token of the account was revoked.
+    pub fn is_oauth_token_revoked(&self, token_id: u128) -> bool {
+        self.revoked_tokens.binary_search(&token_id).is_ok()
+    }
+
     pub fn update_size(mut self) -> Self {
         self.obj_size = (std::mem::size_of::<AccessToken>()
             + (self.member_of.len() * std::mem::size_of::<u32>())
             + (self.access_to.len() * (std::mem::size_of::<u32>() + std::mem::size_of::<u64>()))
-            + (self.scopes.len() * std::mem::size_of::<AccessScope>()))
+            + (self.scopes.len() * std::mem::size_of::<AccessScope>())
+            + (self.revoked_tokens.len() * std::mem::size_of::<u128>()))
             as u64;
         self
     }
@@ -1112,6 +1150,7 @@ impl AccessTokenInner {
             locked: false,
             shared_mailbox: false,
             delegations: Default::default(),
+            revoked_tokens: Default::default(),
         }
     }
 

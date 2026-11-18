@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use super::{GrantType, crypto::SymmetricEncrypt};
@@ -9,6 +11,7 @@ use crate::Server;
 use base64::{Engine, engine::general_purpose};
 use std::time::SystemTime;
 use store::rand::{RngExt, rng};
+use trc::AddContext;
 use utils::codec::leb128::{Leb128Iterator, Leb128Vec};
 
 pub const FAILED_TO_DECODE_TOKEN: &str = concat!(
@@ -102,16 +105,41 @@ impl Server {
         }
 
         // Enforce credential revocation for long lived tokens
-        if token.credential_version != 0 {
-            let current = self
+        // inbuxa: K-S4: and revocation of the token itself (RFC 7009). Access
+        // and refresh tokens are always checked, whatever their credential
+        // version: an account with no password still has revocable tokens.
+        let revocable = matches!(
+            token.grant_type,
+            GrantType::AccessToken | GrantType::RefreshToken
+        );
+        if token.credential_version != 0 || revocable {
+            let account = self
                 .access_token(token.account_id)
                 .await
-                .map_err(|err| trc::AuthEvent::Error.into_err().ctx(trc::Key::Details, err))?
-                .credential_version();
-            if current != token.credential_version {
+                .map_err(|err| trc::AuthEvent::Error.into_err().ctx(trc::Key::Details, err))?;
+            if token.credential_version != 0
+                && account.credential_version() != token.credential_version
+            {
                 return Err(trc::AuthEvent::TokenExpired
                     .into_err()
                     .details("Token revoked"));
+            }
+            if revocable {
+                let token_id = super::revoke::oauth_token_id(token_);
+                // A refresh token mints new access tokens, so it is checked
+                // against the store too, past a cache entry that may have
+                // been rebuilt while the revocation went in
+                if account.is_oauth_token_revoked(token_id)
+                    || (token.grant_type == GrantType::RefreshToken
+                        && self
+                            .is_oauth_token_revoked_in_store(token.account_id, token_id)
+                            .await
+                            .caused_by(trc::location!())?)
+                {
+                    return Err(trc::AuthEvent::TokenExpired
+                        .into_err()
+                        .details("Token revoked"));
+                }
             }
         }
 
