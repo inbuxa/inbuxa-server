@@ -63,32 +63,11 @@ impl Listener {
                 ttl: listener.ttl,
             };
 
-            // Bind socket
-            let listener = match listener.listen() {
-                Ok(listener) => {
-                    trc::event!(
-                        Network(trc::NetworkEvent::ListenStart),
-                        ListenerId = instance.id.clone(),
-                        LocalIp = local_addr.ip(),
-                        LocalPort = local_addr.port(),
-                        Tls = is_tls,
-                    );
-
-                    listener
-                }
-                Err(err) => {
-                    trc::event!(
-                        Network(trc::NetworkEvent::ListenError),
-                        ListenerId = instance.id.clone(),
-                        LocalIp = local_addr.ip(),
-                        LocalPort = local_addr.port(),
-                        Tls = is_tls,
-                        Reason = err,
-                    );
-
-                    continue;
-                }
-            };
+            // inbuxa: #485: a listener opens in its own task, so a port still
+            // held by the previous process can be waited out without holding
+            // up the rest. Only listeners configured at startup may end the
+            // process, and only when INBUXA_LISTENER_FAILURE=exit.
+            let at_startup = super::bind_health::is_startup();
 
             // Spawn listener
             let mut shutdown_rx = instance.shutdown_rx.clone();
@@ -96,6 +75,56 @@ impl Listener {
             let instance = instance.clone();
             let inner = inner.clone();
             tokio::spawn(async move {
+                let key = format!("{} {}", instance.id, local_addr);
+                let listener = match open(listener, &inner, &key).await {
+                    Ok(listener) => {
+                        trc::event!(
+                            Network(trc::NetworkEvent::ListenStart),
+                            ListenerId = instance.id.clone(),
+                            LocalIp = local_addr.ip(),
+                            LocalPort = local_addr.port(),
+                            Tls = is_tls,
+                        );
+
+                        if inner.data.listener_control.failures().clear(&key) {
+                            inner.build_server().publish_listener_failures().await;
+                        }
+                        listener
+                    }
+                    Err(err) => {
+                        trc::event!(
+                            Network(trc::NetworkEvent::ListenError),
+                            ListenerId = instance.id.clone(),
+                            LocalIp = local_addr.ip(),
+                            LocalPort = local_addr.port(),
+                            Tls = is_tls,
+                            Reason = err.clone(),
+                        );
+
+                        if inner.data.listener_control.failures().set(&key, &err) {
+                            inner.build_server().publish_listener_failures().await;
+                        }
+                        if at_startup
+                            && super::bind_health::FailureMode::from_env()
+                                == super::bind_health::FailureMode::Exit
+                        {
+                            trc::event!(
+                                Server(trc::ServerEvent::StartupError),
+                                Details = "A listener couldn't open and INBUXA_LISTENER_FAILURE=exit: stopping",
+                                ListenerId = instance.id.clone(),
+                                Reason = err.clone(),
+                            );
+                            eprintln!(
+                                "Listener {key} couldn't open ({err}) and INBUXA_LISTENER_FAILURE=exit: stopping."
+                            );
+                            // Give the log a moment to write the events above
+                            tokio::time::sleep(Duration::from_millis(500)).await;
+                            std::process::exit(1);
+                        }
+                        return;
+                    }
+                };
+
                 let (span_start, span_end) = match self.protocol {
                     ServerProtocol::Smtp | ServerProtocol::Lmtp => (
                         EventType::Smtp(SmtpEvent::ConnectionStart),
@@ -430,7 +459,74 @@ impl Listeners {
     }
 }
 
+/// inbuxa: #485: listens on a socket, binding it again if the bind at
+/// startup failed. A port in use is retried for `RETRY_FOR`, and recorded
+/// as a failure meanwhile, so the node reports not ready while it waits.
+async fn open(
+    listener: TcpListener,
+    inner: &Arc<Inner>,
+    key: &str,
+) -> Result<tokio::net::TcpListener, String> {
+    let inner_ = inner.clone();
+    let key_ = key.to_string();
+    open_retrying(listener, super::bind_health::RETRY_FOR, move |retrying| {
+        if inner_
+            .data
+            .listener_control
+            .failures()
+            .set(&key_, &retrying)
+        {
+            let inner = inner_.clone();
+            tokio::spawn(async move {
+                inner.build_server().publish_listener_failures().await;
+            });
+        }
+    })
+    .await
+}
+
+/// Binds (if the bind at startup failed) and listens. A port in use is
+/// retried with backoff for `retry_for`, calling `on_retry` once with the
+/// reason when the waiting starts; any other bind error fails at once.
+async fn open_retrying(
+    listener: TcpListener,
+    retry_for: Duration,
+    mut on_retry: impl FnMut(String),
+) -> Result<tokio::net::TcpListener, String> {
+    use super::bind_health::{is_retryable, next_backoff};
+
+    let started = std::time::Instant::now();
+    let mut backoff = None;
+    while !listener.is_bound() {
+        let Err(err) = listener.socket.bind(listener.addr) else {
+            break;
+        };
+        let reason = format!("Failed to bind to {}: {}", listener.addr, err);
+        if !is_retryable(&err) {
+            return Err(reason);
+        }
+        let Some(wait) = next_backoff(started, retry_for, backoff) else {
+            return Err(format!(
+                "{reason} (still in use after {} s)",
+                retry_for.as_secs()
+            ));
+        };
+        if backoff.is_none() {
+            on_retry(format!("{reason}; retrying"));
+        }
+        backoff = Some(wait);
+        tokio::time::sleep(wait).await;
+    }
+    listener.listen()
+}
+
 impl TcpListener {
+    fn is_bound(&self) -> bool {
+        self.socket
+            .local_addr()
+            .is_ok_and(|bound| bound.port() != 0)
+    }
+
     pub fn listen(self) -> Result<tokio::net::TcpListener, String> {
         // inbuxa: a socket whose bind failed is still unbound, and listen()
         // on it makes the kernel pick a random port on every interface
@@ -508,7 +604,9 @@ impl ServerInstance {
 
 #[cfg(test)]
 mod tests {
+    use super::open_retrying;
     use crate::config::server::TcpListener;
+    use std::time::Duration;
     use tokio::net::TcpSocket;
 
     fn listener(socket: TcpSocket, addr: &str) -> TcpListener {
@@ -527,6 +625,61 @@ mod tests {
         let socket = TcpSocket::new_v4().unwrap();
         let err = listener(socket, "0.0.0.0:25").listen().unwrap_err();
         assert!(err.contains("isn't bound"), "{err}");
+    }
+
+    // inbuxa: #485
+    #[tokio::test]
+    async fn a_port_in_use_is_waited_for() {
+        let held = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = held.local_addr().unwrap().to_string();
+        let socket = TcpSocket::new_v4().unwrap();
+        let mut retried = Vec::new();
+        let opening = tokio::spawn(async move {
+            let result =
+                open_retrying(listener(socket, &addr), Duration::from_secs(20), |reason| {
+                    retried.push(reason)
+                })
+                .await;
+            (result, retried)
+        });
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        drop(held);
+        let (result, retried) = opening.await.unwrap();
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(retried.len(), 1, "{retried:?}");
+        assert!(retried[0].contains("retrying"), "{retried:?}");
+    }
+
+    #[tokio::test]
+    async fn a_port_held_too_long_fails() {
+        let held = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = held.local_addr().unwrap().to_string();
+        let socket = TcpSocket::new_v4().unwrap();
+        let started = std::time::Instant::now();
+        let err = open_retrying(listener(socket, &addr), Duration::from_secs(2), |_| {})
+            .await
+            .unwrap_err();
+        assert!(err.contains("still in use after 2 s"), "{err}");
+        assert!(started.elapsed() < Duration::from_secs(5));
+        drop(held);
+    }
+
+    #[tokio::test]
+    async fn other_bind_errors_are_not_retried() {
+        // An address this host doesn't have
+        let socket = TcpSocket::new_v4().unwrap();
+        let started = std::time::Instant::now();
+        let mut retried = 0;
+        let err = open_retrying(
+            listener(socket, "192.0.2.1:2525"),
+            Duration::from_secs(20),
+            |_| retried += 1,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("Failed to bind"), "{err}");
+        assert_eq!(retried, 0);
+        assert!(started.elapsed() < Duration::from_secs(2));
     }
 
     #[tokio::test]

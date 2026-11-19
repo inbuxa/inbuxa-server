@@ -1322,6 +1322,7 @@ impl EnumImpl for Property {
             b"tsigAlgorithm" => Property::TsigAlgorithm,
             b"ttl" => Property::Ttl,
             b"unpackDirectory" => Property::UnpackDirectory,
+            b"unboundListeners" => Property::UnboundListeners,
             b"updateRecords" => Property::UpdateRecords,
             b"uploadQuota" => Property::UploadQuota,
             b"uploadTtl" => Property::UploadTtl,
@@ -2274,6 +2275,7 @@ impl EnumImpl for Property {
             Property::TsigAlgorithm => "tsigAlgorithm",
             Property::Ttl => "ttl",
             Property::UnpackDirectory => "unpackDirectory",
+            Property::UnboundListeners => "unboundListeners",
             Property::UpdateRecords => "updateRecords",
             Property::UploadQuota => "uploadQuota",
             Property::UploadTtl => "uploadTtl",
@@ -3057,6 +3059,7 @@ impl EnumImpl for Property {
             944 => Some(Property::PasskeysAllowed),
             945 => Some(Property::PasskeyRpId),
             946 => Some(Property::MaxPasskeys),
+            947 => Some(Property::UnboundListeners),
             615 => Some(Property::RequireClientRegistration),
             608 => Some(Property::RequireScopes),
             525 => Some(Property::RequireTls),
@@ -3268,7 +3271,7 @@ impl EnumImpl for Property {
         }
     }
 
-    const COUNT: usize = 947;
+    const COUNT: usize = 948;
 }
 
 impl serde::Serialize for Property {

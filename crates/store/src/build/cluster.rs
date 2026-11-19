@@ -418,6 +418,8 @@ impl From<NodeSlot> for ClusterNode {
             last_renewal: UTCDateTime::from_timestamp(slot.last_renewal.cast_signed()),
             node_id: slot.node_id as u64,
             hostname: slot.hostname,
+            // INBUXA: #485, filled in from the store when the node is read
+            unbound_listeners: Default::default(),
         }
     }
 }

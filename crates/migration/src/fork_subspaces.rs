@@ -89,6 +89,7 @@ pub const OWNERS: &[(u8, Owner)] = &[
     ),
     (b'M', Owner::Stays("masked email")),
     (b'N', Owner::Stays("passkeys")),
+    (b'O', Owner::Stays("listener status")),
     (b'P', Owner::Stays("permissions and protocol policies")),
     (b'Q', Owner::Stays("acceptance records")),
     (b'R', Owner::Stays("mail flow rules")),
