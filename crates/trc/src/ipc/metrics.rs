@@ -49,6 +49,12 @@ static DNS_LOOKUP_TIME: AtomicHistogram<12> =
 
 static SERVER_MEMORY: AtomicGauge = AtomicGauge::new(MetricType::ServerMemory);
 static QUEUE_COUNT: AtomicGauge = AtomicGauge::new(MetricType::QueueCount);
+// inbuxa: K-C10: in a cluster the queue gauge is only what the node that
+// calculates metrics counted in the store. Each node seeing only its own
+// queued and delivered messages, live changes there were noise: the core
+// subtracted deliveries of messages other nodes had queued.
+static QUEUE_COUNT_FROM_STORE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 static USER_COUNT: AtomicGauge = AtomicGauge::new(MetricType::UserCount);
 static DOMAIN_COUNT: AtomicGauge = AtomicGauge::new(MetricType::DomainCount);
 // inbuxa: K-C10: gauges for alerts, set where the value is known
@@ -148,7 +154,9 @@ impl Collector {
                 conn.elapsed.observe(elapsed);
             }
             EventType::Delivery(DeliveryEvent::Completed) => {
-                QUEUE_COUNT.decrement();
+                if !QUEUE_COUNT_FROM_STORE.load(Ordering::Relaxed) {
+                    QUEUE_COUNT.decrement();
+                }
                 MESSAGE_DELIVERY_TIME.observe(elapsed);
             }
             EventType::Delivery(
@@ -171,11 +179,15 @@ impl Collector {
             }
             EventType::Queue(QueueEvent::MessageQueued) => {
                 MESSAGE_INCOMING_SIZE.observe(size);
-                QUEUE_COUNT.increment();
+                if !QUEUE_COUNT_FROM_STORE.load(Ordering::Relaxed) {
+                    QUEUE_COUNT.increment();
+                }
             }
             EventType::Queue(QueueEvent::AuthenticatedMessageQueued) => {
                 MESSAGE_SUBMISSION_SIZE.observe(size);
-                QUEUE_COUNT.increment();
+                if !QUEUE_COUNT_FROM_STORE.load(Ordering::Relaxed) {
+                    QUEUE_COUNT.increment();
+                }
             }
             EventType::Queue(QueueEvent::ReportQueued) => {
                 MESSAGE_OUT_REPORT_SIZE.observe(size);
@@ -343,6 +355,11 @@ impl Collector {
             MetricType::TlsEarliestExpiry => TLS_EARLIEST_EXPIRY.get() as f64,
             _ => EVENT_COUNTERS.get(metric_type.event_id()) as f64,
         }
+    }
+
+    /// In a cluster: the queue gauge changes only when the queue is counted.
+    pub fn count_queue_from_store_only() {
+        QUEUE_COUNT_FROM_STORE.store(true, Ordering::Relaxed);
     }
 
     pub fn update_gauge(metric_type: MetricType, value: u64) {

@@ -136,6 +136,11 @@ pub fn spawn_task_scheduler(inner: Arc<Inner>) {
                 );
             }
 
+            // inbuxa: K-C10: nodes sharing a queue count it from the store
+            if server.core.storage.has_coordinator() {
+                Collector::count_queue_from_store_only();
+            }
+
             // OTEL Push Metrics
             if let Some(otel) = &server.core.metrics.otel {
                 OtelMetrics::enable_errors();
