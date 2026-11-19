@@ -11,7 +11,7 @@ use ahash::{AHashMap, AHashSet};
 use rcgen::generate_simple_self_signed;
 use registry::{
     schema::{
-        prelude::Object,
+        prelude::{Object, ObjectType},
         structs::{Certificate, PublicText, SecretText, SystemSettings},
     },
     types::{datetime::UTCDateTime, map::Map},
@@ -24,11 +24,31 @@ use rustls::{
 };
 use rustls_pemfile::{Item, certs, read_all};
 use rustls_pki_types::PrivateKeyDer;
-use std::{io::Cursor, sync::Arc};
+use std::{io::Cursor, path::PathBuf, sync::Arc};
 use store::{
     registry::{bootstrap::Bootstrap, write::RegistryWrite},
     write::now,
 };
+
+/// inbuxa: K-C8. Directories, each holding tls.crt and tls.key as a
+/// Kubernetes TLS Secret mounts them, whose certificates the server uses
+/// without storing them: cert-manager renews them in place, and every node
+/// reads its own copy. Separated by commas or whitespace.
+pub const CERTIFICATE_DIRS_VAR: &str = "TLS_CERTIFICATE_DIRS";
+
+/// The files of each directory in INBUXA_TLS_CERTIFICATE_DIRS: (certificate,
+/// private key)
+pub fn certificate_dir_files() -> Vec<(PathBuf, PathBuf)> {
+    types::branding::env_var(CERTIFICATE_DIRS_VAR)
+        .unwrap_or_default()
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .filter(|dir| !dir.is_empty())
+        .map(|dir| {
+            let dir = PathBuf::from(dir);
+            (dir.join("tls.crt"), dir.join("tls.key"))
+        })
+        .collect()
+}
 
 pub static TLS13_VERSION: &[&SupportedProtocolVersion] = &[&TLS13];
 pub static TLS12_VERSION: &[&SupportedProtocolVersion] = &[&TLS12];
@@ -192,6 +212,78 @@ pub(crate) async fn parse_certificates(
             }
             Err(err) => {
                 bp.build_error(obj_id, format!("Invalid certificate: {err}"));
+            }
+        }
+    }
+
+    // inbuxa: K-C8, certificates kept in mounted directories, not in the store
+    for (cert_path, key_path) in certificate_dir_files() {
+        let read = async {
+            let public = tokio::fs::read(&cert_path)
+                .await
+                .map_err(|err| format!("{}: {err}", cert_path.display()))?;
+            let secret = tokio::fs::read(&key_path)
+                .await
+                .map_err(|err| format!("{}: {err}", key_path.display()))?;
+            let parsed = ParsedCert::parse(&public)
+                .map_err(|err| format!("{}: {err}", cert_path.display()))?;
+            Ok::<_, String>((public, secret, parsed))
+        };
+        let (public, secret, parsed) = match read.await {
+            Ok(read) => read,
+            Err(err) => {
+                bp.build_error(
+                    ObjectType::Certificate.singleton(),
+                    format!(
+                        "Failed to read the certificate in INBUXA_{CERTIFICATE_DIRS_VAR}: {err}"
+                    ),
+                );
+                continue;
+            }
+        };
+        let not_valid_after = parsed.valid_not_after.timestamp();
+        if not_valid_after <= now || parsed.valid_not_before.timestamp() > now {
+            bp.build_error(
+                ObjectType::Certificate.singleton(),
+                format!(
+                    "The certificate in {} is not valid now (from {} to {})",
+                    cert_path.display(),
+                    parsed.valid_not_before,
+                    parsed.valid_not_after
+                ),
+            );
+            continue;
+        }
+        let mut names = parsed.sans;
+        names.retain(|name| {
+            if certs_expirations
+                .get(name)
+                .is_none_or(|expires| *expires < not_valid_after)
+            {
+                certs_expirations.insert(name.clone(), not_valid_after);
+                true
+            } else {
+                false
+            }
+        });
+        match build_certified_key(public, secret) {
+            Ok(key) => {
+                let key = Arc::new(key);
+                for name in names {
+                    subject_names.insert(name.as_str().into());
+                    certificates.insert(
+                        name.strip_prefix("*.")
+                            .map(Into::into)
+                            .unwrap_or_else(|| name.into_boxed_str()),
+                        key.clone(),
+                    );
+                }
+            }
+            Err(err) => {
+                bp.build_error(
+                    ObjectType::Certificate.singleton(),
+                    format!("Invalid certificate in {}: {err}", cert_path.display()),
+                );
             }
         }
     }
