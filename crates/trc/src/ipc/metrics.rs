@@ -213,6 +213,27 @@ impl Collector {
         METRIC_INTERESTS.update(interests);
     }
 
+    // inbuxa: K-C10: for a scrape, every counter that is collected, at zero
+    // too. Prometheus measures an increase from the first sample, so a
+    // counter that first shows up at 3 never reads as having risen.
+    pub fn collect_metric_counters() -> impl Iterator<Item = EventCounter> {
+        EVENT_COUNTERS
+            .inner()
+            .iter()
+            .enumerate()
+            .filter_map(|(event_id, value)| {
+                let value = value.load(Ordering::Relaxed);
+                if value > 0 || METRIC_INTERESTS.get(event_id) {
+                    Some(EventCounter {
+                        id: EventType::from_id(event_id as u16)?,
+                        value,
+                    })
+                } else {
+                    None
+                }
+            })
+    }
+
     pub fn collect_counters() -> impl Iterator<Item = EventCounter> {
         EVENT_COUNTERS
             .inner()
