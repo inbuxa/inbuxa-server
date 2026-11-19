@@ -100,7 +100,10 @@ pub trait OAuthApiHandler: Sync + Send {
 pub enum LoginRequest {
     #[serde(rename_all = "camelCase")]
     AuthCode {
+        // inbuxa: empty when a passkey signs in
+        #[serde(default)]
         account_name: String,
+        #[serde(default)]
         account_secret: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(default)]
@@ -120,6 +123,9 @@ pub enum LoginRequest {
         state: Option<String>,
         #[serde(default)]
         resource: Vec<String>,
+        // inbuxa: passkeys spec, PK-11: an assertion in place of the password
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        passkey: Option<crate::auth::passkey::PasskeyAssertion>,
     },
     #[serde(rename_all = "camelCase")]
     AuthDevice {
@@ -191,6 +197,7 @@ impl OAuthApiHandler for Server {
                 code_challenge,
                 code_challenge_method,
                 resource,
+                passkey,
                 ..
             } => {
                 // Validate clientId
@@ -306,19 +313,25 @@ impl OAuthApiHandler for Server {
                     }
                 };
 
-                // Authenticate
-                match self
-                    .authenticate(&AuthRequest {
-                        credentials: Credentials::Basic {
-                            username: account_name,
-                            secret: account_secret,
-                            mfa_token,
-                        },
-                        session_id: session.session_id,
-                        remote_ip: session.remote_ip,
-                    })
-                    .await
-                {
+                // Authenticate (inbuxa: or a passkey, PK-11)
+                let authenticated = match &passkey {
+                    Some(assertion) => {
+                        crate::auth::passkey::sign_in(self, session, assertion).await
+                    }
+                    None => {
+                        self.authenticate(&AuthRequest {
+                            credentials: Credentials::Basic {
+                                username: account_name,
+                                secret: account_secret,
+                                mfa_token,
+                            },
+                            session_id: session.session_id,
+                            remote_ip: session.remote_ip,
+                        })
+                        .await
+                    }
+                };
+                match authenticated {
                     Ok(access_token) => {
                         // Registry-backed clients are validated once the account is known
                         if stateless_client.is_none()

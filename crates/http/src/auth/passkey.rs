@@ -4,7 +4,10 @@
  * SPDX-License-Identifier: AGPL-3.0-only
  */
 
-//! inbuxa: passkey registration (passkeys spec, PK-6 to PK-8).
+//! inbuxa: passkeys (passkeys spec): registration (PK-6 to PK-8) and
+//! sign-in (PK-9 to PK-12).
+//!
+//! Registration:
 //!
 //! `inbuxa:Passkey/set` create hands back a URL to `/passkey/register` with
 //! a single-use ticket. That page posts here twice:
@@ -18,6 +21,12 @@
 //!
 //! What `start` began waits in the in-memory store under the ticket, so any
 //! node can answer `finish`, and it's deleted as it's read: it's good once.
+//! Instead of the password, `start` takes one of the account's active
+//! passkeys.
+//!
+//! Sign-in: `POST /api/auth/passkey` hands out a challenge (PK-10), kept in
+//! the in-memory store for two minutes and good once; the login request then
+//! carries the browser's assertion in place of a name and password (PK-11).
 
 use common::{
     KV_PASSKEY_CEREMONY, Server,
@@ -25,22 +34,36 @@ use common::{
 };
 use directory::Credentials;
 use http_proto::{HttpResponse, HttpSessionData, JsonResponse, ToHttpResponse};
+use inbuxa_features::audit::Via;
 use inbuxa_features::passkey::{self, Activated, HANDLE_LEN, Passkey};
+use registry::schema::enums::Permission;
 use serde::{Deserialize, Serialize};
 use store::{
     dispatch::lookup::KeyValue,
-    rand::{RngExt, rng},
+    rand::{RngExt, distr::Alphanumeric, rng},
     write::now,
 };
 use trc::AddContext;
 use webauthn_rs::prelude::{
-    CreationChallengeResponse, Credential, CredentialID, PasskeyRegistration,
-    RegisterPublicKeyCredential, Url, Uuid, Webauthn, WebauthnBuilder,
+    CreationChallengeResponse, Credential, CredentialID, DiscoverableAuthentication,
+    PasskeyRegistration, PublicKeyCredential, RegisterPublicKeyCredential,
+    RequestChallengeResponse, Url, Uuid, Webauthn, WebauthnBuilder, WebauthnError,
 };
 use webauthn_rs_proto::ResidentKeyRequirement;
 
 /// How long the browser has between `start` and `finish`.
 const CEREMONY_SECONDS: u64 = 300;
+/// How long a sign-in challenge lasts (PK-10).
+const CHALLENGE_SECONDS: u64 = 120;
+const CHALLENGE_ID_LEN: usize = 32;
+
+/// What the browser answered a sign-in challenge with.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PasskeyAssertion {
+    pub challenge_id: String,
+    pub credential: Box<PublicKeyCredential>,
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "step", rename_all = "camelCase")]
@@ -48,9 +71,13 @@ pub enum RegisterRequest {
     #[serde(rename_all = "camelCase")]
     Start {
         ticket: String,
+        #[serde(default)]
         password: String,
         #[serde(default)]
         mfa_token: Option<String>,
+        /// One of the account's passkeys, in place of the password (PK-8).
+        #[serde(default)]
+        passkey: Option<PasskeyAssertion>,
     },
     #[serde(rename_all = "camelCase")]
     Finish {
@@ -117,7 +144,233 @@ pub fn relying_party(server: &Server) -> trc::Result<(Webauthn, String)> {
 }
 
 fn ceremony_key(ticket: &str) -> Vec<u8> {
-    KeyValue::<()>::build_key(KV_PASSKEY_CEREMONY, passkey::ticket_hash(ticket))
+    let mut key = vec![b'r'];
+    key.extend_from_slice(&passkey::ticket_hash(ticket));
+    KeyValue::<()>::build_key(KV_PASSKEY_CEREMONY, key)
+}
+
+fn challenge_key(id: &str) -> Vec<u8> {
+    let mut key = vec![b'a'];
+    key.extend_from_slice(id.as_bytes());
+    KeyValue::<()>::build_key(KV_PASSKEY_CEREMONY, key)
+}
+
+/// A sign-in challenge between the two requests.
+#[derive(Serialize, Deserialize)]
+struct SignInCeremony {
+    rp_id: String,
+    state: DiscoverableAuthentication,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ChallengeResponse {
+    challenge_id: String,
+    options: Box<RequestChallengeResponse>,
+}
+
+/// PK-10: a challenge for the login page or the registration page. The
+/// options name no credentials: the browser offers the passkeys it holds for
+/// this relying party.
+pub async fn challenge(server: &Server) -> trc::Result<HttpResponse> {
+    let (webauthn, rp_id) = relying_party(server)?;
+    let (options, state) = webauthn
+        .start_discoverable_authentication()
+        .map_err(|err| {
+            trc::AuthEvent::Error
+                .into_err()
+                .details("Failed to start a passkey sign-in")
+                .reason(err)
+        })?;
+    let challenge_id = rng()
+        .sample_iter(Alphanumeric)
+        .take(CHALLENGE_ID_LEN)
+        .map(char::from)
+        .collect::<String>();
+    let ceremony = serde_json::to_string(&SignInCeremony { rp_id, state }).map_err(|err| {
+        trc::StoreEvent::UnexpectedError
+            .into_err()
+            .details("Failed to serialize a passkey sign-in")
+            .reason(err)
+    })?;
+    server
+        .in_memory_store()
+        .key_set(
+            KeyValue::new(challenge_key(&challenge_id), ceremony.into_bytes())
+                .expires(CHALLENGE_SECONDS),
+        )
+        .await?;
+    Ok(JsonResponse::new(ChallengeResponse {
+        challenge_id,
+        options: Box::new(options),
+    })
+    .no_cache()
+    .into_http_response())
+}
+
+fn refused(reason: &'static str) -> trc::Error {
+    trc::AuthEvent::Failed
+        .into_err()
+        .details("Passkey sign-in refused")
+        .reason(reason)
+}
+
+/// PK-11, PK-12: signs in with a passkey. Failures count toward the same
+/// limits and blocking as a wrong password, and a passkey needs no TOTP code.
+pub async fn sign_in(
+    server: &Server,
+    session: &HttpSessionData,
+    assertion: &PasskeyAssertion,
+) -> trc::Result<AccessToken> {
+    let result = check_assertion(server, session, assertion)
+        .await
+        .and_then(|token| {
+            // AL-2: a locked account fails as a wrong passkey does
+            if token.is_locked() {
+                Err(refused("Account is locked").ctx(trc::Key::AccountId, token.account_id()))
+            } else {
+                token.assert_has_permission(Permission::Authenticate)
+            }
+        });
+    let request = AuthRequest {
+        credentials: Credentials::Bearer {
+            username: None,
+            token: String::new(),
+        },
+        session_id: session.session_id,
+        remote_ip: session.remote_ip,
+    };
+    match result {
+        Ok(token) => {
+            trc::event!(
+                Auth(trc::AuthEvent::Success),
+                AccountId = token.account_id(),
+                SpanId = session.session_id,
+                Type = "passkey",
+            );
+            // AU-1.4, AU-1.5
+            server.audit_sign_in(&request, &token).await;
+            Ok(token)
+        }
+        Err(err) => {
+            if matches!(err.as_ref(), trc::EventType::Auth(trc::AuthEvent::Failed))
+                && server.has_auth_fail2ban()
+                && server.is_auth_fail2banned(session.remote_ip, None).await?
+            {
+                Err(trc::SecurityEvent::AuthenticationBan
+                    .into_err()
+                    .ctx(trc::Key::RemoteIp, session.remote_ip))
+            } else {
+                Err(err.ctx(trc::Key::RemoteIp, session.remote_ip))
+            }
+        }
+    }
+}
+
+async fn check_assertion(
+    server: &Server,
+    session: &HttpSessionData,
+    assertion: &PasskeyAssertion,
+) -> trc::Result<AccessToken> {
+    // PK-10: good once
+    if assertion.challenge_id.len() != CHALLENGE_ID_LEN {
+        return Err(refused("Unknown passkey challenge"));
+    }
+    let key = challenge_key(&assertion.challenge_id);
+    let Some(ceremony) = server
+        .in_memory_store()
+        .key_get::<String>(key.clone())
+        .await?
+    else {
+        return Err(refused("Unknown, used or expired passkey challenge"));
+    };
+    server.in_memory_store().key_delete(key).await?;
+    let ceremony = serde_json::from_str::<SignInCeremony>(&ceremony).map_err(|err| {
+        trc::StoreEvent::DataCorruption
+            .into_err()
+            .details("Invalid passkey sign-in")
+            .reason(err)
+    })?;
+    let (webauthn, rp_id) = relying_party(server)?;
+    if rp_id != ceremony.rp_id {
+        return Err(refused("The relying-party id changed during sign-in"));
+    }
+
+    // The account by user handle, the passkey by credential id: both must agree
+    let credential = &assertion.credential;
+    let (handle, credential_id) = webauthn
+        .identify_discoverable_authentication(credential)
+        .map_err(|_| refused("No user handle in the passkey's answer"))?;
+    let Some(mut record) = passkey::by_credential(server.store(), credential_id)
+        .await?
+        .filter(|p| p.state == passkey::State::Active)
+    else {
+        return Err(refused("Unknown passkey"));
+    };
+    if passkey::account_of_handle(server.store(), handle.as_bytes()).await?
+        != Some(record.account_id)
+    {
+        return Err(refused("The passkey belongs to another account")
+            .ctx(trc::Key::AccountId, record.account_id));
+    }
+    // PK-4: a passkey works only for the relying-party id it was made for
+    if record.rp_id != rp_id {
+        return Err(
+            refused("The passkey was registered for another relying-party id")
+                .ctx(trc::Key::AccountId, record.account_id),
+        );
+    }
+    let mut stored = serde_json::from_slice::<webauthn_rs::prelude::Passkey>(&record.public_key)
+        .map_err(|err| {
+            trc::StoreEvent::DataCorruption
+                .into_err()
+                .details("Invalid stored passkey")
+                .reason(err)
+        })?;
+
+    // The signature, the origin (PK-2), user verification and the counter
+    let result = match webauthn.finish_discoverable_authentication_v2(
+        credential,
+        ceremony.state,
+        Credential::from(stored.clone()),
+    ) {
+        Ok(result) => result,
+        Err(WebauthnError::CredentialPossibleCompromise) => {
+            trc::event!(
+                Auth(trc::AuthEvent::Failed),
+                AccountId = record.account_id,
+                Id = passkey::passkey_id(record.account_id, record.number),
+                SpanId = session.session_id,
+                Details = "Passkey counter went backwards: the passkey may be cloned",
+            );
+            return Err(refused("Passkey counter went backwards")
+                .ctx(trc::Key::AccountId, record.account_id));
+        }
+        Err(err) => {
+            return Err(refused("The passkey's answer didn't check out")
+                .ctx(trc::Key::AccountId, record.account_id)
+                .details(err.to_string()));
+        }
+    };
+
+    // Keep the new counter and flags, and when it was last used
+    stored.update_credential(&result);
+    record.sign_count = result.counter();
+    record.backed_up = result.backup_state();
+    record.last_used_at = Some(now());
+    record.public_key = serde_json::to_vec(&stored).map_err(|err| {
+        trc::StoreEvent::UnexpectedError
+            .into_err()
+            .details("Failed to serialize a passkey")
+            .reason(err)
+    })?;
+    passkey::save(server.store(), &record).await?;
+
+    server
+        .access_token(record.account_id)
+        .await
+        .and_then(|token| AccessToken::new(token, session.remote_ip))
+        .map(|token| token.with_origin(Via::Passkey))
 }
 
 pub trait PasskeyRegistrationHandler: Sync + Send {
@@ -142,7 +395,8 @@ impl PasskeyRegistrationHandler for Server {
                 ticket,
                 password,
                 mfa_token,
-            } => start(self, session, &ticket, password, mfa_token).await?,
+                passkey,
+            } => start(self, session, &ticket, password, mfa_token, passkey).await?,
             RegisterRequest::Finish { ticket, credential } => {
                 finish(self, &ticket, &credential).await?
             }
@@ -157,6 +411,7 @@ async fn start(
     ticket: &str,
     password: String,
     mfa_token: Option<String>,
+    assertion: Option<PasskeyAssertion>,
 ) -> trc::Result<RegisterResponse> {
     let Some(pending) = passkey::by_ticket(server.store(), ticket, now()).await? else {
         return Ok(RegisterResponse::Expired);
@@ -166,20 +421,26 @@ async fn start(
         .await
         .caused_by(trc::location!())?;
 
-    // PK-8: the password (and code) first. The sign-in limits and the
-    // failure counting are the ones every sign-in goes through.
-    let access_token: AccessToken = match server
-        .authenticate(&AuthRequest {
-            credentials: Credentials::Basic {
-                username: account.name.to_string(),
-                secret: password,
-                mfa_token,
-            },
-            session_id: session.session_id,
-            remote_ip: session.remote_ip,
-        })
-        .await
-    {
+    // PK-8: the password (and code), or an active passkey, first. The
+    // sign-in limits and the failure counting are the ones every sign-in
+    // goes through.
+    let signed_in = match &assertion {
+        Some(assertion) => sign_in(server, session, assertion).await,
+        None => {
+            server
+                .authenticate(&AuthRequest {
+                    credentials: Credentials::Basic {
+                        username: account.name.to_string(),
+                        secret: password,
+                        mfa_token,
+                    },
+                    session_id: session.session_id,
+                    remote_ip: session.remote_ip,
+                })
+                .await
+        }
+    };
+    let access_token: AccessToken = match signed_in {
         Ok(access_token) => access_token,
         Err(err) => {
             return match *err.as_ref() {
@@ -195,7 +456,10 @@ async fn start(
             };
         }
     };
-    if access_token.account_id() != pending.account_id {
+    // An app password is for one app, not for adding ways to sign in
+    if access_token.account_id() != pending.account_id
+        || matches!(access_token.origin(), Some(Via::AppPassword { .. }))
+    {
         return Ok(RegisterResponse::Failure);
     }
 

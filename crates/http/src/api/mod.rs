@@ -66,6 +66,12 @@ impl ManagementApi for Server {
         let path = req.uri().path().split('/').skip(2).collect::<Vec<_>>();
 
         match path.first().copied().unwrap_or_default() {
+            // inbuxa: passkeys spec, PK-10: a sign-in challenge
+            "auth" if is_post && path.get(1).copied() == Some("passkey") => {
+                self.is_http_anonymous_request_allowed(session.remote_ip)
+                    .await?;
+                crate::auth::passkey::challenge(self).await
+            }
             "auth" if is_post => {
                 self.is_http_anonymous_request_allowed(session.remote_ip)
                     .await?;

@@ -7,7 +7,8 @@
 //! Passkeys (passkeys spec): `inbuxa:Passkey` management (PK-5, PK-14 to
 //! PK-17): starting a registration, the limit per account, renaming,
 //! removing, who reaches whose passkeys, and the audit log. Registration on
-//! the server's page (PK-6 to PK-8), with a software authenticator.
+//! the server's page (PK-6 to PK-8) and sign-in (PK-9 to PK-12), with a
+//! software authenticator.
 
 use crate::utils::{
     account::Account,
@@ -251,6 +252,8 @@ pub async fn test(test: &mut TestServer) {
 pub struct SoftKey {
     pub key: EcdsaKeyPair,
     pub credential_id: Vec<u8>,
+    /// The account's user handle, as registration gave it (base64url).
+    pub user_handle: std::sync::Mutex<String>,
 }
 
 impl SoftKey {
@@ -261,11 +264,50 @@ impl SoftKey {
             key: EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, pkcs8.as_ref(), &rng)
                 .unwrap(),
             credential_id: credential_id.to_vec(),
+            user_handle: Default::default(),
         }
+    }
+
+    /// What `navigator.credentials.get` hands the page for a sign-in
+    /// challenge, with the given counter and origin.
+    pub fn get(&self, challenge: &Value, counter: u32, origin: &str) -> Value {
+        let client_data = json!({
+            "type": "webauthn.get",
+            "challenge": challenge["options"]["publicKey"]["challenge"],
+            "origin": origin,
+            "crossOrigin": false
+        })
+        .to_string();
+        let mut auth_data = Sha256::digest(RP_ID.as_bytes()).to_vec();
+        // UP, UV, backup eligible, backed up
+        auth_data.push(0x01 | 0x04 | 0x08 | 0x10);
+        auth_data.extend_from_slice(&counter.to_be_bytes());
+        let mut signed = auth_data.clone();
+        signed.extend_from_slice(&Sha256::digest(client_data.as_bytes()));
+        let signature = self.key.sign(&SystemRandom::new(), &signed).unwrap();
+        let id = URL_SAFE_NO_PAD.encode(&self.credential_id);
+        json!({
+            "challengeId": challenge["challengeId"],
+            "credential": {
+                "id": id,
+                "rawId": id,
+                "type": "public-key",
+                "response": {
+                    "authenticatorData": URL_SAFE_NO_PAD.encode(&auth_data),
+                    "clientDataJSON": URL_SAFE_NO_PAD.encode(client_data.as_bytes()),
+                    "signature": URL_SAFE_NO_PAD.encode(signature.as_ref()),
+                    "userHandle": self.user_handle.lock().unwrap().clone()
+                },
+                "extensions": {}
+            }
+        })
     }
 
     /// What `navigator.credentials.create` hands the page, for `options`.
     pub fn create(&self, options: &Value) -> Value {
+        if let Some(handle) = options["publicKey"]["user"]["id"].as_str() {
+            *self.user_handle.lock().unwrap() = handle.to_string();
+        }
         let challenge = options["publicKey"]["challenge"].as_str().unwrap();
         let client_data = json!({
             "type": "webauthn.create",
@@ -499,6 +541,131 @@ async fn registration(user: &Account) {
     }))
     .await;
     assert_eq!(response["type"], "refused", "{response}");
+
+    sign_in(user, &key).await;
+}
+
+async fn new_challenge() -> Value {
+    let challenge = register_at("/api/auth/passkey", json!({})).await;
+    assert_eq!(
+        challenge["options"]["publicKey"]["rpId"], RP_ID,
+        "{challenge}"
+    );
+    assert_eq!(
+        challenge["options"]["publicKey"]["userVerification"], "required",
+        "{challenge}"
+    );
+    challenge
+}
+
+async fn register_at(path: &str, body: Value) -> Value {
+    HttpRequest::new()
+        .post::<Value>(path, &body)
+        .await
+        .unwrap_or_else(|err| panic!("{path} {body}: {err}"))
+}
+
+const PKCE_VERIFIER: &str = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+const PKCE_CHALLENGE: &str = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
+const REDIRECT: &str = "com.example.app:/cb";
+
+async fn login(client_id: &str, assertion: Value) -> Value {
+    register_at(
+        "/api/auth",
+        json!({
+            "type": "authCode",
+            "clientId": client_id,
+            "redirectUri": REDIRECT,
+            "codeChallenge": PKCE_CHALLENGE,
+            "codeChallengeMethod": "S256",
+            "passkey": assertion
+        }),
+    )
+    .await
+}
+
+/// PK-9 to PK-12: sign-in in the authorization-code flow.
+async fn sign_in(user: &Account, key: &SoftKey) {
+    let client = HttpRequest::with_credentials(
+        8899,
+        "admin@example.com",
+        "these_pretzels_are_making_me_thirsty",
+    )
+    .post::<Value>("/auth/register", &json!({"redirect_uris": [REDIRECT]}))
+    .await
+    .unwrap();
+    let client_id = client["client_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{client}"))
+        .to_string();
+
+    // A passkey signs in on its own and the code works
+    let challenge = new_challenge().await;
+    let assertion = key.get(&challenge, 5, ORIGIN);
+    let response = login(&client_id, assertion.clone()).await;
+    assert_eq!(response["type"], "authenticated", "{response}");
+    let code = response["client_code"].as_str().unwrap().to_string();
+    let token = reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .build()
+        .unwrap()
+        .post("https://127.0.0.1:8899/auth/token")
+        .form(&[
+            ("grant_type", "authorization_code"),
+            ("code", code.as_str()),
+            ("client_id", client_id.as_str()),
+            ("redirect_uri", REDIRECT),
+            ("code_verifier", PKCE_VERIFIER),
+        ])
+        .send()
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap();
+    assert!(token["access_token"].is_string(), "{token}");
+    let laptop = list(user, user)
+        .await
+        .into_iter()
+        .find(|p| p["name"] == "Laptop")
+        .unwrap();
+    assert!(laptop["lastUsedAt"].is_string(), "{laptop}");
+
+    // PK-10: a challenge is good once
+    let response = login(&client_id, assertion).await;
+    assert_eq!(response["type"], "failure", "{response}");
+
+    // PK-11: a counter that didn't go up fails
+    let challenge = new_challenge().await;
+    let response = login(&client_id, key.get(&challenge, 5, ORIGIN)).await;
+    assert_eq!(response["type"], "failure", "{response}");
+
+    // PK-2: another origin fails
+    let challenge = new_challenge().await;
+    let response = login(&client_id, key.get(&challenge, 9, "https://evil.example")).await;
+    assert_eq!(response["type"], "failure", "{response}");
+
+    // An unknown passkey fails
+    let stranger = SoftKey::new(b"soft-key-stranger-01");
+    *stranger.user_handle.lock().unwrap() = key.user_handle.lock().unwrap().clone();
+    let challenge = new_challenge().await;
+    let response = login(&client_id, stranger.get(&challenge, 1, ORIGIN)).await;
+    assert_eq!(response["type"], "failure", "{response}");
+
+    // Still signs in with a higher counter
+    let challenge = new_challenge().await;
+    let response = login(&client_id, key.get(&challenge, 6, ORIGIN)).await;
+    assert_eq!(response["type"], "authenticated", "{response}");
+
+    // PK-8: the registration page takes the account's passkey instead of
+    // the password, and not someone else's
+    let (_, ticket) = start_registration(user, "Second").await;
+    let challenge = new_challenge().await;
+    let response = register(json!({
+        "step": "start", "ticket": ticket, "passkey": key.get(&challenge, 7, ORIGIN)
+    }))
+    .await;
+    assert_eq!(response["type"], "options", "{response}");
 }
 
 #[ignore]

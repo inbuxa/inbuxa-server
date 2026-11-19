@@ -283,6 +283,12 @@
             transform: none;
         }
 
+        .btn.secondary {
+            background: transparent;
+            color: var(--text);
+            border: 1px solid var(--border);
+        }
+
         [hidden] {
             display: none !important;
         }
@@ -326,6 +332,7 @@
                     pattern="\d{6}" autocomplete="one-time-code">
             </div>
             <button type="submit" class="btn" id="submit-btn">Continue</button>
+            <button type="button" class="btn secondary" id="passkey-btn" hidden>Use a passkey you already have</button>
         </form>
     </div>
 
@@ -467,20 +474,45 @@
                 });
             }
 
-            function submit(e) {
-                if (e) e.preventDefault();
-                clearAlert();
-                var password = $('password').value;
-                if (!password) { showError('Enter your password.'); return; }
-                var otp = $('otp').value.trim();
-                var body = { step: 'start', ticket: ticket, password: password };
-                if (!$('field-otp').hidden) {
-                    if (!/^\d{6}$/.test(otp)) { showError('Enter the 6-digit code.'); return; }
-                    body.mfaToken = otp;
-                }
+            function getPasskey() {
+                return fetch('/api/auth/passkey', {
+                    method: 'POST',
+                    credentials: 'omit',
+                    cache: 'no-store',
+                    headers: { 'Accept': 'application/json' }
+                }).then(function (res) {
+                    if (res.status !== 200) throw new Error('http ' + res.status);
+                    return res.json();
+                }).then(function (c) {
+                    var pk = c.options.publicKey;
+                    pk.challenge = fromB64(pk.challenge);
+                    (pk.allowCredentials || []).forEach(function (a) { a.id = fromB64(a.id); });
+                    return navigator.credentials.get({ publicKey: pk }).then(function (cred) {
+                        var r = cred.response;
+                        return {
+                            challengeId: c.challengeId,
+                            credential: {
+                                id: cred.id,
+                                rawId: toB64(cred.rawId),
+                                type: cred.type,
+                                response: {
+                                    authenticatorData: toB64(r.authenticatorData),
+                                    clientDataJSON: toB64(r.clientDataJSON),
+                                    signature: toB64(r.signature),
+                                    userHandle: r.userHandle ? toB64(r.userHandle) : null
+                                },
+                                extensions: cred.getClientExtensionResults ? cred.getClientExtensionResults() : {}
+                            }
+                        };
+                    });
+                });
+            }
+
+            function begin(body, viaPasskey) {
                 var btn = $('submit-btn');
                 btn.disabled = true;
-                post(body).then(function (json) {
+                $('passkey-btn').disabled = true;
+                return post(body).then(function (json) {
                     switch (json.type) {
                         case 'options':
                             $('account').value = json.accountName;
@@ -504,7 +536,11 @@
                             expired();
                             return;
                         default:
-                            showError(!$('field-otp').hidden ? 'The password or code is wrong.' : 'The password is wrong.');
+                            if (viaPasskey) {
+                                showError('That passkey isn\'t one of this account\'s. Use your password.');
+                            } else {
+                                showError(!$('field-otp').hidden ? 'The password or code is wrong.' : 'The password is wrong.');
+                            }
                             $('otp').value = '';
                     }
                 }).catch(function (err) {
@@ -518,7 +554,40 @@
                     }
                     console.log('Passkey registration failed:', err);
                     showError('Temporary server failure. If the problem persists, contact your administrator.');
-                }).then(function () { btn.disabled = false; });
+                }).then(function () {
+                    btn.disabled = false;
+                    $('passkey-btn').disabled = false;
+                });
+            }
+
+            function submit(e) {
+                if (e) e.preventDefault();
+                clearAlert();
+                var password = $('password').value;
+                if (!password) { showError('Enter your password.'); return; }
+                var otp = $('otp').value.trim();
+                var body = { step: 'start', ticket: ticket, password: password };
+                if (!$('field-otp').hidden) {
+                    if (!/^\d{6}$/.test(otp)) { showError('Enter the 6-digit code.'); return; }
+                    body.mfaToken = otp;
+                }
+                begin(body, false);
+            }
+
+            // PK-8: an active passkey of the account instead of the password
+            if (navigator.credentials.get) {
+                show($('passkey-btn'));
+                $('passkey-btn').addEventListener('click', function () {
+                    clearAlert();
+                    getPasskey().then(function (assertion) {
+                        begin({ step: 'start', ticket: ticket, passkey: assertion }, true);
+                    }, function (err) {
+                        console.log('Passkey sign-in did not finish:', err);
+                        if (!err || (err.name !== 'NotAllowedError' && err.name !== 'AbortError')) {
+                            showError('Passkeys aren\'t available right now. Use your password.');
+                        }
+                    });
+                });
             }
 
             $('passkey-form').addEventListener('submit', submit);

@@ -99,6 +99,8 @@ pub enum Via {
     },
     /// The recovery administrator from the server's own configuration.
     Recovery,
+    /// A passkey (passkeys spec, PK-11).
+    Passkey,
     /// A migration's run, acting for the administrator who started it
     /// (migrations spec, MG-10).
     Migration {
