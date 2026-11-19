@@ -308,8 +308,12 @@ pub fn spawn_task_scheduler(inner: Arc<Inner>) {
                                 // inbuxa: MON-7: the queue gauge from the queue itself,
                                 // so it's right after a restart
                                 match server.total_queued_messages().await {
-                                    Ok(total) => {
+                                    Ok((total, oldest)) => {
                                         Collector::update_gauge(MetricType::QueueCount, total);
+                                        Collector::update_gauge(
+                                            MetricType::QueueOldestMessage,
+                                            oldest.unwrap_or_default(),
+                                        );
                                     }
                                     Err(err) => {
                                         trc::error!(err.details("Failed to count queued messages"));

@@ -51,6 +51,10 @@ static SERVER_MEMORY: AtomicGauge = AtomicGauge::new(MetricType::ServerMemory);
 static QUEUE_COUNT: AtomicGauge = AtomicGauge::new(MetricType::QueueCount);
 static USER_COUNT: AtomicGauge = AtomicGauge::new(MetricType::UserCount);
 static DOMAIN_COUNT: AtomicGauge = AtomicGauge::new(MetricType::DomainCount);
+// inbuxa: K-C10: gauges for alerts, set where the value is known
+static QUEUE_OLDEST_MESSAGE: AtomicGauge = AtomicGauge::new(MetricType::QueueOldestMessage);
+static CLUSTER_LEASE_RENEWED: AtomicGauge = AtomicGauge::new(MetricType::ClusterLeaseRenewed);
+static TLS_EARLIEST_EXPIRY: AtomicGauge = AtomicGauge::new(MetricType::TlsEarliestExpiry);
 
 const CONN_SMTP_IN: usize = 0;
 const CONN_SMTP_OUT: usize = 1;
@@ -229,8 +233,15 @@ impl Collector {
 
     // inbuxa: MON-6: one edition, every gauge
     pub fn collect_gauges() -> impl Iterator<Item = &'static AtomicGauge> {
-        static GAUGES: &[&AtomicGauge] =
-            &[&SERVER_MEMORY, &QUEUE_COUNT, &USER_COUNT, &DOMAIN_COUNT];
+        static GAUGES: &[&AtomicGauge] = &[
+            &SERVER_MEMORY,
+            &QUEUE_COUNT,
+            &USER_COUNT,
+            &DOMAIN_COUNT,
+            &QUEUE_OLDEST_MESSAGE,
+            &CLUSTER_LEASE_RENEWED,
+            &TLS_EARLIEST_EXPIRY,
+        ];
 
         GAUGES
             .iter()
@@ -306,6 +317,9 @@ impl Collector {
             MetricType::SieveRequestTime => CONNECTION_METRICS[CONN_SIEVE].elapsed.average(),
             MetricType::UserCount => USER_COUNT.get() as f64,
             MetricType::DomainCount => DOMAIN_COUNT.get() as f64,
+            MetricType::QueueOldestMessage => QUEUE_OLDEST_MESSAGE.get() as f64,
+            MetricType::ClusterLeaseRenewed => CLUSTER_LEASE_RENEWED.get() as f64,
+            MetricType::TlsEarliestExpiry => TLS_EARLIEST_EXPIRY.get() as f64,
             _ => EVENT_COUNTERS.get(metric_type.event_id()) as f64,
         }
     }
@@ -316,6 +330,9 @@ impl Collector {
             MetricType::QueueCount => QUEUE_COUNT.set(value),
             MetricType::UserCount => USER_COUNT.set(value),
             MetricType::DomainCount => DOMAIN_COUNT.set(value),
+            MetricType::QueueOldestMessage => QUEUE_OLDEST_MESSAGE.set(value),
+            MetricType::ClusterLeaseRenewed => CLUSTER_LEASE_RENEWED.set(value),
+            MetricType::TlsEarliestExpiry => TLS_EARLIEST_EXPIRY.set(value),
             _ => {}
         }
     }

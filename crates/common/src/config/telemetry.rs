@@ -613,8 +613,19 @@ impl Metrics {
             .with_version(types::brand_version!())
             .build();
 
+        // inbuxa: K-C10: scraping and OTLP set by the deployment (Kubernetes),
+        // over what the store says. A pod reads the scrape password from a
+        // mounted file, and the OTLP exporter from the standard OTEL_ variables.
+        let env_prometheus = prometheus_from_env(bp);
+        let env_otel = if matches!(metrics.open_telemetry, structs::MetricsOtel::Disabled) {
+            otel_from_env(bp, &resource, &instrumentation)
+        } else {
+            None
+        };
+
         Metrics {
             prometheus: match metrics.prometheus {
+                _ if env_prometheus.is_some() => env_prometheus,
                 MetricsPrometheus::Enabled(prom) => {
                     let secret = prom
                         .auth_secret
@@ -705,7 +716,7 @@ impl Metrics {
                         }
                     }
                 }
-                structs::MetricsOtel::Disabled => None,
+                structs::MetricsOtel::Disabled => env_otel,
             },
             log_path: bp
                 .list_infallible::<Tracer>()
@@ -829,6 +840,120 @@ fn apply_metrics(
             if !exclude_events.contains(event_type) {
                 apply_fn(*event_type);
             }
+        }
+    }
+}
+
+/// Prometheus scraping from INBUXA_METRICS_PROMETHEUS_USERNAME and
+/// INBUXA_METRICS_PROMETHEUS_SECRET_FILE. Both or neither: the endpoint is
+/// never opened without a password this way.
+fn prometheus_from_env(bp: &mut Bootstrap) -> Option<PrometheusMetrics> {
+    let username = types::branding::env_var("METRICS_PROMETHEUS_USERNAME").ok();
+    let secret_file = types::branding::env_var("METRICS_PROMETHEUS_SECRET_FILE").ok();
+    let (username, secret_file) = match (username, secret_file) {
+        (None, None) => return None,
+        (Some(username), Some(secret_file)) if !username.is_empty() && !secret_file.is_empty() => {
+            (username, secret_file)
+        }
+        _ => {
+            bp.build_error(
+                ObjectType::Metrics.singleton(),
+                "Set both INBUXA_METRICS_PROMETHEUS_USERNAME and \
+                 INBUXA_METRICS_PROMETHEUS_SECRET_FILE, or neither. The setting in the store \
+                 applies.",
+            );
+            return None;
+        }
+    };
+    match std::fs::read_to_string(&secret_file) {
+        Ok(secret) if !secret.trim_end_matches(['\r', '\n']).is_empty() => {
+            let secret = secret.trim_end_matches(['\r', '\n']);
+            Some(PrometheusMetrics {
+                auth: Some(STANDARD.encode(format!("{username}:{secret}"))),
+            })
+        }
+        Ok(_) => {
+            bp.build_error(
+                ObjectType::Metrics.singleton(),
+                format!("{secret_file} (INBUXA_METRICS_PROMETHEUS_SECRET_FILE) is empty"),
+            );
+            None
+        }
+        Err(err) => {
+            bp.build_error(
+                ObjectType::Metrics.singleton(),
+                format!(
+                    "Unable to read {secret_file} (INBUXA_METRICS_PROMETHEUS_SECRET_FILE): {err}"
+                ),
+            );
+            None
+        }
+    }
+}
+
+/// OTLP metrics from the standard variables, when the store has none set:
+/// OTEL_EXPORTER_OTLP_METRICS_ENDPOINT or OTEL_EXPORTER_OTLP_ENDPOINT turns
+/// it on; the exporter reads those, the _HEADERS and _TIMEOUT variables
+/// itself. OTEL_EXPORTER_OTLP_(METRICS_)PROTOCOL picks grpc or http/protobuf
+/// (the default), and OTEL_METRIC_EXPORT_INTERVAL the interval in
+/// milliseconds (60000). OTEL_RESOURCE_ATTRIBUTES is added to the resource.
+fn otel_from_env(
+    bp: &mut Bootstrap,
+    resource: &Resource,
+    instrumentation: &InstrumentationScope,
+) -> Option<Arc<OtelMetrics>> {
+    let var = |name: &str| std::env::var(name).ok().filter(|value| !value.is_empty());
+    var("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT").or_else(|| var("OTEL_EXPORTER_OTLP_ENDPOINT"))?;
+    let protocol = var("OTEL_EXPORTER_OTLP_METRICS_PROTOCOL")
+        .or_else(|| var("OTEL_EXPORTER_OTLP_PROTOCOL"))
+        .unwrap_or_else(|| "http/protobuf".to_string());
+    let interval = match var("OTEL_METRIC_EXPORT_INTERVAL").map(|value| value.parse::<u64>()) {
+        None => Duration::from_secs(60),
+        Some(Ok(millis)) if millis >= 1000 => Duration::from_millis(millis),
+        Some(_) => {
+            bp.build_warning(
+                ObjectType::Metrics.singleton(),
+                "OTEL_METRIC_EXPORT_INTERVAL is not a number of milliseconds of at least 1000; \
+                 exporting every 60 seconds.",
+            );
+            Duration::from_secs(60)
+        }
+    };
+    let exporter = match protocol.as_str() {
+        "grpc" => MetricExporter::builder()
+            .with_temporality(Temporality::Delta)
+            .with_tonic()
+            .build(),
+        "http/protobuf" => MetricExporter::builder()
+            .with_temporality(Temporality::Delta)
+            .with_http()
+            .build(),
+        _ => {
+            bp.build_error(
+                ObjectType::Metrics.singleton(),
+                format!(
+                    "OTEL_EXPORTER_OTLP_PROTOCOL is {protocol:?}; expected grpc or http/protobuf. \
+                     No OTLP metrics."
+                ),
+            );
+            return None;
+        }
+    };
+    match exporter {
+        Ok(exporter) => Some(Arc::new(OtelMetrics {
+            exporter,
+            interval,
+            resource: resource.clone(),
+            instrumentation: instrumentation.clone(),
+        })),
+        Err(err) => {
+            bp.build_error(
+                ObjectType::Metrics.singleton(),
+                format!(
+                    "Failed to build the OpenTelemetry metrics exporter from OTEL_ variables: {err}"
+                ),
+            );
+            None
         }
     }
 }

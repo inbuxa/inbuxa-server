@@ -58,6 +58,7 @@ struct NodeClaim {
 impl RegistryStoreInner {
     pub(super) async fn acquire_node_id(&mut self) -> Result<(), String> {
         let (node_id, slots) = NodeSlot::acquire(&self.store, &self.env_hostname).await?;
+        lease_renewed();
         self.node_id.store(node_id, Ordering::Relaxed);
         self.remember_hostname().await;
 
@@ -95,6 +96,12 @@ impl RegistryStoreInner {
             let _ = tokio::fs::write(&path, &self.env_hostname).await;
         }
     }
+}
+
+// inbuxa: K-C10: the gauge an alert watches. A pod that keeps running but
+// can't renew its lease (the store unreachable, say) stops moving it.
+fn lease_renewed() {
+    trc::Collector::update_gauge(trc::MetricType::ClusterLeaseRenewed, now());
 }
 
 // INBUXA: #458, the file a node records its leased hostname in.
@@ -146,6 +153,7 @@ impl RegistryStore {
                     })?;
                 self.0.node_id.store(new_node_id, Ordering::Relaxed);
                 SnowflakeIdGenerator::set_node_id(new_node_id as u64);
+                lease_renewed();
 
                 trc::event!(
                     Cluster(ClusterEvent::NodeIdReassigned),
@@ -173,6 +181,7 @@ impl RegistryStore {
             .write(batch.build_all())
             .await
             .caused_by(trc::location!())?;
+        lease_renewed();
 
         self.release_renamed_lease(&slots).await
     }

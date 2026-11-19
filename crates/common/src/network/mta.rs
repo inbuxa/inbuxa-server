@@ -35,10 +35,10 @@ use std::{
 };
 use store::{
     Deserialize, IterateParams, ValueKey,
-    write::{AlignedBytes, Archive, QueueClass, ValueClass},
+    write::{AlignedBytes, Archive, QueueClass, ValueClass, key::DeserializeBigEndian},
 };
 use trc::{AddContext, SpamEvent};
-use utils::DomainPart;
+use utils::{DomainPart, snowflake::SnowflakeIdGenerator};
 
 impl Server {
     pub async fn rcpt_resolve(
@@ -505,16 +505,26 @@ impl Server {
         Ok(())
     }
 
-    pub async fn total_queued_messages(&self) -> trc::Result<u64> {
+    // inbuxa: K-C10: also when the oldest message arrived. Queue ids are
+    // snowflakes, so the first key is the oldest message and its id holds
+    // the time, without reading any message.
+    pub async fn total_queued_messages(&self) -> trc::Result<(u64, Option<u64>)> {
         let mut total = 0;
+        let mut oldest = None;
         self.store()
             .iterate(
                 IterateParams::new(
                     ValueKey::from(ValueClass::Queue(QueueClass::Message(0))),
                     ValueKey::from(ValueClass::Queue(QueueClass::Message(u64::MAX))),
                 )
+                .ascending()
                 .no_values(),
-                |_, _| {
+                |key, _| {
+                    if total == 0 {
+                        oldest = Some(SnowflakeIdGenerator::to_timestamp(
+                            key.deserialize_be_u64(0)?,
+                        ));
+                    }
                     total += 1;
 
                     Ok(true)
@@ -522,7 +532,7 @@ impl Server {
             )
             .await
             .caused_by(trc::location!())
-            .map(|_| total)
+            .map(|_| (total, oldest))
     }
 }
 
