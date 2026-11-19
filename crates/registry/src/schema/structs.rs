@@ -488,6 +488,13 @@ pub struct Authentication {
     pub max_app_passwords: Option<u64>,
     #[serde(rename = "maxApiKeys")]
     pub max_api_keys: Option<u64>,
+    // inbuxa: passkeys spec, the settings
+    #[serde(rename = "passkeysAllowed")]
+    pub passkeys_allowed: bool,
+    #[serde(rename = "passkeyRpId")]
+    pub passkey_rp_id: Option<String>,
+    #[serde(rename = "maxPasskeys")]
+    pub max_passkeys: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2740,6 +2747,9 @@ pub struct Domain {
     // inbuxa: branding BT-27
     #[serde(rename = "logoDark")]
     pub logo_dark: Option<String>,
+    // inbuxa: passkeys spec: an off switch for this level's accounts
+    #[serde(rename = "passkeysAllowed")]
+    pub passkeys_allowed: bool,
     #[serde(rename = "certificateManagement")]
     pub certificate_management: CertificateManagement,
     #[serde(rename = "dkimManagement")]
@@ -5880,6 +5890,9 @@ pub struct Tenant {
     // inbuxa: branding BT-27
     #[serde(rename = "logoDark")]
     pub logo_dark: Option<String>,
+    // inbuxa: passkeys spec: an off switch for this level's accounts
+    #[serde(rename = "passkeysAllowed")]
+    pub passkeys_allowed: bool,
     #[serde(rename = "roles")]
     pub roles: Roles,
     #[serde(rename = "permissions")]

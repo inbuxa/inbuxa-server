@@ -16,6 +16,10 @@ use crate::utils::{
     server::{TestServer, TestServerBuilder},
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use registry::schema::{
+    prelude::{ObjectType, Property},
+    structs::Authentication,
+};
 use ring::{
     rand::SystemRandom,
     signature::{ECDSA_P256_SHA256_ASN1_SIGNING, EcdsaKeyPair, KeyPair},
@@ -245,7 +249,9 @@ pub async fn test(test: &mut TestServer) {
         "no removal recorded by name: {response}"
     );
 
-    registration(&user).await;
+    let key = registration(&user).await;
+    let client_id = sign_in(&user, &key).await;
+    policy(&admin, &user, &key, &client_id).await;
 }
 
 /// A software authenticator: one P-256 key, user verification always done.
@@ -427,7 +433,7 @@ async fn start_registration(user: &Account, name: &str) -> (String, String) {
 }
 
 /// PK-6 to PK-8: the registration page's two steps.
-async fn registration(user: &Account) {
+async fn registration(user: &Account) -> SoftKey {
     let (laptop_id, ticket) = start_registration(user, "Laptop").await;
 
     // The server serves the page itself
@@ -541,8 +547,7 @@ async fn registration(user: &Account) {
     }))
     .await;
     assert_eq!(response["type"], "refused", "{response}");
-
-    sign_in(user, &key).await;
+    key
 }
 
 async fn new_challenge() -> Value {
@@ -585,7 +590,7 @@ async fn login(client_id: &str, assertion: Value) -> Value {
 }
 
 /// PK-9 to PK-12: sign-in in the authorization-code flow.
-async fn sign_in(user: &Account, key: &SoftKey) {
+async fn sign_in(user: &Account, key: &SoftKey) -> String {
     let client = HttpRequest::with_credentials(
         8899,
         "admin@example.com",
@@ -666,6 +671,151 @@ async fn sign_in(user: &Account, key: &SoftKey) {
     }))
     .await;
     assert_eq!(response["type"], "options", "{response}");
+    client_id
+}
+
+/// The device flow, the settings and the off switches (PK-3, PK-5, PK-9,
+/// PK-12).
+async fn policy(admin: &Account, user: &Account, key: &SoftKey, client_id: &str) {
+    // PK-9: the device flow takes a passkey too
+    let device = reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .build()
+        .unwrap()
+        .post("https://127.0.0.1:8899/auth/device")
+        .form(&[("client_id", client_id)])
+        .send()
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap();
+    let user_code = device["user_code"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{device}"));
+    let challenge = new_challenge().await;
+    let response = register_at(
+        "/api/auth",
+        json!({"type": "authDevice", "code": user_code, "passkey": key.get(&challenge, 8, ORIGIN)}),
+    )
+    .await;
+    assert_eq!(response["type"], "verified", "{response}");
+
+    // PK-5: maxPasskeys; the account has one passkey and two pending
+    admin
+        .registry_update_setting(
+            Authentication {
+                max_passkeys: 3,
+                ..Default::default()
+            },
+            &[Property::MaxPasskeys],
+        )
+        .await;
+    let (_, response) = call(
+        user,
+        "inbuxa:Passkey/set",
+        json!({"create": {"k": {"name": "Fourth"}}}),
+    )
+    .await;
+    assert_eq!(
+        response["notCreated"]["k"]["type"], "overQuota",
+        "{response}"
+    );
+    admin
+        .registry_update_setting(
+            Authentication {
+                max_passkeys: 10,
+                ..Default::default()
+            },
+            &[Property::MaxPasskeys],
+        )
+        .await;
+
+    // PK-12: the domain's off switch stops adding and signing in
+    let domain_id = admin.find_or_create_domain("example.com").await;
+    admin
+        .registry_update_object(
+            ObjectType::Domain,
+            domain_id,
+            json!({"passkeysAllowed": false}),
+        )
+        .await;
+    let (_, response) = call(
+        user,
+        "inbuxa:Passkey/set",
+        json!({"create": {"k": {"name": "Off"}}}),
+    )
+    .await;
+    assert_eq!(
+        response["notCreated"]["k"]["type"], "forbidden",
+        "{response}"
+    );
+    let challenge = new_challenge().await;
+    let response = login(client_id, key.get(&challenge, 9, ORIGIN)).await;
+    assert_eq!(response["type"], "failure", "{response}");
+    admin
+        .registry_update_object(
+            ObjectType::Domain,
+            domain_id,
+            json!({"passkeysAllowed": true}),
+        )
+        .await;
+    let challenge = new_challenge().await;
+    let response = login(client_id, key.get(&challenge, 10, ORIGIN)).await;
+    assert_eq!(response["type"], "authenticated", "{response}");
+
+    // PK-9: off server-wide, the login page isn't offered a challenge
+    admin
+        .registry_update_setting(
+            Authentication {
+                passkeys_allowed: false,
+                ..Default::default()
+            },
+            &[Property::PasskeysAllowed],
+        )
+        .await;
+    let refused = HttpRequest::new()
+        .post::<Value>("/api/auth/passkey", &json!({}))
+        .await;
+    assert!(
+        refused
+            .as_ref()
+            .map_or(true, |response| response["challengeId"].is_null()),
+        "{refused:?}"
+    );
+    admin
+        .registry_update_setting(
+            Authentication {
+                passkeys_allowed: true,
+                ..Default::default()
+            },
+            &[Property::PasskeysAllowed],
+        )
+        .await;
+
+    // PK-3: the relying-party id must fit the public URL
+    for bad in ["com", "example.com", "co.uk"] {
+        let (_, response) = call(
+            admin,
+            "x:Authentication/set",
+            json!({"update": {"singleton": {"passkeyRpId": bad}}}),
+        )
+        .await;
+        assert_eq!(
+            response["notUpdated"]["singleton"]["properties"][0], "passkeyRpId",
+            "{bad}: {response}"
+        );
+    }
+    let (_, response) = call(
+        admin,
+        "x:Authentication/set",
+        json!({"update": {"singleton": {"passkeyRpId": RP_ID}}}),
+    )
+    .await;
+    assert!(response["updated"].get("singleton").is_some(), "{response}");
+    let challenge = new_challenge().await;
+    let response = login(client_id, key.get(&challenge, 11, ORIGIN)).await;
+    assert_eq!(response["type"], "authenticated", "{response}");
 }
 
 #[ignore]

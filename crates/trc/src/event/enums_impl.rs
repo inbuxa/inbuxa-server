@@ -69,6 +69,8 @@ impl EventType {
             b"auth.client-registration" => EventType::Auth(AuthEvent::ClientRegistration),
             // inbuxa: legacy-protocols LP-6
             b"auth.legacy-protocol-refused" => EventType::Auth(AuthEvent::LegacyProtocolRefused),
+            // inbuxa: passkeys spec, PK-18
+            b"auth.passkey-counter" => EventType::Auth(AuthEvent::PasskeyCounter),
             b"auth.error" => EventType::Auth(AuthEvent::Error),
             b"auth.warning" => EventType::Auth(AuthEvent::Warning),
             b"auth.credential-expired" => EventType::Auth(AuthEvent::CredentialExpired),
@@ -748,6 +750,8 @@ impl EventType {
             EventType::Auth(AuthEvent::ClientRegistration) => "auth.client-registration",
             // inbuxa: legacy-protocols LP-6
             EventType::Auth(AuthEvent::LegacyProtocolRefused) => "auth.legacy-protocol-refused",
+            // inbuxa: passkeys spec, PK-18
+            EventType::Auth(AuthEvent::PasskeyCounter) => "auth.passkey-counter",
             EventType::Auth(AuthEvent::Error) => "auth.error",
             EventType::Auth(AuthEvent::Warning) => "auth.warning",
             EventType::Auth(AuthEvent::CredentialExpired) => "auth.credential-expired",
@@ -1568,6 +1572,8 @@ impl EventType {
             EventType::Auth(AuthEvent::ClientRegistration) => 555,
             // inbuxa: legacy-protocols LP-6
             EventType::Auth(AuthEvent::LegacyProtocolRefused) => 642,
+            // inbuxa: passkeys spec, PK-18
+            EventType::Auth(AuthEvent::PasskeyCounter) => 664,
             EventType::Auth(AuthEvent::Error) => 34,
             EventType::Auth(AuthEvent::Warning) => 595,
             EventType::Auth(AuthEvent::CredentialExpired) => 276,
@@ -2246,6 +2252,8 @@ impl EventType {
             555 => Some(EventType::Auth(AuthEvent::ClientRegistration)),
             // inbuxa: legacy-protocols LP-6
             642 => Some(EventType::Auth(AuthEvent::LegacyProtocolRefused)),
+            // inbuxa: passkeys spec, PK-18
+            664 => Some(EventType::Auth(AuthEvent::PasskeyCounter)),
             34 => Some(EventType::Auth(AuthEvent::Error)),
             595 => Some(EventType::Auth(AuthEvent::Warning)),
             276 => Some(EventType::Auth(AuthEvent::CredentialExpired)),
@@ -2976,6 +2984,8 @@ impl EventType {
             EventType::Auth(AuthEvent::ClientRegistration) => Level::Info,
             // inbuxa: legacy-protocols LP-6
             EventType::Auth(AuthEvent::LegacyProtocolRefused) => Level::Info,
+            // inbuxa: passkeys spec, PK-18
+            EventType::Auth(AuthEvent::PasskeyCounter) => Level::Warn,
             EventType::Calendar(CalendarEvent::AlarmSent) => Level::Info,
             EventType::Calendar(CalendarEvent::ItipMessageSent) => Level::Info,
             EventType::Calendar(CalendarEvent::ItipMessageReceived) => Level::Info,
@@ -3357,6 +3367,8 @@ impl EventType {
             EventType::Auth(AuthEvent::LegacyProtocolRefused) => {
                 "Legacy mail protocol sign-in refused"
             }
+            // inbuxa: passkeys spec, PK-18
+            EventType::Auth(AuthEvent::PasskeyCounter) => "Passkey counter went backwards",
             EventType::Auth(AuthEvent::Error) => "Authentication error",
             EventType::Auth(AuthEvent::Warning) => "Authentication warning",
             EventType::Auth(AuthEvent::CredentialExpired) => "Credential expired",
@@ -4148,6 +4160,8 @@ impl EventType {
             EventType::Auth(AuthEvent::LegacyProtocolRefused) => {
                 "This server allows only inbuxa webmail and JMAP apps"
             }
+            // inbuxa: passkeys spec, PK-18
+            EventType::Auth(AuthEvent::PasskeyCounter) => "Authentication failed",
             EventType::Auth(AuthEvent::Error) => "Authentication error",
             EventType::Auth(AuthEvent::CredentialExpired) => "Credential expired",
             EventType::Imap(ImapEvent::ConnectionStart) => "IMAP error",
@@ -4485,6 +4499,8 @@ impl EventType {
             EventType::Auth(AuthEvent::ClientRegistration),
             // inbuxa: legacy-protocols LP-6
             EventType::Auth(AuthEvent::LegacyProtocolRefused),
+            // inbuxa: passkeys spec, PK-18
+            EventType::Auth(AuthEvent::PasskeyCounter),
             EventType::Auth(AuthEvent::Error),
             EventType::Auth(AuthEvent::Warning),
             EventType::Auth(AuthEvent::CredentialExpired),

@@ -1105,6 +1105,7 @@ pub async fn test(test: &mut TestServer) {
                 account_secret: "this is a very strong password".to_string(),
                 mfa_token: None,
                 code: device_response.user_code.clone(),
+                passkey: None,
             },
         )
         .await
@@ -1133,6 +1134,7 @@ pub async fn test(test: &mut TestServer) {
                 account_secret: "this is a very strong password".to_string(),
                 mfa_token: None,
                 code: device_response.user_code.clone(),
+                passkey: None,
             },
         )
         .await

@@ -67,12 +67,13 @@ Two indexes: credential id → passkey, and user handle → account.
 
 | Field | Default | Meaning |
 |---|---|---|
-| `passkeys` | `allowed` | `allowed` or `disabled` server-wide (PK-12) |
+| `passkeysAllowed` | true | Server-wide on/off switch (PK-12) |
 | `passkeyRpId` | null | The relying-party id. Null means the host of the server's public HTTPS URL (PK-3) |
-| `maxPasskeys` | 10 | Per account |
+| `maxPasskeys` | 10 | Per account, 1 to 100 |
 
-Per domain and per tenant, `passkeys` can be set to `allowed` or `disabled`,
-overriding the server's value; the most specific setting applies.
+`x:Domain` and `x:Tenant` each have `passkeysAllowed` (default true) too.
+These are off switches (decision 3): passkeys work for an account only when
+the server, its tenant and its domain all allow them.
 
 ### Permissions
 
@@ -245,7 +246,7 @@ Settled by John, 2026-11-18:
    later as an option, once browsers support it widely.
 2. **A passkey signs in on its own** (PK-12): no TOTP code after it, because
    user verification is a second factor already.
-3. **On by default** (`passkeys: allowed`), with off switches per server,
+3. **On by default** (`passkeysAllowed: true`), with off switches per server,
    tenant and domain. Nobody gets a passkey without adding one.
 
 Also decided in this spec: passkeys stored apart from account credentials;
@@ -256,7 +257,7 @@ removing a passkey ends the account's sessions (PK-15); the password stays
 
 ## Implementation status
 
-Building, one PR each:
+Built, one PR each:
 
 1. Storage and `inbuxa:Passkey` management: records in `_` under `N`,
    `get` and `/set` (create pending with its registration URL, rename,
@@ -277,6 +278,14 @@ Building, one PR each:
    password no longer opens it. Sign-ins by passkey are recorded with
    `via: passkey`, and raise `auth.success` with type `passkey`; a counter
    that didn't go up fails and is logged as a possible clone.
-4. The device flow, the settings and policy, and the sign-in events.
+4. The device flow (`authDevice` takes `passkey` too), the settings above
+   (`passkeyRpId` checked on write against the public URL and the public
+   suffix list), the external-directory rule (PK-13: an account whose domain,
+   or the server, signs in against a directory gets no passkeys), the
+   `auth.passkey-counter` event (id 664, warn), and failed passkey sign-ins
+   tagged `type: passkey`. The login page offers passkeys only when the
+   challenge endpoint answers (it's 404 when they're off server-wide).
+
+The server side is done.
 
 Then the webmail and console pages.

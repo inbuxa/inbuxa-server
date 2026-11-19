@@ -46,6 +46,7 @@ tokio-tungstenite = "0.30"
 tungstenite = "0.30"
 chrono = "0.4"
 rand = "0.10.2"
+psl = "2" # inbuxa: passkeys, the relying-party id check
 rkyv = { version = "0.8.18", features = ["little_endian"] }
 hashify = "0.2"
 

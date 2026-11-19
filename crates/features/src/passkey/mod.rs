@@ -39,7 +39,8 @@ const KIND_HANDLE_ACCOUNT: u8 = b'u';
 const KIND_TICKET: u8 = b't';
 const KIND_EPOCH: u8 = b'e';
 
-/// Passkeys per account, pending ones included (PK-5).
+/// Passkeys per account, pending ones included, unless `maxPasskeys` says
+/// otherwise (PK-5).
 pub const MAX_PASSKEYS: usize = 10;
 /// How long a registration ticket stays good (PK-6).
 pub const TICKET_SECONDS: u64 = 600;
@@ -251,17 +252,19 @@ pub enum Created {
     Full,
 }
 
-/// Starts registering a passkey (PK-5): a pending record opened by `ticket`.
+/// Starts registering a passkey (PK-5): a pending record opened by `ticket`,
+/// while the account has fewer than `max`.
 pub async fn create_pending(
     data: &Store,
     account_id: u32,
     name: String,
     ticket: &str,
     now: u64,
+    max: usize,
 ) -> trc::Result<Created> {
     for attempt in 1..=CREATE_ATTEMPTS {
         let existing = list(data, account_id, now).await?;
-        if existing.len() >= MAX_PASSKEYS {
+        if existing.len() >= max {
             return Ok(Created::Full);
         }
         let number = existing.iter().map(|p| p.number).max().unwrap_or(0) + 1;

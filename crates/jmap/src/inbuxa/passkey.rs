@@ -32,7 +32,11 @@ use jmap_proto::{
 };
 use jmap_tools::{Key, Map, Value};
 use rand::{RngExt, distr::Alphanumeric, rng};
-use registry::schema::{enums::Permission, structs::Account};
+use registry::schema::{
+    enums::Permission,
+    prelude::{Object, ObjectInner, Property},
+    structs::{Account, Authentication, Domain, Tenant},
+};
 use store::write::now;
 use trc::AddContext;
 use types::id::Id;
@@ -63,10 +67,124 @@ fn registration_url(server: &Server, ticket: &str) -> String {
     )
 }
 
-/// The relying-party id passkeys are registered for now (PK-3): the host of
-/// the server's public HTTPS URL.
-pub fn current_rp_id(server: &Server) -> String {
-    host_of(&server.core.network.http.url_https)
+/// The passkey settings on `x:Authentication`.
+pub async fn settings(server: &Server) -> trc::Result<Authentication> {
+    Ok(server
+        .registry()
+        .object::<Authentication>(Id::singleton())
+        .await
+        .caused_by(trc::location!())?
+        .unwrap_or_default())
+}
+
+/// The relying-party id passkeys are registered for now (PK-3):
+/// `passkeyRpId`, or the host of the server's public HTTPS URL.
+pub fn current_rp_id(server: &Server, settings: &Authentication) -> String {
+    settings
+        .passkey_rp_id
+        .as_deref()
+        .map(|id| id.trim().trim_end_matches('.').to_ascii_lowercase())
+        .filter(|id| !id.is_empty())
+        .unwrap_or_else(|| host_of(&server.core.network.http.url_https))
+}
+
+/// PK-3: whether `rp_id` may be the relying-party id for a server reached at
+/// `url`: its host, or a registrable parent of it, never a public suffix.
+pub fn check_rp_id(url: &str, rp_id: &str) -> Result<(), &'static str> {
+    let host = host_of(url);
+    let rp_id = rp_id.trim().trim_end_matches('.').to_ascii_lowercase();
+    if rp_id.is_empty() || rp_id.starts_with('.') || rp_id.contains(['/', ':', '@', ' ']) {
+        return Err("Give a domain name, such as example.com.");
+    }
+    if host != rp_id && !host.ends_with(&format!(".{rp_id}")) {
+        return Err("It must be the host of the server's public URL or a parent domain of it.");
+    }
+    if rp_id == "localhost" {
+        return Ok(());
+    }
+    match psl::suffix(rp_id.as_bytes()) {
+        Some(suffix) if suffix.as_bytes() != rp_id.as_bytes() => Ok(()),
+        _ => Err("A public suffix such as com or co.uk can't be used."),
+    }
+}
+
+/// PK-3: a new or changed `passkeyRpId` must fit the server's public URL;
+/// `invalidProperties` names it otherwise.
+pub fn check_write(
+    server: &Server,
+    old: Option<&Object>,
+    new: &Object,
+) -> Result<(), SetError<Property>> {
+    let ObjectInner::Authentication(auth) = &new.inner else {
+        return Ok(());
+    };
+    let Some(rp_id) = auth.passkey_rp_id.as_deref() else {
+        return Ok(());
+    };
+    let unchanged = old.is_some_and(|old| {
+        matches!(&old.inner, ObjectInner::Authentication(o) if o.passkey_rp_id.as_deref() == Some(rp_id))
+    });
+    if unchanged {
+        return Ok(());
+    }
+    check_rp_id(&server.core.network.http.url_https, rp_id).map_err(|reason| {
+        SetError::invalid_properties()
+            .with_property(Property::PasskeyRpId)
+            .with_description(reason)
+    })
+}
+
+/// PK-12, PK-13: whether the account may add passkeys and sign in with
+/// them. Not on an external directory; then the server, the account's
+/// tenant and its domain can each switch them off.
+pub async fn allowed_for(
+    server: &Server,
+    settings: &Authentication,
+    account_id: u32,
+) -> trc::Result<bool> {
+    if !settings.passkeys_allowed {
+        return Ok(false);
+    }
+    let account = server
+        .account(account_id)
+        .await
+        .caused_by(trc::location!())?;
+    let domain = match account.name.rsplit_once('@') {
+        Some((_, domain)) => server.domain(domain).await?,
+        None => None,
+    };
+    // PK-13: the directory owns sign-in
+    let directory = domain
+        .as_ref()
+        .and_then(|domain| domain.id_directory)
+        .or(settings.directory_id.map(|id| id.document_id()));
+    if directory.is_some() {
+        return Ok(false);
+    }
+    if let Some(domain) = &domain
+        && let Some(object) = server
+            .registry()
+            .object::<Domain>(Id::from(domain.id))
+            .await
+            .caused_by(trc::location!())?
+        && !object.passkeys_allowed
+    {
+        return Ok(false);
+    }
+    let tenant = account
+        .id_tenant
+        .or(domain.as_ref().and_then(|domain| domain.id_tenant));
+    if let Some(tenant) = tenant
+        && let Some(object) = server
+            .registry()
+            .object::<Tenant>(Id::from(tenant))
+            .await
+            .caused_by(trc::location!())?
+        && !object.passkeys_allowed
+    {
+        return Ok(false);
+    }
+    Ok(true)
 }
 
 /// The host of a URL, lowercased, without a port.
@@ -98,8 +216,13 @@ fn date(seconds: u64) -> PValue {
     Value::Str(UTCDate::from_timestamp(seconds as i64).to_string().into())
 }
 
-fn to_value(server: &Server, passkey: &Passkey, properties: &[P], ticket: Option<&str>) -> PValue {
-    let rp_id = current_rp_id(server);
+fn to_value(
+    server: &Server,
+    rp_id: &str,
+    passkey: &Passkey,
+    properties: &[P],
+    ticket: Option<&str>,
+) -> PValue {
     let mut out = Map::with_capacity(properties.len());
     for property in properties {
         let value = match property {
@@ -225,18 +348,21 @@ pub async fn get(
         list: Vec::new(),
         not_found,
     };
+    let rp_id = current_rp_id(server, &settings(server).await?);
     let all = passkey::list(server.store(), account_id, now()).await?;
     match ids {
         None => {
             response.list = all
                 .iter()
-                .map(|p| to_value(server, p, &properties, None))
+                .map(|p| to_value(server, &rp_id, p, &properties, None))
                 .collect();
         }
         Some(ids) => {
             for id in ids {
                 match all.iter().find(|p| p.id() == id.id()) {
-                    Some(p) => response.list.push(to_value(server, p, &properties, None)),
+                    Some(p) => response
+                        .list
+                        .push(to_value(server, &rp_id, p, &properties, None)),
                     None => response.push_not_found(id),
                 }
             }
@@ -256,6 +382,9 @@ pub async fn set(
     let mut response = SetResponse::from_request(&request, server.core.jmap.set_max_objects)?;
     let reached = reach(server, access_token, account_id).await?;
     let data = server.store();
+    let settings = settings(server).await?;
+    let rp_id = current_rp_id(server, &settings);
+    let mut allowed = None;
 
     for (client_id, value) in request.unwrap_create() {
         if let Err(error) = &reached {
@@ -303,15 +432,29 @@ pub async fn set(
             );
             continue;
         };
+        // PK-12, PK-13
+        let allowed = match allowed {
+            Some(allowed) => allowed,
+            None => *allowed.insert(allowed_for(server, &settings, account_id).await?),
+        };
+        if !allowed {
+            response.not_created.append(
+                client_id,
+                SetError::forbidden().with_description("Passkeys are turned off for this account."),
+            );
+            continue;
+        }
         let ticket = rng()
             .sample_iter(Alphanumeric)
             .take(TICKET_LEN)
             .map(char::from)
             .collect::<String>();
-        match passkey::create_pending(data, account_id, name, &ticket, now()).await? {
+        let max = settings.max_passkeys.clamp(1, 100) as usize;
+        match passkey::create_pending(data, account_id, name, &ticket, now(), max).await? {
             Created::Pending(created) => {
                 let out = to_value(
                     server,
+                    &rp_id,
                     &created,
                     &[P::Id, P::State, P::RegistrationUrl, P::CreatedAt],
                     Some(&ticket),
@@ -322,8 +465,7 @@ pub async fn set(
                 response.not_created.append(
                     client_id,
                     SetError::over_quota().with_description(format!(
-                        "An account can have {} passkeys. Remove one first.",
-                        passkey::MAX_PASSKEYS
+                        "An account can have {max} passkeys. Remove one first."
                     )),
                 );
             }
@@ -408,7 +550,7 @@ pub async fn set(
 
 #[cfg(test)]
 mod tests {
-    use super::host_of;
+    use super::{check_rp_id, host_of};
 
     #[test]
     fn rp_id_is_the_host() {
@@ -419,5 +561,21 @@ mod tests {
         );
         assert_eq!(host_of("https://mail.example.com/path"), "mail.example.com");
         assert_eq!(host_of("https://[::1]:443"), "[::1]");
+    }
+
+    // PK-3: the host or a registrable parent of it, never a public suffix
+    #[test]
+    fn rp_id_must_fit_the_public_url() {
+        let url = "https://mail.example.co.uk";
+        assert!(check_rp_id(url, "mail.example.co.uk").is_ok());
+        assert!(check_rp_id(url, "example.co.uk").is_ok());
+        assert!(check_rp_id(url, "Example.CO.uk.").is_ok());
+        assert!(check_rp_id(url, "co.uk").is_err());
+        assert!(check_rp_id(url, "uk").is_err());
+        assert!(check_rp_id(url, "other.co.uk").is_err());
+        assert!(check_rp_id(url, "ample.co.uk").is_err());
+        assert!(check_rp_id(url, "https://example.co.uk").is_err());
+        assert!(check_rp_id(url, "").is_err());
+        assert!(check_rp_id("https://localhost:8899", "localhost").is_ok());
     }
 }

@@ -129,12 +129,18 @@ pub enum LoginRequest {
     },
     #[serde(rename_all = "camelCase")]
     AuthDevice {
+        // inbuxa: empty when a passkey signs in
+        #[serde(default)]
         account_name: String,
+        #[serde(default)]
         account_secret: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(default)]
         mfa_token: Option<String>,
         code: String,
+        // inbuxa: passkeys spec, PK-9: an assertion in place of the password
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        passkey: Option<crate::auth::passkey::PasskeyAssertion>,
     },
 }
 
@@ -408,6 +414,7 @@ impl OAuthApiHandler for Server {
                 account_secret,
                 mfa_token,
                 code,
+                passkey,
             } => {
                 // Obtain code
                 let mut result = LoginResponse::Failure;
@@ -423,19 +430,25 @@ impl OAuthApiHandler for Server {
                         .unarchive::<OAuthCode>()
                         .caused_by(trc::location!())?;
                     if oauth.status == OAuthStatus::Pending {
-                        // Authenticate
-                        match self
-                            .authenticate(&AuthRequest {
-                                credentials: Credentials::Basic {
-                                    username: account_name,
-                                    secret: account_secret,
-                                    mfa_token,
-                                },
-                                session_id: session.session_id,
-                                remote_ip: session.remote_ip,
-                            })
-                            .await
-                        {
+                        // Authenticate (inbuxa: or a passkey, PK-9)
+                        let authenticated = match &passkey {
+                            Some(assertion) => {
+                                crate::auth::passkey::sign_in(self, session, assertion).await
+                            }
+                            None => {
+                                self.authenticate(&AuthRequest {
+                                    credentials: Credentials::Basic {
+                                        username: account_name,
+                                        secret: account_secret,
+                                        mfa_token,
+                                    },
+                                    session_id: session.session_id,
+                                    remote_ip: session.remote_ip,
+                                })
+                                .await
+                            }
+                        };
+                        match authenticated {
                             Ok(access_token) => {
                                 let new_oauth_code = OAuthCode {
                                     status: OAuthStatus::Authorized,

@@ -15,10 +15,11 @@
 // (audit-hold-lock spec, AU-3, AU-8); 649 is cluster.node-id-reassigned;
 // 650 to 659 are inbuxa Relay's (relay spec, RL-23, RL-T23); 660 is
 // store.blob-read-through; 661 is smtp.directory-no-answer (#364); 662 is
-// spam.result (#397); 663 is queue.message-subject (inbuxa-admin #228).
+// spam.result (#397); 663 is queue.message-subject (inbuxa-admin #228);
+// 664 is auth.passkey-counter (passkeys spec, PK-18).
 // TOTAL_EVENT_COUNT sizes the collector's per-event tables, so it is one
 // more than the highest id; the test below holds it to the variant list
-pub const TOTAL_EVENT_COUNT: usize = 664;
+pub const TOTAL_EVENT_COUNT: usize = 665;
 pub const TOTAL_METRIC_COUNT: usize = 369;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -129,6 +130,9 @@ pub enum AuthEvent {
     CredentialExpired = 276,
     // inbuxa: legacy-protocols LP-6
     LegacyProtocolRefused = 642,
+    /// inbuxa: passkeys spec, PK-18: a passkey's counter didn't go up, so it
+    /// may have been copied
+    PasskeyCounter = 664,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

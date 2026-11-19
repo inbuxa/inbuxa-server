@@ -3303,7 +3303,8 @@ impl RegistryJsonPropertyPatch for AsnResource {
 
 impl ObjectImpl for Authentication {
     const FLAGS: u64 = OBJ_SINGLETON;
-    const VERSION: u8 = 0;
+    // inbuxa: 1: passkeysAllowed, passkeyRpId, maxPasskeys (passkeys spec)
+    const VERSION: u8 = 1;
     const OBJECT: ObjectType = ObjectType::Authentication;
 
     fn validate(&self, errors: &mut Vec<ValidationError>) -> bool {
@@ -3364,6 +3365,18 @@ impl ObjectImpl for Authentication {
                 errors.push(ValidationError::min_value(Property::MaxApiKeys, 1));
             }
         }
+        if let Some(value) = &self.passkey_rp_id {
+            if value.is_empty() {
+                errors.push(ValidationError::required(Property::PasskeyRpId));
+            }
+        }
+        let value = &self.max_passkeys;
+        if *value < 1 {
+            errors.push(ValidationError::min_value(Property::MaxPasskeys, 1));
+        }
+        if *value > 100 {
+            errors.push(ValidationError::max_value(Property::MaxPasskeys, 100));
+        }
         errors.len() == neb
     }
 
@@ -3398,6 +3411,9 @@ impl Pickle for Authentication {
         self.password_default_expiry.pickle(out);
         self.max_app_passwords.pickle(out);
         self.max_api_keys.pickle(out);
+        self.passkeys_allowed.pickle(out);
+        self.passkey_rp_id.pickle(out);
+        self.max_passkeys.pickle(out);
     }
 
     fn unpickle(stream: &mut crate::pickle::PickledStream<'_>) -> Option<Self> {
@@ -3414,6 +3430,12 @@ impl Pickle for Authentication {
         this.password_default_expiry = Pickle::unpickle(stream)?;
         this.max_app_passwords = Pickle::unpickle(stream)?;
         this.max_api_keys = Pickle::unpickle(stream)?;
+        // inbuxa: passkeys spec, stored from version 1
+        if stream.version() >= 1 {
+            this.passkeys_allowed = Pickle::unpickle(stream)?;
+            this.passkey_rp_id = Pickle::unpickle(stream)?;
+            this.max_passkeys = Pickle::unpickle(stream)?;
+        }
         Some(this)
     }
 }
@@ -3433,13 +3455,16 @@ impl Default for Authentication {
             password_default_expiry: Default::default(),
             max_app_passwords: Some(5u64),
             max_api_keys: Some(5u64),
+            passkeys_allowed: true,
+            passkey_rp_id: Default::default(),
+            max_passkeys: 10u64,
         }
     }
 }
 
 impl IntoValue for Authentication {
     fn into_value(self) -> JmapValue<'static> {
-        let mut map = jmap_tools::Map::with_capacity(14);
+        let mut map = jmap_tools::Map::with_capacity(17);
         map.insert_unchecked(Property::DirectoryId, self.directory_id.into_value());
         map.insert_unchecked(
             Property::DefaultUserRoleIds,
@@ -3482,6 +3507,12 @@ impl IntoValue for Authentication {
             self.max_app_passwords.into_value(),
         );
         map.insert_unchecked(Property::MaxApiKeys, self.max_api_keys.into_value());
+        map.insert_unchecked(
+            Property::PasskeysAllowed,
+            self.passkeys_allowed.into_value(),
+        );
+        map.insert_unchecked(Property::PasskeyRpId, self.passkey_rp_id.into_value());
+        map.insert_unchecked(Property::MaxPasskeys, self.max_passkeys.into_value());
         JmapValue::Object(map)
     }
 }
@@ -3515,6 +3546,9 @@ impl RegistryJsonPropertyPatch for Authentication {
             }
             Some(Property::MaxAppPasswords) => self.max_app_passwords.patch(pointer, value),
             Some(Property::MaxApiKeys) => self.max_api_keys.patch(pointer, value),
+            Some(Property::PasskeysAllowed) => self.passkeys_allowed.patch(pointer, value),
+            Some(Property::PasskeyRpId) => self.passkey_rp_id.patch(pointer, value),
+            Some(Property::MaxPasskeys) => self.max_passkeys.patch(pointer, value),
             Some(Property::Type) => Ok(MaybeUnpatched::Unpatched {
                 property: Property::Type,
                 value,
@@ -19839,8 +19873,8 @@ impl RegistryJsonPropertyPatch for DnsServerYandexCloud {
 
 impl ObjectImpl for Domain {
     const FLAGS: u64 = OBJ_FILTER_TENANT | OBJ_SEQ_ID;
-    // inbuxa: 2: logoDark (branding BT-27)
-    const VERSION: u8 = 2;
+    // inbuxa: 2: logoDark (branding BT-27); 3: passkeysAllowed (passkeys)
+    const VERSION: u8 = 3;
     const OBJECT: ObjectType = ObjectType::Domain;
 
     fn validate(&self, errors: &mut Vec<ValidationError>) -> bool {
@@ -19946,6 +19980,7 @@ impl Pickle for Domain {
         self.report_address_uri.pickle(out);
         self.allow_scim_provisioning.pickle(out);
         self.logo_dark.pickle(out);
+        self.passkeys_allowed.pickle(out);
     }
 
     fn unpickle(stream: &mut crate::pickle::PickledStream<'_>) -> Option<Self> {
@@ -19972,6 +20007,10 @@ impl Pickle for Domain {
         if stream.version() >= 2 {
             this.logo_dark = Pickle::unpickle(stream)?;
         }
+        // inbuxa: passkeys spec, stored from version 3
+        if stream.version() >= 3 {
+            this.passkeys_allowed = Pickle::unpickle(stream)?;
+        }
         Some(this)
     }
 }
@@ -19986,6 +20025,7 @@ impl Default for Domain {
             description: Default::default(),
             logo: Default::default(),
             logo_dark: Default::default(),
+            passkeys_allowed: true,
             certificate_management: Default::default(),
             dkim_management: Default::default(),
             dns_management: Default::default(),
@@ -20010,6 +20050,10 @@ impl IntoValue for Domain {
         map.insert_unchecked(Property::Description, self.description.into_value());
         map.insert_unchecked(Property::Logo, self.logo.into_value());
         map.insert_unchecked(Property::LogoDark, self.logo_dark.into_value());
+        map.insert_unchecked(
+            Property::PasskeysAllowed,
+            self.passkeys_allowed.into_value(),
+        );
         map.insert_unchecked(
             Property::CertificateManagement,
             self.certificate_management.into_value(),
@@ -20054,6 +20098,7 @@ impl RegistryJsonPropertyPatch for Domain {
             Some(Property::Description) => self.description.patch(pointer, value),
             Some(Property::Logo) => self.logo.patch(pointer, value),
             Some(Property::LogoDark) => self.logo_dark.patch(pointer, value),
+            Some(Property::PasskeysAllowed) => self.passkeys_allowed.patch(pointer, value),
             Some(Property::CertificateManagement) => {
                 self.certificate_management.patch(pointer, value)
             }
@@ -44514,8 +44559,8 @@ impl RegistryJsonPropertyPatch for TaskTlsReport {
 
 impl ObjectImpl for Tenant {
     const FLAGS: u64 = OBJ_SEQ_ID;
-    // inbuxa: 1: logoDark (branding BT-27)
-    const VERSION: u8 = 1;
+    // inbuxa: 1: logoDark (branding BT-27); 2: passkeysAllowed (passkeys)
+    const VERSION: u8 = 2;
     const OBJECT: ObjectType = ObjectType::Tenant;
 
     fn validate(&self, errors: &mut Vec<ValidationError>) -> bool {
@@ -44560,6 +44605,7 @@ impl Pickle for Tenant {
         self.permissions.pickle(out);
         self.quotas.pickle(out);
         self.logo_dark.pickle(out);
+        self.passkeys_allowed.pickle(out);
     }
 
     fn unpickle(stream: &mut crate::pickle::PickledStream<'_>) -> Option<Self> {
@@ -44574,6 +44620,10 @@ impl Pickle for Tenant {
         if stream.version() >= 1 {
             this.logo_dark = Pickle::unpickle(stream)?;
         }
+        // inbuxa: passkeys spec, stored from version 2
+        if stream.version() >= 2 {
+            this.passkeys_allowed = Pickle::unpickle(stream)?;
+        }
         Some(this)
     }
 }
@@ -44585,6 +44635,7 @@ impl Default for Tenant {
             created_at: Default::default(),
             logo: Default::default(),
             logo_dark: Default::default(),
+            passkeys_allowed: true,
             roles: Default::default(),
             permissions: Default::default(),
             quotas: Default::default(),
@@ -44599,6 +44650,10 @@ impl IntoValue for Tenant {
         map.insert_unchecked(Property::CreatedAt, self.created_at.into_value());
         map.insert_unchecked(Property::Logo, self.logo.into_value());
         map.insert_unchecked(Property::LogoDark, self.logo_dark.into_value());
+        map.insert_unchecked(
+            Property::PasskeysAllowed,
+            self.passkeys_allowed.into_value(),
+        );
         map.insert_unchecked(Property::Roles, self.roles.into_value());
         map.insert_unchecked(Property::Permissions, self.permissions.into_value());
         map.insert_unchecked(Property::Quotas, self.quotas.into_value());
@@ -44617,6 +44672,7 @@ impl RegistryJsonPropertyPatch for Tenant {
             Some(Property::CreatedAt) => pointer.assert_server_set(),
             Some(Property::Logo) => self.logo.patch(pointer, value),
             Some(Property::LogoDark) => self.logo_dark.patch(pointer, value),
+            Some(Property::PasskeysAllowed) => self.passkeys_allowed.patch(pointer, value),
             Some(Property::Roles) => self.roles.patch(pointer, value),
             Some(Property::Permissions) => self.permissions.patch(pointer, value),
             Some(Property::Quotas) => self.quotas.patch(pointer, value),
