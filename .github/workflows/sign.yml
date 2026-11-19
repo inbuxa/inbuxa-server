@@ -162,18 +162,19 @@ jobs:
         run: |
           set -euo pipefail
           sign() { echo "signing $1"; cosign sign --yes "$1"; }
+          SIGNED_GHCR=()
           sign "$SERVER"
           [ -z "$RELAY" ] || sign "$RELAY"
           if [ "$GHCR" = true ]; then
             # The GHCR copy is the same digest; a version GHCR never got is
             # skipped, not failed
             for ref in "$SERVER_GHCR" ${RELAY_GHCR:+"$RELAY_GHCR"}; do
-              if docker buildx imagetools inspect "$ref" >/dev/null 2>&1; then sign "$ref"
+              if docker buildx imagetools inspect "$ref" >/dev/null 2>&1; then sign "$ref"; SIGNED_GHCR+=("$ref")
               else echo "::warning::$ref isn't on GHCR; not signed there"; fi
             done
           fi
           # Check at once, as a user would
-          for ref in "$SERVER" ${RELAY:+"$RELAY"}; do
+          for ref in "$SERVER" ${RELAY:+"$RELAY"} ${SIGNED_GHCR[@]+"${SIGNED_GHCR[@]}"}; do
             cosign verify "$ref" \
               --certificate-oidc-issuer https://token.actions.githubusercontent.com \
               --certificate-identity-regexp "^https://github.com/$GITHUB_REPOSITORY/\.github/workflows/sign\.yml@refs/(tags/v.+|heads/main)$" \
@@ -200,24 +201,24 @@ jobs:
             sbom "$RELAY@$R_AMD64" "inbuxa-relay-$VERSION-linux-amd64.spdx.json"
             sbom "$RELAY@$R_ARM64" "inbuxa-relay-$VERSION-linux-arm64.spdx.json"
           fi
-      - uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-name: ${{ steps.v.outputs.server }}
           subject-digest: ${{ steps.d.outputs.server_amd64 }}
           sbom-path: sbom/inbuxa-${{ steps.v.outputs.version }}-linux-amd64.spdx.json
-      - uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-name: ${{ steps.v.outputs.server }}
           subject-digest: ${{ steps.d.outputs.server_arm64 }}
           sbom-path: sbom/inbuxa-${{ steps.v.outputs.version }}-linux-arm64.spdx.json
       - if: ${{ steps.d.outputs.relay }}
-        uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-name: ${{ steps.v.outputs.relay }}
           subject-digest: ${{ steps.d.outputs.relay_amd64 }}
           sbom-path: sbom/inbuxa-relay-${{ steps.v.outputs.version }}-linux-amd64.spdx.json
       - if: ${{ steps.d.outputs.relay }}
-        uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-name: ${{ steps.v.outputs.relay }}
           subject-digest: ${{ steps.d.outputs.relay_arm64 }}

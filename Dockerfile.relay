@@ -16,9 +16,13 @@
 # Docker Hub images, pulled through Google's mirror, as in Dockerfile.
 FROM mirror.gcr.io/library/rust:1-alpine3.22 AS builder
 RUN apk add --no-cache musl-dev build-base cmake perl libcap ca-certificates
+# The crates go into the binary (cargo-auditable), so the image's SBOM lists
+# them: there is nothing else in a scratch image to find
+ARG CARGO_AUDITABLE_VERSION=0.7.7
+RUN cargo install --locked "cargo-auditable@${CARGO_AUDITABLE_VERSION}"
 WORKDIR /build
 COPY . .
-RUN cargo build --release --locked -p inbuxa-relay && \
+RUN cargo auditable build --release --locked -p inbuxa-relay && \
     install -m 0755 target/release/inbuxa-relay /inbuxa-relay && \
     # Static, or it won't run on a host without musl
     ! ldd /inbuxa-relay 2>/dev/null | grep -q '=>' && \

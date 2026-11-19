@@ -21,6 +21,11 @@ RUN export DEBIAN_FRONTEND=noninteractive && \
     g++-aarch64-linux-gnu binutils-aarch64-linux-gnu \
     g++-x86-64-linux-gnu binutils-x86-64-linux-gnu
 RUN rustup target add "$(cat /target.txt)"
+# inbuxa: K-S7: cargo-auditable records the crates in the binary, so the
+# SBOM the release workflow makes from this image lists them (not only the
+# Debian packages)
+ARG CARGO_AUDITABLE_VERSION=0.7.7
+RUN cargo install --locked "cargo-auditable@${CARGO_AUDITABLE_VERSION}"
 COPY --from=planner /recipe.json /recipe.json
 # inbuxa: [patch.crates-io] points sieve-rs at vendor/, and the recipe only
 # carries the workspace's own manifests, so cooking the dependencies needs the
@@ -33,7 +38,7 @@ COPY . .
 # source document.
 ARG INBUXA_REVISION=""
 ENV INBUXA_REVISION=${INBUXA_REVISION}
-RUN RUSTFLAGS="$(cat /flags.txt)" cargo build --target "$(cat /target.txt)" --release -p inbuxa --no-default-features --features "sqlite postgres mysql rocks s3 redis azure nats"
+RUN RUSTFLAGS="$(cat /flags.txt)" cargo auditable build --target "$(cat /target.txt)" --release -p inbuxa --no-default-features --features "sqlite postgres mysql rocks s3 redis azure nats"
 RUN mv "/build/target/$(cat /target.txt)/release" "/output"
 
 # inbuxa: migrations spec, MG-4: the inbuxa-migrate the server runs, a
