@@ -283,6 +283,13 @@
             transform: none;
         }
 
+        /* INBUXA (#334): the passkey button, under the main one */
+        .btn.secondary {
+            background: transparent;
+            color: var(--text);
+            border: 1px solid var(--border);
+        }
+
         [hidden] {
             display: none !important;
         }
@@ -313,7 +320,7 @@
         <form class="fields" id="login-form" novalidate>
             <div class="field" id="field-username">
                 <label for="username">Username</label>
-                <input id="username" name="username" type="text" placeholder="you@example.com" autocomplete="username"
+                <input id="username" name="username" type="text" placeholder="you@example.com" autocomplete="username webauthn"
                     autocapitalize="none" autocorrect="off" spellcheck="false" required>
             </div>
             <div class="field" id="field-password">
@@ -332,6 +339,7 @@
                     pattern="\d{6}" autocomplete="one-time-code">
             </div>
             <button type="submit" class="btn" id="submit-btn">Sign in</button>
+            <button type="button" class="btn secondary" id="passkey-btn" hidden>Sign in with a passkey</button>
         </form>
     </div>
 
@@ -538,7 +546,13 @@
                                 ? 'Sign in to approve this device.'
                                 : 'Enter your credentials to continue');
                         }
-                        showError('Invalid username or password. Please try again.');
+                        if (usedPasskey) {
+                            usedPasskey = false;
+                            showError('That passkey didn\'t sign you in. Try again, or use your password.');
+                            startAutofill();
+                        } else {
+                            showError('Invalid username or password. Please try again.');
+                        }
                         return;
                     default:
                         console.log('Unknown login response type:', resp);
@@ -549,6 +563,7 @@
             function submitLogin(e) {
                 if (e) e.preventDefault();
                 clearAlert();
+                usedPasskey = false;
 
                 var creds;
                 if (inMfa) {
@@ -621,6 +636,108 @@
             }
 
             $('login-form').addEventListener('submit', submitLogin);
+
+            // INBUXA (#334): passkeys (passkeys spec PK-9 to PK-11). The
+            // browser's autofill offers them on the username field, and the
+            // button asks for one directly. Each try fetches a challenge that
+            // is good once, for two minutes.
+            var usedPasskey = false;
+            var autofill = null;
+            var canPasskey = !isDevice && window.PublicKeyCredential && navigator.credentials &&
+                typeof navigator.credentials.get === 'function' && window.AbortController;
+
+            function fromB64(s) {
+                s = s.replace(/-/g, '+').replace(/_/g, '/');
+                while (s.length % 4) s += '=';
+                var bin = atob(s), out = new Uint8Array(bin.length);
+                for (var i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+                return out.buffer;
+            }
+            function toB64(buf) {
+                var bytes = new Uint8Array(buf), bin = '';
+                for (var i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+                return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+            }
+
+            function getPasskey(mediation, signal) {
+                return fetch('/api/auth/passkey', {
+                    method: 'POST',
+                    credentials: 'omit',
+                    cache: 'no-store',
+                    headers: { 'Accept': 'application/json' }
+                }).then(function (res) {
+                    if (res.status !== 200) throw new Error('http ' + res.status);
+                    return res.json();
+                }).then(function (c) {
+                    var pk = c.options.publicKey;
+                    pk.challenge = fromB64(pk.challenge);
+                    (pk.allowCredentials || []).forEach(function (a) { a.id = fromB64(a.id); });
+                    var opts = { publicKey: pk };
+                    if (mediation) opts.mediation = mediation;
+                    if (signal) opts.signal = signal;
+                    return navigator.credentials.get(opts).then(function (cred) {
+                        var r = cred.response;
+                        return {
+                            challengeId: c.challengeId,
+                            credential: {
+                                id: cred.id,
+                                rawId: toB64(cred.rawId),
+                                type: cred.type,
+                                response: {
+                                    authenticatorData: toB64(r.authenticatorData),
+                                    clientDataJSON: toB64(r.clientDataJSON),
+                                    signature: toB64(r.signature),
+                                    userHandle: r.userHandle ? toB64(r.userHandle) : null
+                                },
+                                extensions: cred.getClientExtensionResults ? cred.getClientExtensionResults() : {}
+                            }
+                        };
+                    });
+                });
+            }
+
+            function signInWithPasskey(assertion) {
+                clearAlert();
+                usedPasskey = true;
+                var body = buildRequest({ account_name: '', account_secret: '' }, null);
+                delete body.accountName;
+                delete body.accountSecret;
+                body.passkey = assertion;
+                postLogin(body);
+            }
+
+            function startAutofill() {
+                if (!canPasskey || !PublicKeyCredential.isConditionalMediationAvailable) return;
+                PublicKeyCredential.isConditionalMediationAvailable().then(function (ok) {
+                    if (!ok) return;
+                    if (autofill) autofill.abort();
+                    var mine = new AbortController();
+                    autofill = mine;
+                    // A challenge lasts two minutes: ask for a new one before then
+                    var renew = setTimeout(function () { if (autofill === mine) startAutofill(); }, 110000);
+                    getPasskey('conditional', mine.signal).then(function (assertion) {
+                        clearTimeout(renew);
+                        autofill = null;
+                        signInWithPasskey(assertion);
+                    }, function () { clearTimeout(renew); });
+                }, function () {});
+            }
+
+            if (canPasskey) {
+                show($('passkey-btn'));
+                $('passkey-btn').addEventListener('click', function () {
+                    if (autofill) { autofill.abort(); autofill = null; }
+                    clearAlert();
+                    getPasskey(null, null).then(signInWithPasskey, function (err) {
+                        console.log('Passkey sign-in did not finish:', err);
+                        if (!err || (err.name !== 'NotAllowedError' && err.name !== 'AbortError')) {
+                            showError('Passkeys aren\'t available right now. Use your password.');
+                        }
+                        startAutofill();
+                    });
+                });
+                startAutofill();
+            }
 
             // Digit-only filter on OTP and auto-submit on 6 digits.
             $('otp').addEventListener('input', function () {

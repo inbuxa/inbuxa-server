@@ -268,10 +268,15 @@ Building, one PR each:
    `POST /api/passkey/register` with a `start` step (ticket and password,
    plus the TOTP code when the account has one; anonymous, limited like the
    other sign-in requests) and a `finish` step. What `start` began waits in
-   the in-memory store for up to 5 minutes and is good once. Until sign-in
-   with a passkey exists (step 3), the page asks for the password only; the
-   "or an active passkey" of PK-8 comes with it.
-3. Sign-in in the authorization-code flow, with autofill.
+   the in-memory store for up to 5 minutes and is good once.
+3. Sign-in in the authorization-code flow: `POST /api/auth/passkey` for a
+   challenge, the login request's `passkey` field (`challengeId` and the
+   browser's assertion) in place of the name and password, autofill on the
+   username field and a "Sign in with a passkey" button. The registration
+   page takes an active passkey instead of the password (PK-8), and an app
+   password no longer opens it. Sign-ins by passkey are recorded with
+   `via: passkey`, and raise `auth.success` with type `passkey`; a counter
+   that didn't go up fails and is logged as a possible clone.
 4. The device flow, the settings and policy, and the sign-in events.
 
 Then the webmail and console pages.

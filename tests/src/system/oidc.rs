@@ -352,6 +352,7 @@ pub async fn test(test: &mut TestServer) {
         code_challenge_method: Some("S256".to_string()),
         state: None,
         resource: vec![],
+        passkey: None,
     })
     .await;
     assert_ne!(
@@ -372,6 +373,7 @@ pub async fn test(test: &mut TestServer) {
         code_challenge_method: Some("S256".to_string()),
         state: None,
         resource: vec!["https://evil.example.com/jmap".to_string()],
+        passkey: None,
     })
     .await;
     assert_ne!(
@@ -394,6 +396,7 @@ pub async fn test(test: &mut TestServer) {
             code_challenge_method: method.map(str::to_string),
             state: None,
             resource: vec![],
+            passkey: None,
         })
         .await;
         assert_ne!(status, 200, "PKCE method {method:?} must not be authorized");
@@ -432,6 +435,7 @@ pub async fn test(test: &mut TestServer) {
                     code_challenge_method: challenge.map(|_| "S256".to_string()),
                     state: None,
                     resource: vec![],
+                    passkey: None,
                 })
                 .await;
                 assert_eq!(
@@ -459,6 +463,7 @@ pub async fn test(test: &mut TestServer) {
                 code_challenge_method: Some("S256".to_string()),
                 state: None,
                 resource: vec!["https://mail.example.org/jmap/session".to_string()],
+                passkey: None,
             },
         )
         .await
@@ -627,6 +632,7 @@ pub async fn test(test: &mut TestServer) {
                 code_challenge_method: Some("S256".to_string()),
                 state: None,
                 resource: vec![],
+                passkey: None,
             },
         )
         .await
@@ -1356,6 +1362,7 @@ async fn obtain_auth_code(http: &HttpRequest, client_id: &str, redirect_uri: &st
             code_challenge_method: None,
             state: None,
             resource: vec![],
+            passkey: None,
         },
     )
     .await
