@@ -1,8 +1,8 @@
 # Feature spec: passkeys
 
-Status: draft, 2026-11-18. inbuxa-server #334, asked for on the forum (t/242).
-Planned for the series after 27.1. The decisions at the end are open until
-approved; nothing is built yet.
+Status: approved, 2026-11-18 (John took the recommended answer to each
+decision below). inbuxa-server #334, asked for on the forum (t/242). Planned
+for the series after 27.1.
 
 ## Provenance
 
@@ -117,7 +117,7 @@ passwords.
   apps open it in a new window. The page asks for the passkey (the browser's
   own dialog), sends the result back, and says "Passkey added. You can close
   this window." The browser apps can't run the ceremony themselves: they're on
-  other hostnames than the relying-party id (see decision 1).
+  other hostnames than the relying-party id (decision 1).
 - **PK-7.** Completing registration turns the record `active`, fills the
   server-set fields, and refuses a credential id already registered to any
   account. A pending record whose ticket expired is removed.
@@ -149,7 +149,7 @@ passwords.
   a password, and `lastUsedAt` is set.
 - **PK-12.** A passkey signs in on its own: it already proves possession and
   user verification, so an account with TOTP isn't asked for the code after a
-  passkey (see decision 2). Failures count toward the same sign-in limits and
+  passkey (decision 2). Failures count toward the same sign-in limits and
   blocking as wrong passwords.
 - **PK-13.** Passkeys work only for accounts in the server's own directory. A
   domain that signs in against LDAP, SQL or OIDC (per-domain directories)
@@ -225,31 +225,28 @@ passwords.
 11. A server built before this feature starts on a store holding passkeys and
     signs everyone in with passwords (rollback).
 
-## Open decisions (for John)
+## Decisions
 
-1. **The registration page lives on the mail host.** The browser apps are on
-   other hostnames than the relying-party id, so they can't call the browser's
-   passkey API for it. PK-6 has the server serve one small page for it, next
-   to the login page it already serves. §5.3 says the mail host serves no web
-   interface; the login page is the existing exception, and this would be the
-   second. The alternative is Related Origin Requests (the server lists the
-   webmail and console origins at `/.well-known/webauthn`), which spares the
-   page but isn't in every browser yet. Recommended: the page now, related
-   origins later as an option.
-2. **A passkey replaces the password and the TOTP code** (PK-12), as on most
-   services, because user verification is a second factor already.
-   Recommended. The alternative asks for the TOTP code after a passkey too.
-3. **On by default** (`passkeys: allowed`). Nobody gets a passkey without
-   adding one, and an administrator can turn them off per server, tenant or
-   domain. Recommended. The alternative is off until an administrator turns
-   them on.
+Settled by John, 2026-11-18:
 
-Decided in this spec, unless John says otherwise: passkeys stored apart from
-account credentials; bound to the relying-party id with no automatic move on a
-rename (PK-4); removing a passkey ends the account's sessions (PK-15); the
-password stays (no passkey-only accounts); no passkeys for accounts on an
-external directory (PK-13); "require a passkey" for browser sign-in is later,
-after this ships.
+1. **The registration page lives on the mail host** (PK-6). The browser apps
+   are on other hostnames than the relying-party id, so they can't call the
+   browser's passkey API for it; the server serves one small page for it, next
+   to the login page. This is the second exception to SPEC.md §5.3 (no web
+   interface on the mail host), after the login page. Related Origin Requests
+   (the server listing the webmail and console origins at
+   `/.well-known/webauthn`, so they run the ceremony themselves) may be added
+   later as an option, once browsers support it widely.
+2. **A passkey signs in on its own** (PK-12): no TOTP code after it, because
+   user verification is a second factor already.
+3. **On by default** (`passkeys: allowed`), with off switches per server,
+   tenant and domain. Nobody gets a passkey without adding one.
+
+Also decided in this spec: passkeys stored apart from account credentials;
+bound to the relying-party id with no automatic move on a rename (PK-4);
+removing a passkey ends the account's sessions (PK-15); the password stays
+(no passkey-only accounts); no passkeys for accounts on an external directory
+(PK-13); "require a passkey" for browser sign-in is later, after this ships.
 
 ## Implementation status
 
