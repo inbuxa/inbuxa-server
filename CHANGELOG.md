@@ -15,6 +15,96 @@ https://github.com/inbuxa/inbuxa-server/security/advisories.
 Every version PR adds that version's entry here. CI refuses a version this
 file has no entry for (`tools/release/version.py --changelog`).
 
+## [27.1-rc.32] - 2026-11-19
+
+Passkey sign-in, a Logs page that can filter and follow, subjects in
+delivery history, a dark-mode logo, QR-code links in the spam filter, and
+the server-side pieces for running inbuxa on Kubernetes.
+
+### Added
+- Passkeys: accounts can sign in with a passkey on the server's sign-in
+  page, by autofill or a "Sign in with a passkey" button, in both the
+  authorization-code and device flows. A passkey is enough on its own, with
+  no TOTP code after it. Passkeys are added on a new page the server hosts,
+  `/passkey/register`, after the password (and TOTP code) or an existing
+  passkey, and managed over JMAP as `inbuxa:Passkey`. Removing one signs the
+  account out everywhere. Passkeys are allowed by default; `passkeysAllowed`
+  turns them off for the server, a tenant or a domain, and the session tells
+  clients whether this account may add one. Accounts on an external
+  directory (LDAP, SQL, OIDC) can't use passkeys, and IMAP, SMTP and the
+  other mail protocols still use passwords or app passwords. Spec:
+  `docs/spec/features/passkeys.md`. Thanks to Stefan. (#466, #468, #469,
+  #470, #471, #474, fixes #334)
+- Delivery history: inbound and outbound lists show each message's subject.
+  It comes from a debug-level event, `queue.message-subject`, capped at 255
+  characters, so it stays out of info-level log files and OpenTelemetry
+  exports. Only full administrators can read it, and it is kept as long as
+  history is. History stored before this release has no subject. Thanks to
+  Faisal. (#452, fixes #228)
+- Logs: `x:Log/query` filters by level and above, component and time, and
+  the Log tracer can write JSON lines (`format`: `text`, the default, or
+  `json`). The Logs page reads text, JSON and a file holding both. Thanks to
+  Stefan. (#455, #462, fixes #456)
+- Branding: a separate logo for dark mode, `logoDark` on domains and
+  tenants and `logoUrlDark` server-wide. `/logo?theme=dark` serves it, or
+  the ordinary logo where none is set; the built-in sign-in and RSVP pages
+  ask for it when they show dark. Emails keep the light logo. Thanks to
+  Faisal. (#459, fixes #410)
+- Spam filter: "Check links in QR codes" (`scanQrCodes`, off by default)
+  reads QR codes in a message's images and sends the links through the same
+  checks as its other links, adding the tag `QR_CODE_URL` (score 0.0 in the
+  bundled rules, now 3.0.2-inbuxa.2). At most 4 images a message, 4 MB and
+  16 megapixels each, and 1 s in all. Thanks to Stefan. (#463, fixes #401)
+- OAuth token revocation (RFC 7009) at `POST /auth/revoke`, listed in both
+  discovery documents. A revoked token is refused on every node until it
+  would have expired. (#438)
+- `inbuxa --upgrade-store` upgrades the store layout and exits, and
+  `inbuxa --upgrade-plan` says, read only, what it would do and whether a
+  step needs every other node stopped. Both are for orchestrators that
+  upgrade the store as a job of its own. (#448, #457)
+- `inbuxa --seed <PATH>` sets up a new store from a file of JMAP method
+  calls, once, then exits. Spec: `docs/spec/features/store-seed.md`. (#451)
+- Secrets from files: `INBUXA_RECOVERY_ADMIN_FILE`,
+  `INBUXA_WEBMAIL_CLIENT_SECRET_FILE` and, for the relay,
+  `INBUXA_RELAY_JOIN_TOKEN_FILE`. Setting both forms, or naming a file that
+  is missing or empty, stops the start. (#461)
+- `INBUXA_LISTENER_PORTS` moves or leaves out the default listeners a new
+  store gets, for example `smtp=2525,submissions=4465,imaps=9993,pop3s=off,https=8443`.
+  (#443)
+- `INBUXA_HTTP_USE_FORWARDED=true|false` overrides "Use X-Forwarded-For"
+  from the environment. (#467)
+
+### Changed
+- The container image runs with every capability dropped: the binary no
+  longer carries `cap_net_bind_service` as a file capability. Docker is
+  unaffected. Elsewhere, binding a port below 1024 needs
+  `CAP_NET_BIND_SERVICE`, the `net.ipv4.ip_unprivileged_port_start` sysctl,
+  or higher ports through `INBUXA_LISTENER_PORTS`, and a refused bind now
+  says so. (#443)
+- A start that can't open the data store exits with a code per case: 78
+  bad configuration, 69 unreachable, 77 credentials refused, 76 TLS failed,
+  1 anything else, with "data store: <case>" on its last line. Before, every
+  case exited 1. (#472)
+
+### Fixed
+- TLS: with no default certificate set, a connection with no or an unknown
+  name got whichever certificate came first, and every handshake logged a
+  warning. The server now uses the certificate for its own hostname (or a
+  wildcard on its domain), else the first by name, and logs the warning
+  once per certificate load. Thanks to khashmeshab. (#450, fixes #418)
+- Cluster: after a server was renamed, its old node stayed on the dashboard
+  as "not responding" for a day. The old lease is now dropped once it has
+  missed two renewals. (#460)
+
+### Upgrading
+- Nothing special: 27.1-rc.31 to 27.1-rc.32 rolls like any update, with no
+  store layout step.
+- Rolling back: an older server can't read delivery-history entries stored
+  after this upgrade, drops a dark logo if it saves that branding record
+  again, and ignores a Log tracer's `format` (it writes text).
+- Scripts that read the exit code of a failed start: see the data store
+  codes above.
+
 ## [27.1-rc.31] - 2026-11-18
 
 27.1-rc.30 with 3 security fixes from our own review of the suite (1 high,
