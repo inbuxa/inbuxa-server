@@ -23,6 +23,7 @@ pub mod check; // inbuxa: K-C5, --check
 pub mod compliance_roles; // inbuxa: personal-data catalog, the compliance roles
 pub mod console;
 pub mod defaults;
+pub mod defaults_lease; // inbuxa: #436, one node at a time sets up the defaults
 pub mod first_party;
 pub mod granted_permissions; // inbuxa: permissions added after roles were stored
 pub mod listener_ports; // inbuxa: K-S1, default listener ports from the environment
