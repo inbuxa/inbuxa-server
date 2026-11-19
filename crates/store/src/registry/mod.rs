@@ -9,7 +9,9 @@
 pub mod bootstrap;
 pub mod get;
 pub mod local;
+// inbuxa: K-S6
 pub mod query;
+pub mod startup;
 pub mod write;
 
 // inbuxa: the audit log's view of registry writes (audit-hold-lock spec,

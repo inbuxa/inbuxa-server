@@ -7,14 +7,16 @@
  */
 
 use crate::{
-    RegistryStore, RegistryStoreInner, Store, backend::ephemeral::EphemeralStore,
+    RegistryStore, RegistryStoreInner, Store,
+    backend::ephemeral::EphemeralStore,
     registry::local::RegistryInit,
+    registry::startup::{StartupError, StartupFailure},
 };
 use rand::{RngExt, distr::Alphanumeric, rng};
 use std::path::PathBuf;
 
 impl RegistryStore {
-    pub async fn init(local: PathBuf, acquire_node_id: bool) -> Result<Self, String> {
+    pub async fn init(local: PathBuf, acquire_node_id: bool) -> Result<Self, StartupError> {
         // Create inner store
         let mut inner = RegistryStoreInner::new(local);
 
@@ -37,9 +39,13 @@ impl RegistryStore {
                     eprintln!("   INBUXA_RECOVERY_MODE=1.");
                     eprintln!();
                 }
-                Store::build(data_store).await?
+                // inbuxa: K-S6: opening a store reads its settings and secret
+                // files; the network comes later, with the first query
+                Store::build(data_store)
+                    .await
+                    .map_err(|err| StartupError::new(StartupFailure::Config, err))?
             }
-            RegistryInit::Err(err) => return Err(err),
+            RegistryInit::Err(err) => return Err(StartupError::new(StartupFailure::Config, err)),
             RegistryInit::Bootstrap => {
                 inner.env_recovery_mode = true;
 
@@ -83,16 +89,21 @@ impl RegistryStore {
     pub async fn from_inner(
         mut inner: RegistryStoreInner,
         acquire_node_id: bool,
-    ) -> Result<Self, String> {
-        // Create tables (SQL only)
-        inner
-            .store
-            .create_tables()
-            .await
-            .map_err(|err| format!("Failed to create tables: {err}"))?;
+    ) -> Result<Self, StartupError> {
+        // Create tables (SQL only). inbuxa: K-S6: the first time the store is
+        // reached, so where its failures are told apart
+        inner.store.create_tables().await.map_err(|err| {
+            StartupError::new(
+                StartupFailure::of(&err),
+                format!("failed to create tables: {err}"),
+            )
+        })?;
 
         if acquire_node_id {
-            inner.acquire_node_id().await?;
+            inner
+                .acquire_node_id()
+                .await
+                .map_err(|err| StartupError::new(StartupFailure::Other, err))?;
         }
 
         Ok(Self(inner.into()))
