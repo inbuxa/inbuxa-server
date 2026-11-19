@@ -66,6 +66,22 @@ impl Coordinator {
         }
     }
 
+    /// inbuxa: K-C5: whether the coordinator a setting names answers, for
+    /// `--check`. `Ok(None)` when there's none, or it's of a kind not
+    /// checked here.
+    pub async fn probe(
+        config: structs::Coordinator,
+    ) -> Result<Option<String>, (store::registry::startup::StartupFailure, String)> {
+        match config {
+            structs::Coordinator::Disabled => Ok(None),
+            #[cfg(feature = "nats")]
+            structs::Coordinator::Nats(nats) => crate::backend::nats::NatsPubSub::probe(nats)
+                .await
+                .map(Some),
+            _ => Ok(None),
+        }
+    }
+
     pub fn is_enabled(&self) -> bool {
         !matches!(self, Coordinator::None)
     }

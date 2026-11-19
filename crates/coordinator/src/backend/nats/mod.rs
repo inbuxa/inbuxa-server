@@ -17,6 +17,7 @@ use std::{
 use crate::Coordinator;
 use async_nats::Client;
 use registry::schema::structs::NatsCoordinator;
+use store::registry::startup::StartupFailure;
 use tokio::sync::watch;
 use trc::ClusterEvent;
 
@@ -79,6 +80,70 @@ impl NatsPubSub {
                 Coordinator::Nats(Arc::new(NatsPubSub { client, reporter }))
             })
             .map_err(|err| format!("Failed to connect to Nats: {}", err))
+    }
+
+    /// inbuxa: K-C5: connects once, with no retrying in the background as
+    /// `open` does, and says why it couldn't. For `--check`.
+    pub async fn probe(config: NatsCoordinator) -> Result<String, (StartupFailure, String)> {
+        if config.addresses.is_empty() {
+            return Err((StartupFailure::Config, "no NATS addresses are set".into()));
+        }
+        let addresses = config.addresses.into_inner();
+        let named = addresses
+            .iter()
+            .map(|a| a.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let timeout = config.timeout_connection.into_inner();
+        let mut opts = async_nats::ConnectOptions::new()
+            .connection_timeout(timeout)
+            .max_reconnects(Some(1))
+            .require_tls(config.use_tls);
+        let secret = |r: Result<_, String>| r.map_err(|err| (StartupFailure::Config, err));
+        if let (Some(user), Some(pass)) = (
+            config.auth_username,
+            secret(config.auth_secret.secret().await)?.map(|v| v.into_owned()),
+        ) {
+            opts = opts.user_and_password(user.to_string(), pass.to_string());
+        } else if let Some(token) =
+            secret(config.credentials.secret().await)?.map(|v| v.into_owned())
+        {
+            opts = opts.token(token);
+        }
+
+        let connect = async {
+            let client = async_nats::connect_with_options(addresses, opts)
+                .await
+                .map_err(|err| {
+                    use async_nats::ConnectErrorKind as K;
+                    let kind = match err.kind() {
+                        K::ServerParse => StartupFailure::Config,
+                        K::Dns | K::Io | K::TimedOut | K::MaxReconnects => {
+                            StartupFailure::Unreachable
+                        }
+                        K::Authentication | K::AuthorizationViolation => {
+                            StartupFailure::Credentials
+                        }
+                        K::Tls => StartupFailure::Tls,
+                    };
+                    (kind, format!("{named}: {err}"))
+                })?;
+            client
+                .flush()
+                .await
+                .map_err(|err| (StartupFailure::Unreachable, format!("{named}: {err}")))?;
+            let server = client.server_info();
+            let _ = client.drain().await;
+            Ok(format!("NATS {} at {named}", server.version))
+        };
+        tokio::time::timeout(timeout * 2 + Duration::from_secs(5), connect)
+            .await
+            .unwrap_or_else(|_| {
+                Err((
+                    StartupFailure::Unreachable,
+                    format!("{named}: no answer in {}s", (timeout * 2).as_secs() + 5),
+                ))
+            })
     }
 
     /// inbuxa: counts the client's reconnections. Core NATS delivers at
