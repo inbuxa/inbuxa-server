@@ -88,7 +88,8 @@ passwords.
 
 - **PK-1.** Registration and sign-in use discoverable credentials
   (`residentKey: required`) with user verification required. Attestation is
-  `none`. Algorithms: ES256, EdDSA, RS256, in that order.
+  `none`. Algorithms: ES256, ES384, RS256, in that order: the set the
+  WebAuthn library (webauthn-rs) calls tested. EdDSA waits until it does.
 - **PK-2.** The origin of every ceremony must be `https://` with a host that
   equals the relying-party id or ends with `.` plus it, and is one of the
   server's own HTTP hostnames. Anything else is refused.
@@ -263,7 +264,13 @@ Building, one PR each:
    default), removal ending the account's sessions through the credential
    version, and account deletion. Pending ones expire after 10 minutes. The
    limit is fixed at 10 until the settings arrive (step 4).
-2. The registration page.
+2. The registration page: `/passkey/register` served by the server, and
+   `POST /api/passkey/register` with a `start` step (ticket and password,
+   plus the TOTP code when the account has one; anonymous, limited like the
+   other sign-in requests) and a `finish` step. What `start` began waits in
+   the in-memory store for up to 5 minutes and is good once. Until sign-in
+   with a passkey exists (step 3), the page asks for the password only; the
+   "or an active passkey" of PK-8 comes with it.
 3. Sign-in in the authorization-code flow, with autofill.
 4. The device flow, the settings and policy, and the sign-in events.
 

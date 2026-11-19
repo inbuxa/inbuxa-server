@@ -40,6 +40,8 @@ form-data = { version = "0.6.0", features = ["sync"], default-features = false }
 mime = "0.3.17"
 percent-encoding = "2.3.2"
 hashify = { version = "0.2" }
+webauthn-rs = { version = "0.6.2", features = ["danger-allow-state-serialisation", "danger-credential-internals", "conditional-ui"] } # inbuxa: passkeys
+webauthn-rs-proto = "0.6.2" # inbuxa: passkeys
 
 [dev-dependencies]
 flate2 = "1.1"

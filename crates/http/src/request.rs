@@ -62,6 +62,12 @@ static RSVP_PAGE: &[u8] = include_bytes!(concat!(
     "/../../resources/html-templates/calendar-rsvp.html.min.gz"
 ));
 
+// inbuxa: passkeys: where a passkey is registered (PK-6)
+static PASSKEY_PAGE: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../resources/html-templates/passkey.html.min.gz"
+));
+
 static LOGIN_PAGE: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../resources/html-templates/login.html.min.gz"
@@ -681,6 +687,12 @@ impl ParseHttp for Server {
                     }
                 }
             }
+            "passkey" if path.next() == Some("register") => {
+                return Ok(HttpResponse::new(StatusCode::OK)
+                    .with_content_type("text/html; charset=utf-8")
+                    .with_header(CONTENT_ENCODING, "gzip")
+                    .with_binary_body(PASSKEY_PAGE));
+            }
             "login" | "device" => {
                 return Ok(HttpResponse::new(StatusCode::OK)
                     .with_content_type("text/html; charset=utf-8")
@@ -981,13 +993,21 @@ mod tests {
     use flate2::read::GzDecoder;
     use std::io::Read;
 
-    const PAGES: [(&str, &[u8], &str); 2] = [
+    const PAGES: [(&str, &[u8], &str); 3] = [
         (
             "calendar-rsvp.html",
             super::RSVP_PAGE,
             include_str!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/../../resources/html-templates/calendar-rsvp.html.min"
+            )),
+        ),
+        (
+            "passkey.html",
+            super::PASSKEY_PAGE,
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../resources/html-templates/passkey.html.min"
             )),
         ),
         (

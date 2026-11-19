@@ -94,6 +94,8 @@ pub struct TestServerBuilder {
     capture_queue: bool,
     capture_reporting: bool,
     disable_services: bool,
+    // inbuxa: the host in the public URL; WebAuthn wants a name, not an IP
+    public_host: &'static str,
 }
 
 impl TestServerBuilder {
@@ -138,6 +140,7 @@ impl TestServerBuilder {
             capture_queue: false,
             capture_reporting: false,
             disable_services: false,
+            public_host: "127.0.0.1",
         }
     }
 
@@ -259,6 +262,12 @@ impl TestServerBuilder {
         self
     }
 
+    // inbuxa: passkeys need a host name in the public URL
+    pub fn with_public_host(mut self, host: &'static str) -> Self {
+        self.public_host = host;
+        self
+    }
+
     pub async fn insert_object(&self, object: impl Into<Object>) -> Id {
         self.bootstrap
             .registry
@@ -331,10 +340,10 @@ impl TestServerBuilder {
         servers.bind_and_drop_priv(&mut self.bootstrap);
 
         // Set HTTP port
-        self.bootstrap.registry = self
-            .bootstrap
-            .registry
-            .clone_with_public_url(format!("https://127.0.0.1:{}", self.http_listener_port));
+        self.bootstrap.registry = self.bootstrap.registry.clone_with_public_url(format!(
+            "https://{}:{}",
+            self.public_host, self.http_listener_port
+        ));
 
         if init_store {
             // Add safe defaults if missing

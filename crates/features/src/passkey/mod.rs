@@ -11,8 +11,8 @@
 //! - `p` + account id + number: the passkey's `Passkey` record.
 //! - `c` + credential id: the account and number it belongs to, so sign-in
 //!   finds a passkey without loading accounts.
-//! - `h` + account id: the account's user handle, 32 random bytes the
-//!   authenticator keeps as the user id.
+//! - `h` + account id: the account's user handle, 16 random bytes the
+//!   authenticator keeps as the user id (a UUID, as webauthn-rs wants it).
 //! - `u` + user handle: the account it belongs to.
 //! - `t` + SHA-256 of a registration ticket: the pending passkey it opens
 //!   (PK-6).
@@ -46,7 +46,7 @@ pub const TICKET_SECONDS: u64 = 600;
 /// The longest name (PK-5).
 pub const MAX_NAME: usize = 64;
 /// The length of a user handle.
-pub const HANDLE_LEN: usize = 32;
+pub const HANDLE_LEN: usize = 16;
 const CREATE_ATTEMPTS: usize = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, SerdeSerialize, SerdeDeserialize)]
@@ -85,7 +85,8 @@ pub struct Passkey {
     /// The authenticator's credential id.
     #[serde(default)]
     pub credential_id: Vec<u8>,
-    /// The public key, as COSE.
+    /// The credential as the WebAuthn library keeps it (JSON): the COSE
+    /// public key, the counter and the flags it checks at sign-in.
     #[serde(default)]
     pub public_key: Vec<u8>,
     #[serde(default)]
@@ -378,6 +379,81 @@ pub async fn account_of_handle(data: &Store, handle: &[u8]) -> trc::Result<Optio
         .get_value::<u32>(key(KIND_HANDLE_ACCOUNT, handle))
         .await
         .caused_by(trc::location!())?)
+}
+
+/// The account's user handle, made from `fresh` the first time. Two
+/// registrations at once agree on one handle.
+pub async fn ensure_user_handle(
+    data: &Store,
+    account_id: u32,
+    fresh: [u8; HANDLE_LEN],
+) -> trc::Result<Vec<u8>> {
+    if let Some(handle) = user_handle(data, account_id).await? {
+        return Ok(handle);
+    }
+    let record = class(KIND_HANDLE, &account_id.to_be_bytes());
+    let mut batch = BatchBuilder::new();
+    batch.assert_value(record.clone(), AssertValue::None);
+    batch.set(record, fresh.to_vec());
+    batch.set(
+        class(KIND_HANDLE_ACCOUNT, &fresh),
+        account_id.to_be_bytes().to_vec(),
+    );
+    match data.write(batch.build_all()).await {
+        Ok(_) => Ok(fresh.to_vec()),
+        Err(err)
+            if matches!(
+                err.as_ref(),
+                trc::EventType::Store(trc::StoreEvent::AssertValueFailed)
+            ) =>
+        {
+            user_handle(data, account_id)
+                .await?
+                .ok_or_else(|| err.caused_by(trc::location!()))
+        }
+        Err(err) => Err(err.caused_by(trc::location!())),
+    }
+}
+
+pub enum Activated {
+    Done(Passkey),
+    /// The credential id is already registered, to this or another account.
+    Taken,
+}
+
+/// Finishes a registration (PK-7): the pending passkey turns active with
+/// what the authenticator gave, its credential id is indexed, and the ticket
+/// is spent. A credential id registered before is refused.
+pub async fn activate(data: &Store, ticket: &str, passkey: Passkey) -> trc::Result<Activated> {
+    let credential = class(KIND_CREDENTIAL, &passkey.credential_id);
+    if passkey.credential_id.is_empty()
+        || by_credential(data, &passkey.credential_id).await?.is_some()
+    {
+        return Ok(Activated::Taken);
+    }
+    let mut batch = BatchBuilder::new();
+    batch.assert_value(credential.clone(), AssertValue::None);
+    batch.set(
+        credential,
+        pair(passkey.account_id, passkey.number).to_vec(),
+    );
+    batch.set(
+        class(KIND_PASSKEY, &pair(passkey.account_id, passkey.number)),
+        to_json(&passkey)?,
+    );
+    batch.clear(class(KIND_TICKET, &ticket_hash(ticket)));
+    match data.write(batch.build_all()).await {
+        Ok(_) => Ok(Activated::Done(passkey)),
+        Err(err)
+            if matches!(
+                err.as_ref(),
+                trc::EventType::Store(trc::StoreEvent::AssertValueFailed)
+            ) =>
+        {
+            Ok(Activated::Taken)
+        }
+        Err(err) => Err(err.caused_by(trc::location!())),
+    }
 }
 
 /// How many times the account's passkeys were removed (PK-15).
