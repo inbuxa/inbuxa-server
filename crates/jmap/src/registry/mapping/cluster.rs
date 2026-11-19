@@ -2,10 +2,12 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use jmap_proto::{object::registry::RegistryComparator, types::state::State};
-use registry::{jmap::IntoValue, schema::prelude::Property};
+use registry::{jmap::IntoValue, schema::prelude::Property, types::map::Map};
 use store::ahash::AHashSet;
 
 use crate::{
@@ -25,8 +27,15 @@ pub(crate) async fn cluster_node_get(
         .map(|id| id.id())
         .collect::<AHashSet<_>>();
 
-    for node in nodes {
+    for mut node in nodes {
         if ids.is_empty() || ids.remove(&node.node_id) {
+            // inbuxa: #485: what each node last said it couldn't open
+            if let Ok(node_id) = u16::try_from(node.node_id) {
+                node.unbound_listeners = Map::new(
+                    common::network::bind_health::read(&get.server.core.storage.data, node_id)
+                        .await?,
+                );
+            }
             get.insert(node.node_id.into(), node.into_value());
         }
     }

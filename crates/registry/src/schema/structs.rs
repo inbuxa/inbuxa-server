@@ -760,6 +760,9 @@ pub struct ClusterNode {
     pub last_renewal: UTCDateTime,
     #[serde(rename = "status")]
     pub status: ClusterNodeStatus,
+    // inbuxa: #485, listeners this node couldn't bind, as "id address: reason"
+    #[serde(rename = "unboundListeners")]
+    pub unbound_listeners: Map<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

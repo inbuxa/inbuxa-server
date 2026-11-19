@@ -606,6 +606,17 @@ impl ParseHttp for Server {
                         return Ok(JsonProblemResponse(StatusCode::OK).into_http_response());
                     }
                     "ready" => {
+                        // inbuxa: #485: not ready while a configured
+                        // listener isn't open, naming each one
+                        let unbound = self.inner.data.listener_control.failures().lines();
+                        if !unbound.is_empty() {
+                            return Ok(http_proto::JsonResponse::with_status(
+                                StatusCode::SERVICE_UNAVAILABLE,
+                                serde_json::json!({ "unboundListeners": unbound }),
+                            )
+                            .no_cache()
+                            .into_http_response());
+                        }
                         // inbuxa: ready only while the data store answers
                         // (a cached, time-limited read); liveness stays 200
                         return Ok(JsonProblemResponse({

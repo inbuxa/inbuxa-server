@@ -1174,6 +1174,7 @@ pub enum Property {
     TrustReplies = 774,
     TsigAlgorithm = 338,
     Ttl = 310,
+    UnboundListeners = 947,
     UnpackDirectory = 54,
     UpdateRecords = 812,
     UploadQuota = 445,

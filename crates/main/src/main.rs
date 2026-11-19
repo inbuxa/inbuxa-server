@@ -121,6 +121,14 @@ async fn main() -> std::io::Result<()> {
                 spawn_listener(&spawn_inner, server, acceptor, shutdown_rx);
             });
 
+    // inbuxa: #485: listeners spawned from here on (LP-5) never end the
+    // process; and a node starts with no failures left from its last run
+    common::network::bind_health::startup_done();
+    {
+        let server = init.inner.build_server();
+        tokio::spawn(async move { server.publish_listener_failures().await });
+    }
+
     // Leave behind how to spawn a listener, so putting one back opens its port
     // without a restart (LP-5). Only this file knows the session manager for a
     // protocol, so only this file can say.

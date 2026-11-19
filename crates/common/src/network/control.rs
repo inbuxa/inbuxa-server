@@ -55,6 +55,8 @@ pub struct ListenerInfo {
 pub struct ListenerControl {
     running: RwLock<AHashMap<String, Running>>,
     spawner: OnceLock<SpawnListener>,
+    // inbuxa: #485, listeners that couldn't open
+    failures: super::bind_health::ListenerFailures,
 }
 
 impl ListenerControl {
@@ -105,9 +107,16 @@ impl ListenerControl {
         true
     }
 
+    /// Listeners that couldn't open (#485).
+    pub fn failures(&self) -> &super::bind_health::ListenerFailures {
+        &self.failures
+    }
+
     /// Stops one listener by id. Returns what was stopped, or `None` when no
     /// listener of that id is running.
     pub fn stop(&self, id: &str) -> Option<ListenerInfo> {
+        // inbuxa: #485: a listener stopped on purpose isn't a failure
+        self.failures.clear_listener(id);
         let running = self.running.write().remove(id).map(|running| {
             let _ = running.shutdown_tx.send(true);
             ListenerInfo {

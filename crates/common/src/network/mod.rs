@@ -35,6 +35,7 @@ use utils::snowflake::SnowflakeIdGenerator;
 pub mod acme;
 pub mod asn;
 pub mod autoconfig;
+pub mod bind_health; // inbuxa: #485, listeners that can't open
 pub mod control;
 pub mod dkim;
 pub mod dns;

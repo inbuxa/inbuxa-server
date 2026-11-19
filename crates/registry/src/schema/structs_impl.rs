@@ -5455,6 +5455,7 @@ impl Pickle for ClusterNode {
         self.hostname.pickle(out);
         self.last_renewal.pickle(out);
         self.status.pickle(out);
+        self.unbound_listeners.pickle(out);
     }
 
     fn unpickle(stream: &mut crate::pickle::PickledStream<'_>) -> Option<Self> {
@@ -5463,6 +5464,7 @@ impl Pickle for ClusterNode {
         this.hostname = Pickle::unpickle(stream)?;
         this.last_renewal = Pickle::unpickle(stream)?;
         this.status = Pickle::unpickle(stream)?;
+        this.unbound_listeners = Pickle::unpickle(stream)?;
         Some(this)
     }
 }
@@ -5474,6 +5476,7 @@ impl Default for ClusterNode {
             hostname: Default::default(),
             last_renewal: Default::default(),
             status: Default::default(),
+            unbound_listeners: Default::default(),
         }
     }
 }
@@ -5485,6 +5488,10 @@ impl IntoValue for ClusterNode {
         map.insert_unchecked(Property::Hostname, self.hostname.into_value());
         map.insert_unchecked(Property::LastRenewal, self.last_renewal.into_value());
         map.insert_unchecked(Property::Status, self.status.into_value());
+        map.insert_unchecked(
+            Property::UnboundListeners,
+            self.unbound_listeners.into_value(),
+        );
         JmapValue::Object(map)
     }
 }
@@ -5500,6 +5507,9 @@ impl RegistryJsonPropertyPatch for ClusterNode {
             Some(Property::Hostname) => self.hostname.patch(pointer, value),
             Some(Property::LastRenewal) => self.last_renewal.patch(pointer, value),
             Some(Property::Status) => self.status.patch(pointer, value),
+            Some(Property::UnboundListeners) => self
+                .unbound_listeners
+                .patch(pointer.assert_read_only()?, value),
             Some(Property::Type) => Ok(MaybeUnpatched::Unpatched {
                 property: Property::Type,
                 value,
