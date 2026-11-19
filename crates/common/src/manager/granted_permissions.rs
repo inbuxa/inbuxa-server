@@ -6,8 +6,11 @@
 
 //! Permissions the fork adds after an install's roles were stored. A new
 //! install's roles take them from `DefaultPermissions`; an older install's
-//! administrator roles were written once, before the permission existed, so
-//! each is added to them here, once. An operator who takes one away later
+//! default roles (user, tenant administrator and administrator) were
+//! written once, before the permission existed, so each is added to them
+//! here, once. Every permission the fork adds to one of those defaults must
+//! be listed here too: the `fork_defaults_reach_upgraded_installs` test
+//! fails otherwise (inbuxa-server #478). An operator who takes one away later
 //! keeps it away: the grant is recorded and never repeated.
 
 use registry::schema::{
@@ -74,6 +77,22 @@ const ADMIN_GRANTS: &[Permission] = &[
     Permission::SysStoreCheck,
     Permission::SysStoreSnapshot,
     Permission::SysBlobStoreChange,
+    // passkeys spec, PK-16: administrators remove them for recovery
+    Permission::SysPasskeyGet,
+    Permission::SysPasskeyCreate,
+    Permission::SysPasskeyUpdate,
+    Permission::SysPasskeyDestroy,
+];
+
+/// Granted to the default user role: managing one's own passkeys (passkeys
+/// spec, PK-14). Without this an upgraded install's users, administrators
+/// included, can't list or add a passkey, and nobody can grant it by hand:
+/// you can't grant a permission you don't hold (#478).
+const USER_GRANTS: &[Permission] = &[
+    Permission::SysPasskeyGet,
+    Permission::SysPasskeyCreate,
+    Permission::SysPasskeyUpdate,
+    Permission::SysPasskeyDestroy,
 ];
 
 /// Granted to the server-level Compliance Officer role once it exists:
@@ -104,10 +123,16 @@ const TENANT_GRANTS: &[Permission] = &[
     Permission::SysDeliverabilityGet,
     Permission::SysScheduledReportGet,
     Permission::SysScheduledReportUpdate,
+    // passkeys spec, PK-16: the tenant's administrators remove them for recovery
+    Permission::SysPasskeyGet,
+    Permission::SysPasskeyCreate,
+    Permission::SysPasskeyUpdate,
+    Permission::SysPasskeyDestroy,
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Audience {
+    User,
     Admin,
     Tenant,
     Officer,
@@ -118,6 +143,7 @@ fn granted_key(permission: Permission, audience: Audience) -> ValueClass {
     // Admin grants keep the key they were first recorded under
     match audience {
         Audience::Admin => {}
+        Audience::User => key.extend_from_slice(b"user:"),
         Audience::Tenant => key.extend_from_slice(b"tenant:"),
         Audience::Officer => key.extend_from_slice(b"officer:"),
     }
@@ -129,6 +155,7 @@ fn granted_key(permission: Permission, audience: Audience) -> ValueClass {
 }
 
 pub(crate) async fn grant_new_admin_permissions(bp: &mut Bootstrap) -> trc::Result<()> {
+    grant(bp, Audience::User, USER_GRANTS).await?;
     grant(bp, Audience::Admin, ADMIN_GRANTS).await?;
     grant(bp, Audience::Tenant, TENANT_GRANTS).await?;
     grant(bp, Audience::Officer, OFFICER_GRANTS).await
@@ -165,6 +192,12 @@ async fn grant(bp: &mut Bootstrap, audience: Audience, grants: &[Permission]) ->
             .await?
             .map(|auth| {
                 let (own, shared) = match audience {
+                    // The user role is shared by every default: only the
+                    // group role, which no person signs in with, is left out
+                    Audience::User => (
+                        auth.default_user_role_ids.as_slice(),
+                        auth.default_group_role_ids.as_slice().to_vec(),
+                    ),
                     Audience::Admin => (
                         auth.default_admin_role_ids.as_slice(),
                         [
@@ -234,4 +267,74 @@ async fn grant(bp: &mut Bootstrap, audience: Audience, grants: &[Permission]) ->
         .await
         .caused_by(trc::location!())
         .map(|_| ())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::auth::permissions::DefaultPermissions;
+    use registry::types::EnumImpl;
+
+    /// The first permission the fork added after the last upstream import.
+    /// Older ones came with the upstream defaults every install stored.
+    const FIRST_FORK_PERMISSION: Permission = Permission::SysAiExplain;
+
+    fn fork_added(permissions: &[Permission]) -> Vec<Permission> {
+        permissions
+            .iter()
+            .copied()
+            .filter(|p| p.to_id() >= FIRST_FORK_PERMISSION.to_id())
+            .collect()
+    }
+
+    /// #478: a permission the fork gives a default role must reach that role
+    /// on an upgraded install too, or upgraded installs never get it.
+    #[test]
+    fn fork_defaults_reach_upgraded_installs() {
+        let defaults = DefaultPermissions::default();
+        for (role, defaults, grants) in [
+            ("user", &defaults.user, USER_GRANTS),
+            ("tenant administrator", &defaults.tenant, TENANT_GRANTS),
+            ("administrator", &defaults.superuser, ADMIN_GRANTS),
+        ] {
+            let missing: Vec<_> = fork_added(defaults)
+                .into_iter()
+                .filter(|p| !grants.contains(p))
+                .map(|p| p.as_str())
+                .collect();
+            assert!(
+                missing.is_empty(),
+                "the default {role} role gets {missing:?} on a new install only: \
+                 add them to granted_permissions.rs"
+            );
+        }
+        // The group role takes none: nobody signs in as a group
+        assert!(fork_added(&defaults.group).is_empty());
+    }
+
+    /// Nothing is granted on upgrade that a new install's role wouldn't hold.
+    #[test]
+    fn grants_match_the_defaults() {
+        let defaults = DefaultPermissions::default();
+        for (grants, defaults) in [
+            (USER_GRANTS, &defaults.user),
+            (TENANT_GRANTS, &defaults.tenant),
+            (ADMIN_GRANTS, &defaults.superuser),
+        ] {
+            for permission in grants {
+                assert!(defaults.contains(permission), "{}", permission.as_str());
+            }
+        }
+    }
+
+    #[test]
+    fn audiences_record_apart() {
+        let key = |a| match granted_key(Permission::SysPasskeyGet, a) {
+            ValueClass::Any(k) => k.key,
+            _ => panic!(),
+        };
+        assert_eq!(key(Audience::Admin), b"PgsysPasskeyGet");
+        assert_eq!(key(Audience::User), b"Pguser:sysPasskeyGet");
+        assert_ne!(key(Audience::User), key(Audience::Tenant));
+    }
 }
