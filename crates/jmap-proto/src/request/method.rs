@@ -80,6 +80,8 @@ pub enum MethodObject {
     RelayMessage,
     // inbuxa: accepted security to-do items
     SecurityAcceptance,
+    // inbuxa: passkeys
+    Passkey,
     // inbuxa: the deliverability check
     DeliverabilityReport,
     DeliverabilitySettings,
@@ -141,6 +143,7 @@ impl MethodObject {
             | MethodObject::Relay
             | MethodObject::RelayMessage
             | MethodObject::SecurityAcceptance
+            | MethodObject::Passkey
             | MethodObject::HeldMessage
             | MethodObject::DeliverabilityReport
             | MethodObject::DeliverabilitySettings
@@ -371,6 +374,8 @@ impl MethodName {
             (MethodFunction::Set, MethodObject::SecurityAcceptance) => {
                 "inbuxa:SecurityAcceptance/set"
             }
+            (MethodFunction::Get, MethodObject::Passkey) => "inbuxa:Passkey/get",
+            (MethodFunction::Set, MethodObject::Passkey) => "inbuxa:Passkey/set",
             (MethodFunction::Get, MethodObject::DeliverabilityReport) => {
                 "inbuxa:DeliverabilityReport/get"
             }
@@ -578,6 +583,8 @@ impl MethodName {
             "inbuxa:RelayMessage/set" => (MethodObject::RelayMessage, MethodFunction::Set),
             "inbuxa:SecurityAcceptance/get" => (MethodObject::SecurityAcceptance, MethodFunction::Get),
             "inbuxa:SecurityAcceptance/set" => (MethodObject::SecurityAcceptance, MethodFunction::Set),
+            "inbuxa:Passkey/get" => (MethodObject::Passkey, MethodFunction::Get),
+            "inbuxa:Passkey/set" => (MethodObject::Passkey, MethodFunction::Set),
             "inbuxa:DeliverabilityReport/get" => (MethodObject::DeliverabilityReport, MethodFunction::Get),
             "inbuxa:DeliverabilityReport/set" => (MethodObject::DeliverabilityReport, MethodFunction::Set),
             "inbuxa:DeliverabilitySettings/get" => (MethodObject::DeliverabilitySettings, MethodFunction::Get),
@@ -679,6 +686,7 @@ impl Display for MethodObject {
             MethodObject::Relay => "inbuxa:Relay",
             MethodObject::RelayMessage => "inbuxa:RelayMessage",
             MethodObject::SecurityAcceptance => "inbuxa:SecurityAcceptance",
+            MethodObject::Passkey => "inbuxa:Passkey",
             MethodObject::DeliverabilityReport => "inbuxa:DeliverabilityReport",
             MethodObject::DeliverabilitySettings => "inbuxa:DeliverabilitySettings",
             MethodObject::ReportExport => "inbuxa:ReportExport",

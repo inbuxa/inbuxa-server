@@ -445,6 +445,12 @@ impl Default for DefaultPermissions {
                     {
                         default.user.push(permission);
                         default.superuser.push(permission);
+                    } else if name.starts_with("sysPasskey") {
+                        // inbuxa: passkeys spec: people manage their own,
+                        // and administrators remove them for recovery (PK-16)
+                        default.user.push(permission);
+                        default.tenant.push(permission);
+                        default.superuser.push(permission);
                     } else if name.starts_with("sysDomain")
                         || name.starts_with("sysDkimSignature")
                         || name.starts_with("sysAcmeProvider")

@@ -121,11 +121,10 @@ passwords.
 - **PK-7.** Completing registration turns the record `active`, fills the
   server-set fields, and refuses a credential id already registered to any
   account. A pending record whose ticket expired is removed.
-- **PK-8.** Registering needs a fresh sign-in: the session behind the create
-  must have signed in within the last 10 minutes, or the create fails with
-  `forbidden` and the app asks the user to sign in again. Access tokens carry
-  the time of the sign-in behind them, kept across refreshes; a token without
-  it counts as old. A stolen session token alone can't add a passkey.
+- **PK-8.** The registration page first asks for the account's password
+  (and its TOTP code when it has one), or for one of its active passkeys,
+  before it asks for the new passkey. A stolen session token alone can't add
+  a passkey: it can start a registration, but not finish one.
 
 ### Sign-in
 
@@ -157,8 +156,11 @@ passwords.
 
 ### Managing
 
-- **PK-14.** `inbuxa:Passkey/get`, `/query` (filter `accountId`) and `/set`
-  update (`name` only) and destroy, with the permissions above.
+- **PK-14.** `inbuxa:Passkey/get` and `/set` update (`name` only) and
+  destroy, with the permissions above. The request's `accountId` names the
+  account whose passkeys these are; `get` with `ids: null` lists them. A
+  passkey's id carries its account, so ids never collide across accounts.
+  The ticket in `registrationUrl` is returned once, by the create.
 - **PK-15.** Destroying a passkey ends every session of the account, the way
   a password change does today (tokens carry a credential version). Until the
   grant registry (#435) can end one session, this is the only way to cut off a
@@ -179,8 +181,10 @@ passwords.
 
 ## Interfaces
 
-- **JMAP:** `inbuxa:Passkey` as above. The schema carries it, so inbuxa Admin
-  lists passkeys on the account page with no special form.
+- **JMAP:** `inbuxa:Passkey` as above, under `urn:inbuxa:jmap`. Like the
+  fork's other `inbuxa:` objects it isn't in the registry schema, so inbuxa
+  Admin needs its own passkeys panel; the four `sysPasskey*` permissions are
+  in the schema.
 - **HTTP:** `POST /api/auth/passkey` (challenge for sign-in), the login
   request's `passkey` field, and the registration page with its two requests
   (fetch options, send the result), all on the server's own hostname.
@@ -200,8 +204,9 @@ passwords.
 1. Register a passkey with a virtual authenticator from the registration
    page: the record goes `pending` → `active` with `rpId`, `transports`,
    `backedUp` set (PK-5 to PK-7).
-2. A create from a session that signed in more than 10 minutes ago fails
-   `forbidden` (PK-8). At `maxPasskeys`, `overQuota` (PK-5).
+2. The registration page refuses to ask for a passkey until the password
+   (and TOTP code) or an active passkey is given (PK-8). At `maxPasskeys`,
+   `overQuota` (PK-5).
 3. Sign in with the passkey through the authorization-code flow and through
    `/device`: both issue tokens; `lastUsedAt` is set; an account with TOTP
    isn't asked for a code (PK-9 to PK-12).
@@ -250,6 +255,16 @@ removing a passkey ends the account's sessions (PK-15); the password stays
 
 ## Implementation status
 
-Not started. Planned order, one PR each: storage and `inbuxa:Passkey`
-management; registration page; sign-in in the authorization-code flow; the
-device flow, settings and policy; then the webmail and console pages.
+Building, one PR each:
+
+1. Storage and `inbuxa:Passkey` management: records in `_` under `N`,
+   `get` and `/set` (create pending with its registration URL, rename,
+   remove), the four permissions (user, tenant and server administrators by
+   default), removal ending the account's sessions through the credential
+   version, and account deletion. Pending ones expire after 10 minutes. The
+   limit is fixed at 10 until the settings arrive (step 4).
+2. The registration page.
+3. Sign-in in the authorization-code flow, with autofill.
+4. The device flow, the settings and policy, and the sign-in events.
+
+Then the webmail and console pages.

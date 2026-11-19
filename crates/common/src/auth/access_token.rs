@@ -309,6 +309,15 @@ impl Server {
                     }
                 }
 
+                // inbuxa: passkeys spec, PK-15: removing a passkey moves the
+                // credential version, as a password change does
+                let credential_version = inbuxa_features::passkey::credential_version(
+                    credential_version,
+                    inbuxa_features::passkey::epoch(self.store(), account_id)
+                        .await
+                        .caused_by(trc::location!())?,
+                );
+
                 Ok(AccessTokenInner {
                     concurrent_imap_requests: self
                         .core

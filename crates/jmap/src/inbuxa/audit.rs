@@ -457,6 +457,20 @@ async fn fork_current(server: &Server, object: &str, id: &MaybeInvalid<Id>) -> O
             }
             MaybeInvalid::Invalid(_) => None,
         },
+        // PK-17: a passkey named by its name, never its key
+        "inbuxa:Passkey" => match id {
+            MaybeInvalid::Value(id) => {
+                let (account_id, number) = inbuxa_features::passkey::split_id(id.id());
+                let passkey = inbuxa_features::passkey::get(data, account_id, number)
+                    .await
+                    .ok()??;
+                Some(serde_json::json!({
+                    "name": passkey.name,
+                    "state": passkey.state.as_str(),
+                }))
+            }
+            MaybeInvalid::Invalid(_) => None,
+        },
         // SS-26: an acceptance named by its check and subject
         "inbuxa:SecurityAcceptance" => match id {
             MaybeInvalid::Value(id) => {

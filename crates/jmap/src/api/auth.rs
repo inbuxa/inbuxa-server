@@ -134,6 +134,8 @@ impl JmapAuthorization for AccessToken {
                 // inbuxa: accepted security items are read by whoever may
                 // see the server's security settings
                 GetRequestMethod::SecurityAcceptance(_) => Permission::SysSecurityGet,
+                // inbuxa: passkeys spec, PK-14
+                GetRequestMethod::Passkey(_) => Permission::SysPasskeyGet,
                 // inbuxa: deliverability spec; the lists are named on the
                 // page that shows the findings, so they read the same way
                 GetRequestMethod::DeliverabilityReport(_)
@@ -391,6 +393,14 @@ impl JmapAuthorization for AccessToken {
                         Permission::SysJournalGet,
                         Permission::SysJournalGet,
                     ),
+                    // inbuxa: passkeys spec, PK-14
+                    SetRequestMethod::Passkey(s) => validate_set(
+                        s,
+                        self,
+                        Permission::SysPasskeyCreate,
+                        Permission::SysPasskeyUpdate,
+                        Permission::SysPasskeyDestroy,
+                    ),
                     // inbuxa: accepting a security to-do item, or removing
                     // an acceptance; nothing is ever edited
                     SetRequestMethod::SecurityAcceptance(s) => {
@@ -632,6 +642,7 @@ impl JmapAuthorization for AccessToken {
                 | MethodObject::Relay
                 | MethodObject::RelayMessage
                 | MethodObject::SecurityAcceptance
+                | MethodObject::Passkey
                 | MethodObject::DeliverabilityReport
                 | MethodObject::DeliverabilitySettings
                 | MethodObject::ReportExport

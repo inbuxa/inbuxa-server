@@ -118,6 +118,9 @@ async fn destroy_account(server: &Server, task: &TaskDestroyAccount) -> trc::Res
     )
     .await?;
 
+    // inbuxa: passkeys spec, PK-16: its passkeys and user handle go too
+    inbuxa_features::passkey::forget_account(&server.core.storage.data, account_id).await?;
+
     // Remove archived items
     let mut batch = BatchBuilder::new();
     let ids = server

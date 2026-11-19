@@ -31,6 +31,7 @@ pub mod masked_secrets; // inbuxa: "****" is never saved as a secret
 pub mod migration; // inbuxa: migrations into this server
 pub mod monitoring;
 pub mod oidc;
+pub mod passkeys; // inbuxa: passkeys
 pub mod purge;
 pub mod quota;
 pub mod relay; // inbuxa: inbuxa Relay

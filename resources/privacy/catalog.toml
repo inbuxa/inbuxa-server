@@ -157,6 +157,21 @@ name = ["content"]
 description = ["content"]
 createdBy = ["identifier"]
 
+[object."inbuxa:Passkey"]
+file = "inbuxa_passkey.rs"
+default = "none"
+whose = ["holder"]
+where = ["data-store"]
+scope = "tenant"
+retention = "object-life"
+[object."inbuxa:Passkey".properties]
+accountId = ["identifier"]
+name = ["content"]
+registrationUrl = ["credential"]
+transports = ["metadata"]
+createdAt = ["metadata"]
+lastUsedAt = ["metadata"]
+
 [object."inbuxa:SecurityAcceptance"]
 file = "inbuxa_security_acceptance.rs"
 default = "none"

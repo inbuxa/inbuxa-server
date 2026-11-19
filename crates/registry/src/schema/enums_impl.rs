@@ -7225,6 +7225,10 @@ impl EnumImpl for Permission {
             b"sysStoreCheck" => Permission::SysStoreCheck,
             b"sysStoreSnapshot" => Permission::SysStoreSnapshot,
             b"sysBlobStoreChange" => Permission::SysBlobStoreChange,
+            b"sysPasskeyGet" => Permission::SysPasskeyGet,
+            b"sysPasskeyCreate" => Permission::SysPasskeyCreate,
+            b"sysPasskeyUpdate" => Permission::SysPasskeyUpdate,
+            b"sysPasskeyDestroy" => Permission::SysPasskeyDestroy,
             b"sysAccountGet" => Permission::SysAccountGet,
             b"sysAccountCreate" => Permission::SysAccountCreate,
             b"sysAccountUpdate" => Permission::SysAccountUpdate,
@@ -7939,6 +7943,10 @@ impl EnumImpl for Permission {
             Permission::SysStoreCheck => "sysStoreCheck",
             Permission::SysStoreSnapshot => "sysStoreSnapshot",
             Permission::SysBlobStoreChange => "sysBlobStoreChange",
+            Permission::SysPasskeyGet => "sysPasskeyGet",
+            Permission::SysPasskeyCreate => "sysPasskeyCreate",
+            Permission::SysPasskeyUpdate => "sysPasskeyUpdate",
+            Permission::SysPasskeyDestroy => "sysPasskeyDestroy",
             Permission::SysAccountGet => "sysAccountGet",
             Permission::SysAccountCreate => "sysAccountCreate",
             Permission::SysAccountUpdate => "sysAccountUpdate",
@@ -8646,6 +8654,10 @@ impl EnumImpl for Permission {
             695 => Some(Permission::SysStoreCheck),
             696 => Some(Permission::SysStoreSnapshot),
             697 => Some(Permission::SysBlobStoreChange),
+            698 => Some(Permission::SysPasskeyGet),
+            699 => Some(Permission::SysPasskeyCreate),
+            700 => Some(Permission::SysPasskeyUpdate),
+            701 => Some(Permission::SysPasskeyDestroy),
             219 => Some(Permission::SysAccountGet),
             220 => Some(Permission::SysAccountCreate),
             221 => Some(Permission::SysAccountUpdate),
@@ -9090,7 +9102,7 @@ impl EnumImpl for Permission {
         }
     }
 
-    const COUNT: usize = 698;
+    const COUNT: usize = 702;
 }
 
 impl serde::Serialize for Permission {
