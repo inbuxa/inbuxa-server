@@ -597,14 +597,22 @@ impl ParseHttp for Server {
                 );
             }
             "healthz" => {
+                let check = path.next().unwrap_or_default();
+
+                // inbuxa: K-C10: liveness answers before the limit. The limit
+                // is kept in the in-memory store, which may be the data store,
+                // so with that down the check waited on it, the probe timed
+                // out, and the orchestrator restarted a process that was
+                // fine, every one at once. A fixed 200 costs nothing to serve.
+                if check == "live" {
+                    return Ok(JsonProblemResponse(StatusCode::OK).into_http_response());
+                }
+
                 // Limit anonymous requests
                 self.is_http_anonymous_request_allowed(session.remote_ip)
                     .await?;
 
-                match path.next().unwrap_or_default() {
-                    "live" => {
-                        return Ok(JsonProblemResponse(StatusCode::OK).into_http_response());
-                    }
+                match check {
                     "ready" => {
                         // inbuxa: #485: not ready while a configured
                         // listener isn't open, naming each one

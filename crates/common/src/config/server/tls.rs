@@ -288,6 +288,18 @@ pub(crate) async fn parse_certificates(
         }
     }
 
+    // inbuxa: K-C10: when the first name served runs out, for an alert that
+    // warns before a renewal that isn't happening matters
+    trc::Collector::update_gauge(
+        trc::MetricType::TlsEarliestExpiry,
+        certs_expirations
+            .iter()
+            .filter(|(name, _)| name.as_str() != "*")
+            .map(|(_, expires)| (*expires).max(0) as u64)
+            .min()
+            .unwrap_or_default(),
+    );
+
     // No default certificate set: pick one now, once per load, so handshakes
     // without SNI or for an unknown name get a predictable certificate.
     if !certificates.contains_key("*") && certificates.len() > 1 {

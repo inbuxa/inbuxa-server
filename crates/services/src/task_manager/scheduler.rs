@@ -136,6 +136,11 @@ pub fn spawn_task_scheduler(inner: Arc<Inner>) {
                 );
             }
 
+            // inbuxa: K-C10: nodes sharing a queue count it from the store
+            if server.core.storage.has_coordinator() {
+                Collector::count_queue_from_store_only();
+            }
+
             // OTEL Push Metrics
             if let Some(otel) = &server.core.metrics.otel {
                 OtelMetrics::enable_errors();
@@ -272,7 +277,7 @@ pub fn spawn_task_scheduler(inner: Arc<Inner>) {
                         if let Some(otel) = &server.core.metrics.otel {
                             queue.schedule(Instant::now() + otel.interval, Event::OtelMetrics);
 
-                            if roles.metrics_push {
+                            if roles.metrics_push || otel.every_node {
                                 let otel = otel.clone();
 
                                 tokio::spawn(async move {
@@ -308,8 +313,12 @@ pub fn spawn_task_scheduler(inner: Arc<Inner>) {
                                 // inbuxa: MON-7: the queue gauge from the queue itself,
                                 // so it's right after a restart
                                 match server.total_queued_messages().await {
-                                    Ok(total) => {
+                                    Ok((total, oldest)) => {
                                         Collector::update_gauge(MetricType::QueueCount, total);
+                                        Collector::update_gauge(
+                                            MetricType::QueueOldestMessage,
+                                            oldest.unwrap_or_default(),
+                                        );
                                     }
                                     Err(err) => {
                                         trc::error!(err.details("Failed to count queued messages"));

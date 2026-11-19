@@ -31,6 +31,13 @@ pub struct Storage {
 }
 
 impl Storage {
+    // inbuxa: K-C10: whether nodes share this store as a cluster
+    pub fn has_coordinator(&self) -> bool {
+        !matches!(self.coordinator, Coordinator::None)
+    }
+}
+
+impl Storage {
     pub async fn parse(bp: &mut Bootstrap) -> Self {
         let memory = InMemoryStore::build(bp).await.unwrap_or_default();
         let directory = Directories::build(bp).await;

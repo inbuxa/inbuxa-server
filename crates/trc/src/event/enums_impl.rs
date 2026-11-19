@@ -5499,6 +5499,9 @@ impl MetricType {
             b"telemetry.journal-error" => MetricType::TelemetryJournalError,
             b"tls.handshake-error" => MetricType::TlsHandshakeError,
             b"user.count" => MetricType::UserCount,
+            b"queue.oldest-message" => MetricType::QueueOldestMessage,
+            b"cluster.lease-renewed" => MetricType::ClusterLeaseRenewed,
+            b"tls.earliest-expiry" => MetricType::TlsEarliestExpiry,
         }
         .copied()
     }
@@ -5886,6 +5889,9 @@ impl MetricType {
             MetricType::TelemetryJournalError => "telemetry.journal-error",
             MetricType::TlsHandshakeError => "tls.handshake-error",
             MetricType::UserCount => "user.count",
+            MetricType::QueueOldestMessage => "queue.oldest-message",
+            MetricType::ClusterLeaseRenewed => "cluster.lease-renewed",
+            MetricType::TlsEarliestExpiry => "tls.earliest-expiry",
         }
     }
 
@@ -6260,6 +6266,9 @@ impl MetricType {
             MetricType::TelemetryJournalError => 335,
             MetricType::TlsHandshakeError => 336,
             MetricType::UserCount => 25,
+            MetricType::QueueOldestMessage => 369,
+            MetricType::ClusterLeaseRenewed => 370,
+            MetricType::TlsEarliestExpiry => 371,
         }
     }
 
@@ -6634,6 +6643,9 @@ impl MetricType {
             335 => Some(MetricType::TelemetryJournalError),
             336 => Some(MetricType::TlsHandshakeError),
             25 => Some(MetricType::UserCount),
+            369 => Some(MetricType::QueueOldestMessage),
+            370 => Some(MetricType::ClusterLeaseRenewed),
+            371 => Some(MetricType::TlsEarliestExpiry),
             _ => None,
         }
     }
@@ -7369,6 +7381,15 @@ impl MetricType {
             MetricType::TelemetryJournalError => "Journal collector error",
             MetricType::TlsHandshakeError => "TLS handshake error",
             MetricType::UserCount => "Total number of users",
+            MetricType::QueueOldestMessage => {
+                "When the oldest message in the queue arrived, as a Unix time (0: the queue is empty)"
+            }
+            MetricType::ClusterLeaseRenewed => {
+                "When this node last renewed its cluster lease, as a Unix time"
+            }
+            MetricType::TlsEarliestExpiry => {
+                "When the first certificate in use expires, as a Unix time (0: none)"
+            }
         }
     }
 
@@ -7743,6 +7764,9 @@ impl MetricType {
             | MetricType::StoreBlobReadTime
             | MetricType::StoreBlobWriteTime => "milliseconds",
             MetricType::UserCount => "users",
+            MetricType::QueueOldestMessage
+            | MetricType::ClusterLeaseRenewed
+            | MetricType::TlsEarliestExpiry => "seconds",
         }
     }
 
@@ -8117,6 +8141,9 @@ impl MetricType {
             MetricType::TelemetryJournalError,
             MetricType::TlsHandshakeError,
             MetricType::UserCount,
+            MetricType::QueueOldestMessage,
+            MetricType::ClusterLeaseRenewed,
+            MetricType::TlsEarliestExpiry,
         ]
     }
 }

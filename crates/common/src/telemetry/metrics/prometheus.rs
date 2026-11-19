@@ -19,7 +19,7 @@ impl Server {
         let mut metrics = Vec::new();
 
         // Add counters
-        for counter in Collector::collect_counters() {
+        for counter in Collector::collect_metric_counters() {
             let mut metric = MetricFamily::default();
             metric.set_name(metric_name(counter.id().as_str()));
             metric.set_help(counter.id().description().into());

@@ -49,8 +49,18 @@ static DNS_LOOKUP_TIME: AtomicHistogram<12> =
 
 static SERVER_MEMORY: AtomicGauge = AtomicGauge::new(MetricType::ServerMemory);
 static QUEUE_COUNT: AtomicGauge = AtomicGauge::new(MetricType::QueueCount);
+// inbuxa: K-C10: in a cluster the queue gauge is only what the node that
+// calculates metrics counted in the store. Each node seeing only its own
+// queued and delivered messages, live changes there were noise: the core
+// subtracted deliveries of messages other nodes had queued.
+static QUEUE_COUNT_FROM_STORE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 static USER_COUNT: AtomicGauge = AtomicGauge::new(MetricType::UserCount);
 static DOMAIN_COUNT: AtomicGauge = AtomicGauge::new(MetricType::DomainCount);
+// inbuxa: K-C10: gauges for alerts, set where the value is known
+static QUEUE_OLDEST_MESSAGE: AtomicGauge = AtomicGauge::new(MetricType::QueueOldestMessage);
+static CLUSTER_LEASE_RENEWED: AtomicGauge = AtomicGauge::new(MetricType::ClusterLeaseRenewed);
+static TLS_EARLIEST_EXPIRY: AtomicGauge = AtomicGauge::new(MetricType::TlsEarliestExpiry);
 
 const CONN_SMTP_IN: usize = 0;
 const CONN_SMTP_OUT: usize = 1;
@@ -144,7 +154,9 @@ impl Collector {
                 conn.elapsed.observe(elapsed);
             }
             EventType::Delivery(DeliveryEvent::Completed) => {
-                QUEUE_COUNT.decrement();
+                if !QUEUE_COUNT_FROM_STORE.load(Ordering::Relaxed) {
+                    QUEUE_COUNT.decrement();
+                }
                 MESSAGE_DELIVERY_TIME.observe(elapsed);
             }
             EventType::Delivery(
@@ -167,11 +179,15 @@ impl Collector {
             }
             EventType::Queue(QueueEvent::MessageQueued) => {
                 MESSAGE_INCOMING_SIZE.observe(size);
-                QUEUE_COUNT.increment();
+                if !QUEUE_COUNT_FROM_STORE.load(Ordering::Relaxed) {
+                    QUEUE_COUNT.increment();
+                }
             }
             EventType::Queue(QueueEvent::AuthenticatedMessageQueued) => {
                 MESSAGE_SUBMISSION_SIZE.observe(size);
-                QUEUE_COUNT.increment();
+                if !QUEUE_COUNT_FROM_STORE.load(Ordering::Relaxed) {
+                    QUEUE_COUNT.increment();
+                }
             }
             EventType::Queue(QueueEvent::ReportQueued) => {
                 MESSAGE_OUT_REPORT_SIZE.observe(size);
@@ -209,6 +225,27 @@ impl Collector {
         METRIC_INTERESTS.update(interests);
     }
 
+    // inbuxa: K-C10: for a scrape, every counter that is collected, at zero
+    // too. Prometheus measures an increase from the first sample, so a
+    // counter that first shows up at 3 never reads as having risen.
+    pub fn collect_metric_counters() -> impl Iterator<Item = EventCounter> {
+        EVENT_COUNTERS
+            .inner()
+            .iter()
+            .enumerate()
+            .filter_map(|(event_id, value)| {
+                let value = value.load(Ordering::Relaxed);
+                if value > 0 || METRIC_INTERESTS.get(event_id) {
+                    Some(EventCounter {
+                        id: EventType::from_id(event_id as u16)?,
+                        value,
+                    })
+                } else {
+                    None
+                }
+            })
+    }
+
     pub fn collect_counters() -> impl Iterator<Item = EventCounter> {
         EVENT_COUNTERS
             .inner()
@@ -229,8 +266,15 @@ impl Collector {
 
     // inbuxa: MON-6: one edition, every gauge
     pub fn collect_gauges() -> impl Iterator<Item = &'static AtomicGauge> {
-        static GAUGES: &[&AtomicGauge] =
-            &[&SERVER_MEMORY, &QUEUE_COUNT, &USER_COUNT, &DOMAIN_COUNT];
+        static GAUGES: &[&AtomicGauge] = &[
+            &SERVER_MEMORY,
+            &QUEUE_COUNT,
+            &USER_COUNT,
+            &DOMAIN_COUNT,
+            &QUEUE_OLDEST_MESSAGE,
+            &CLUSTER_LEASE_RENEWED,
+            &TLS_EARLIEST_EXPIRY,
+        ];
 
         GAUGES
             .iter()
@@ -306,8 +350,16 @@ impl Collector {
             MetricType::SieveRequestTime => CONNECTION_METRICS[CONN_SIEVE].elapsed.average(),
             MetricType::UserCount => USER_COUNT.get() as f64,
             MetricType::DomainCount => DOMAIN_COUNT.get() as f64,
+            MetricType::QueueOldestMessage => QUEUE_OLDEST_MESSAGE.get() as f64,
+            MetricType::ClusterLeaseRenewed => CLUSTER_LEASE_RENEWED.get() as f64,
+            MetricType::TlsEarliestExpiry => TLS_EARLIEST_EXPIRY.get() as f64,
             _ => EVENT_COUNTERS.get(metric_type.event_id()) as f64,
         }
+    }
+
+    /// In a cluster: the queue gauge changes only when the queue is counted.
+    pub fn count_queue_from_store_only() {
+        QUEUE_COUNT_FROM_STORE.store(true, Ordering::Relaxed);
     }
 
     pub fn update_gauge(metric_type: MetricType, value: u64) {
@@ -316,6 +368,9 @@ impl Collector {
             MetricType::QueueCount => QUEUE_COUNT.set(value),
             MetricType::UserCount => USER_COUNT.set(value),
             MetricType::DomainCount => DOMAIN_COUNT.set(value),
+            MetricType::QueueOldestMessage => QUEUE_OLDEST_MESSAGE.set(value),
+            MetricType::ClusterLeaseRenewed => CLUSTER_LEASE_RENEWED.set(value),
+            MetricType::TlsEarliestExpiry => TLS_EARLIEST_EXPIRY.set(value),
             _ => {}
         }
     }
