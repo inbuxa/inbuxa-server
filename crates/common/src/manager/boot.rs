@@ -210,7 +210,7 @@ impl BootManager {
             import_export == StoreOp::None || one_shot,
         )
         .await
-        .failed("⚠️ Startup failed");
+        .unwrap_or_else(|err| startup_failed(err));
         if one_shot && (registry.is_bootstrap_mode() || registry.is_recovery_mode()) {
             failed(
                 "--upgrade-store and --seed need a configured server: there is no data \
@@ -424,4 +424,24 @@ pub fn build_ipc(has_pubsub: bool) -> (Ipc, IpcReceivers) {
             broadcast_rx: has_pubsub.then_some(broadcast_rx),
         },
     )
+}
+
+/// inbuxa: K-S6: the data store couldn't be opened. The line names the case
+/// and the exit code tells it apart (store::registry::startup), so a
+/// supervisor or a Kubernetes pre-flight check needn't read the driver's words.
+fn startup_failed(err: store::registry::startup::StartupError) -> ! {
+    trc::event!(
+        Server(trc::ServerEvent::StartupError),
+        Details = err.kind.label(),
+        Reason = err.message.clone()
+    );
+
+    #[cfg(feature = "test_mode")]
+    panic!("⚠️ Startup failed: {err}");
+
+    #[cfg(not(feature = "test_mode"))]
+    {
+        eprintln!("⚠️ Startup failed: {err}");
+        std::process::exit(err.kind.exit_code());
+    }
 }
