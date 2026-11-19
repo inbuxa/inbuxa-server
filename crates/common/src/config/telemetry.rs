@@ -12,7 +12,7 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use hyper::HeaderMap;
 use opentelemetry::{InstrumentationScope, KeyValue};
 use opentelemetry_otlp::{
-    LogExporter, MetricExporter, SpanExporter, WithExportConfig, WithHttpConfig,
+    LogExporter, MetricExporter, SpanExporter, WithExportConfig, WithHttpConfig, WithTonicConfig,
 };
 use opentelemetry_sdk::{Resource, metrics::Temporality};
 use opentelemetry_semantic_conventions::resource::SERVICE_VERSION;
@@ -897,6 +897,9 @@ fn prometheus_from_env(bp: &mut Bootstrap) -> Option<PrometheusMetrics> {
 /// itself. OTEL_EXPORTER_OTLP_(METRICS_)PROTOCOL picks grpc or http/protobuf
 /// (the default), and OTEL_METRIC_EXPORT_INTERVAL the interval in
 /// milliseconds (60000). OTEL_RESOURCE_ATTRIBUTES is added to the resource.
+/// Headers that carry a token can come from a file instead of the
+/// environment: INBUXA_OTLP_HEADERS_FILE, key=value pairs separated by
+/// commas or lines.
 fn otel_from_env(
     bp: &mut Bootstrap,
     resource: &Resource,
@@ -919,15 +922,55 @@ fn otel_from_env(
             Duration::from_secs(60)
         }
     };
+    let headers = match types::branding::env_var("OTLP_HEADERS_FILE") {
+        Ok(path) if !path.is_empty() => match otlp_headers_file(&path) {
+            Ok(headers) => headers,
+            Err(err) => {
+                bp.build_error(
+                    ObjectType::Metrics.singleton(),
+                    format!("{path} (INBUXA_OTLP_HEADERS_FILE): {err}. No OTLP metrics."),
+                );
+                return None;
+            }
+        },
+        _ => HeaderMap::new(),
+    };
     let exporter = match protocol.as_str() {
-        "grpc" => MetricExporter::builder()
-            .with_temporality(Temporality::Delta)
-            .with_tonic()
-            .build(),
-        "http/protobuf" => MetricExporter::builder()
-            .with_temporality(Temporality::Delta)
-            .with_http()
-            .build(),
+        "grpc" => {
+            let builder = MetricExporter::builder()
+                .with_temporality(Temporality::Delta)
+                .with_tonic();
+            if headers.is_empty() {
+                builder.build()
+            } else {
+                builder
+                    .with_metadata(
+                        opentelemetry_otlp::tonic_types::metadata::MetadataMap::from_headers(
+                            headers,
+                        ),
+                    )
+                    .build()
+            }
+        }
+        "http/protobuf" => {
+            let builder = MetricExporter::builder()
+                .with_temporality(Temporality::Delta)
+                .with_http();
+            if headers.is_empty() {
+                builder.build()
+            } else {
+                builder
+                    .with_headers(
+                        headers
+                            .iter()
+                            .filter_map(|(k, v)| {
+                                Some((k.to_string(), v.to_str().ok()?.to_string()))
+                            })
+                            .collect(),
+                    )
+                    .build()
+            }
+        }
         _ => {
             bp.build_error(
                 ObjectType::Metrics.singleton(),
@@ -956,6 +999,31 @@ fn otel_from_env(
             None
         }
     }
+}
+
+fn otlp_headers_file(path: &str) -> Result<HeaderMap, String> {
+    let contents = std::fs::read_to_string(path).map_err(|err| err.to_string())?;
+    parse_otlp_headers(&contents)
+}
+
+fn parse_otlp_headers(contents: &str) -> Result<HeaderMap, String> {
+    let mut headers = HeaderMap::new();
+    for pair in contents
+        .split([',', '\n'])
+        .map(str::trim)
+        .filter(|pair| !pair.is_empty())
+    {
+        let (name, value) = pair
+            .split_once('=')
+            .ok_or_else(|| format!("{pair:?} is not key=value"))?;
+        let name =
+            hyper::header::HeaderName::from_bytes(name.trim().to_ascii_lowercase().as_bytes())
+                .map_err(|_| format!("{:?} is not a header name", name.trim()))?;
+        let value = hyper::header::HeaderValue::from_str(value.trim())
+            .map_err(|_| format!("the value for {name} is not a header value"))?;
+        headers.append(name, value);
+    }
+    Ok(headers)
 }
 
 impl std::fmt::Debug for OtelMetrics {
@@ -1023,5 +1091,22 @@ mod tests {
     fn a_webhook_never_hears_its_own_errors() {
         let own = EventType::Telemetry(TelemetryEvent::WebhookError);
         assert!(!wants(own, Level::Trace, &[own]));
+    }
+}
+
+#[cfg(test)]
+mod inbuxa_env_tests {
+    use super::parse_otlp_headers;
+
+    #[test]
+    fn otlp_headers_file_pairs() {
+        let headers =
+            parse_otlp_headers("Authorization=Bearer abc==\nx-scope = team-a,\n").unwrap();
+        assert_eq!(headers.get("authorization").unwrap(), "Bearer abc==");
+        assert_eq!(headers.get("x-scope").unwrap(), "team-a");
+        assert_eq!(headers.len(), 2);
+        assert!(parse_otlp_headers("").unwrap().is_empty());
+        assert!(parse_otlp_headers("no-equals").is_err());
+        assert!(parse_otlp_headers("bad name=1").is_err());
     }
 }
