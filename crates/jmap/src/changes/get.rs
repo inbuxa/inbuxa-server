@@ -438,6 +438,7 @@ impl IntermediateChangesResponse {
             | MethodObject::Relay
             | MethodObject::RelayMessage
             | MethodObject::SecurityAcceptance
+            | MethodObject::Passkey
             | MethodObject::DeliverabilityReport
             | MethodObject::DeliverabilitySettings
             | MethodObject::ReportExport

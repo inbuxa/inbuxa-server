@@ -88,6 +88,7 @@ pub const OWNERS: &[(u8, Owner)] = &[
         },
     ),
     (b'M', Owner::Stays("masked email")),
+    (b'N', Owner::Stays("passkeys")),
     (b'P', Owner::Stays("permissions and protocol policies")),
     (b'Q', Owner::Stays("acceptance records")),
     (b'R', Owner::Stays("mail flow rules")),
@@ -503,6 +504,7 @@ mod tests {
         assert!(matches!(claim(b"Vs"), Claim::Stays));
         assert!(matches!(claim(b"Ls"), Claim::Stays));
         assert!(matches!(claim(b"Jj"), Claim::Stays));
+        assert!(matches!(claim(b"Np"), Claim::Stays));
         assert!(matches!(claim(b"Lz"), Claim::Nobody));
         assert!(matches!(claim(b"L"), Claim::Nobody));
         assert!(matches!(claim(b"Zz"), Claim::Nobody));

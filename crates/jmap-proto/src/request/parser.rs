@@ -786,6 +786,21 @@ impl<'de> Visitor<'de> for CallVisitor {
                 }
             },
             // inbuxa: accepted security to-do items
+            // inbuxa: passkeys
+            (MethodFunction::Get, MethodObject::Passkey) => match seq.next_element() {
+                Ok(Some(value)) => RequestMethod::Get(GetRequestMethod::Passkey(value)),
+                Err(err) => RequestMethod::invalid(err),
+                Ok(None) => {
+                    return Err(de::Error::invalid_length(1, &self));
+                }
+            },
+            (MethodFunction::Set, MethodObject::Passkey) => match seq.next_element() {
+                Ok(Some(value)) => RequestMethod::Set(SetRequestMethod::Passkey(value)),
+                Err(err) => RequestMethod::invalid(err),
+                Ok(None) => {
+                    return Err(de::Error::invalid_length(1, &self));
+                }
+            },
             (MethodFunction::Get, MethodObject::SecurityAcceptance) => match seq.next_element() {
                 Ok(Some(value)) => RequestMethod::Get(GetRequestMethod::SecurityAcceptance(value)),
                 Err(err) => RequestMethod::invalid(err),

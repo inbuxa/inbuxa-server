@@ -119,6 +119,8 @@ pub enum GetResponseMethod {
     Relay(GetResponse<crate::object::inbuxa_relay::Relay>),
     RelayMessage(GetResponse<crate::object::inbuxa_relay_message::RelayMessage>),
     SecurityAcceptance(GetResponse<crate::object::inbuxa_security_acceptance::SecurityAcceptance>),
+    // inbuxa: passkeys
+    Passkey(GetResponse<crate::object::inbuxa_passkey::Passkey>),
     DeliverabilityReport(
         GetResponse<crate::object::inbuxa_deliverability_report::DeliverabilityReport>,
     ),
@@ -181,6 +183,8 @@ pub enum SetResponseMethod {
     SecurityAcceptance(
         Box<SetResponse<crate::object::inbuxa_security_acceptance::SecurityAcceptance>>,
     ),
+    // inbuxa: passkeys
+    Passkey(Box<SetResponse<crate::object::inbuxa_passkey::Passkey>>),
     DeliverabilityReport(
         Box<SetResponse<crate::object::inbuxa_deliverability_report::DeliverabilityReport>>,
     ),
@@ -1192,5 +1196,18 @@ impl<'x> From<GetResponse<crate::object::inbuxa_hold_export::HoldExport>> for Re
 impl<'x> From<SetResponse<crate::object::inbuxa_hold_export::HoldExport>> for ResponseMethod<'x> {
     fn from(value: SetResponse<crate::object::inbuxa_hold_export::HoldExport>) -> Self {
         ResponseMethod::Set(SetResponseMethod::HoldExport(Box::new(value)))
+    }
+}
+
+// inbuxa: passkeys
+impl<'x> From<GetResponse<crate::object::inbuxa_passkey::Passkey>> for ResponseMethod<'x> {
+    fn from(value: GetResponse<crate::object::inbuxa_passkey::Passkey>) -> Self {
+        ResponseMethod::Get(GetResponseMethod::Passkey(value))
+    }
+}
+
+impl<'x> From<SetResponse<crate::object::inbuxa_passkey::Passkey>> for ResponseMethod<'x> {
+    fn from(value: SetResponse<crate::object::inbuxa_passkey::Passkey>) -> Self {
+        ResponseMethod::Set(SetResponseMethod::Passkey(Box::new(value)))
     }
 }

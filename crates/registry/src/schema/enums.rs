@@ -1806,6 +1806,11 @@ pub enum Permission {
     SysStoreSnapshot = 696,
     // inbuxa: a change of blob store, copied and dismissed
     SysBlobStoreChange = 697,
+    // inbuxa: passkeys
+    SysPasskeyGet = 698,
+    SysPasskeyCreate = 699,
+    SysPasskeyUpdate = 700,
+    SysPasskeyDestroy = 701,
     SysAccountGet = 219,
     SysAccountCreate = 220,
     SysAccountUpdate = 221,

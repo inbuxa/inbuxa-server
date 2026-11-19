@@ -308,6 +308,9 @@ impl RequestHandler for Server {
                                     SetResponseMethod::RelayMessage(set_response) => {
                                         set_response.update_created_ids(&mut response);
                                     }
+                                    SetResponseMethod::Passkey(set_response) => {
+                                        set_response.update_created_ids(&mut response);
+                                    }
                                     SetResponseMethod::SecurityAcceptance(set_response) => {
                                         set_response.update_created_ids(&mut response);
                                     }
@@ -617,6 +620,13 @@ impl RequestHandler for Server {
                         .into()
                 }
                 // inbuxa: accepted security to-do items
+                // inbuxa: passkeys
+                GetRequestMethod::Passkey(mut req) => {
+                    resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
+                    crate::inbuxa::passkey::get(self, access_token, *req)
+                        .await?
+                        .into()
+                }
                 GetRequestMethod::SecurityAcceptance(mut req) => {
                     resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
                     crate::inbuxa::security_acceptance::get(self, access_token, *req)
@@ -1277,6 +1287,22 @@ impl RequestHandler for Server {
                         reason,
                         *req,
                         |req| Box::pin(crate::inbuxa::relay_message::set(self, access_token, req)),
+                    )
+                    .await?
+                    .into()
+                }
+                // inbuxa: passkeys spec, PK-17: every change is audited
+                SetRequestMethod::Passkey(mut req) => {
+                    resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
+                    crate::inbuxa::audit::recorded(
+                        self,
+                        access_token,
+                        session,
+                        &method_name.obj.to_string(),
+                        None,
+                        None,
+                        *req,
+                        |req| Box::pin(crate::inbuxa::passkey::set(self, access_token, req)),
                     )
                     .await?
                     .into()

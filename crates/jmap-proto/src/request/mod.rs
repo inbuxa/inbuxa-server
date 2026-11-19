@@ -136,6 +136,8 @@ pub enum GetRequestMethod {
     SecurityAcceptance(
         Box<GetRequest<crate::object::inbuxa_security_acceptance::SecurityAcceptance>>,
     ),
+    // inbuxa: passkeys
+    Passkey(Box<GetRequest<crate::object::inbuxa_passkey::Passkey>>),
     DeliverabilityReport(
         Box<GetRequest<crate::object::inbuxa_deliverability_report::DeliverabilityReport>>,
     ),
@@ -198,6 +200,8 @@ pub enum SetRequestMethod<'x> {
     SecurityAcceptance(
         Box<SetRequest<'x, crate::object::inbuxa_security_acceptance::SecurityAcceptance>>,
     ),
+    // inbuxa: passkeys
+    Passkey(Box<SetRequest<'x, crate::object::inbuxa_passkey::Passkey>>),
     DeliverabilityReport(
         Box<SetRequest<'x, crate::object::inbuxa_deliverability_report::DeliverabilityReport>>,
     ),

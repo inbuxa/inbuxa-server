@@ -64,6 +64,7 @@ impl Response<'_> {
                 GetRequestMethod::SecurityAcceptance(request) => {
                     request.resolve_references(self)?
                 }
+                GetRequestMethod::Passkey(request) => request.resolve_references(self)?,
                 GetRequestMethod::DeliverabilityReport(request) => {
                     request.resolve_references(self)?
                 }
@@ -174,6 +175,7 @@ impl Response<'_> {
                 SetRequestMethod::SecurityAcceptance(request) => {
                     request.resolve_references(self, 1, false)?
                 }
+                SetRequestMethod::Passkey(request) => request.resolve_references(self, 1, false)?,
                 SetRequestMethod::DeliverabilityReport(request) => {
                     request.resolve_references(self, 1, false)?
                 }

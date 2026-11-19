@@ -109,6 +109,9 @@ impl Response<'_> {
                         GetResponseMethod::SecurityAcceptance(response) => {
                             response.eval_jptr(path, &mut results)
                         }
+                        GetResponseMethod::Passkey(response) => {
+                            response.eval_jptr(path, &mut results)
+                        }
                         GetResponseMethod::DeliverabilityReport(response) => {
                             response.eval_jptr(path, &mut results)
                         }
