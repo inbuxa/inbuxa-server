@@ -96,6 +96,16 @@ async fn insert_safe_defaults(bp: &mut Bootstrap) -> trc::Result<()> {
         return Ok(());
     }
 
+    // inbuxa: #436: one node at a time, so a node starting beside another on
+    // a fresh store never takes half-written defaults as the whole set
+    let store = bp.data_store.clone();
+    let lease = super::defaults_lease::DefaultsLease::take(&store).await?;
+    let result = insert_normal_defaults(bp).await;
+    lease.release(&store).await;
+    result
+}
+
+async fn insert_normal_defaults(bp: &mut Bootstrap) -> trc::Result<()> {
     let is_new_install = is_new_install(bp).await?;
 
     // inbuxa: a store brought over from Stalwart doesn't serve upstream's web
