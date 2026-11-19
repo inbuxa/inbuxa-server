@@ -685,6 +685,13 @@ impl RegistrySet for Server {
                         continue 'outer;
                     }
 
+                    // inbuxa: passkeys spec, PK-3: a usable relying-party id
+                    if let Err(err) = crate::inbuxa::passkey::check_write(self, before, &new_object)
+                    {
+                        set.failed(modification, err);
+                        continue 'outer;
+                    }
+
                     // inbuxa: AI-12, AI-18: the classifier and its models follow their rules
                     match inbuxa_features::ai::writes::check(self.registry(), &new_object).await? {
                         Ok(()) => {}

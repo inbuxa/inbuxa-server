@@ -12,8 +12,9 @@ use crate::{
         enums::{LogFormat, MtaRouteType, OidcOpaqueTokens},
         prelude::{ObjectImpl, ObjectInner, ObjectType},
         structs::{
-            Bootstrap, Directory, DirectoryBootstrap, Domain, Enterprise, MtaRoute, MtaRouteCommon,
-            MtaRouteInbuxaRelay, OidcDirectory, SpamSettings, Tenant, Tracer, TracerLog,
+            Authentication, Bootstrap, Directory, DirectoryBootstrap, Domain, Enterprise, MtaRoute,
+            MtaRouteCommon, MtaRouteInbuxaRelay, OidcDirectory, SpamSettings, Tenant, Tracer,
+            TracerLog,
         },
     },
     types::{EnumImpl, map::Map},
@@ -174,6 +175,11 @@ fn inbuxa_relay_routes_are_stored_after_the_others() {
 fn without_last_field<T: ObjectImpl>(object: &T, version: u8) -> Vec<u8> {
     let mut unset = Vec::new();
     None::<String>.pickle(&mut unset);
+    without_tail(object, &unset, version)
+}
+
+/// `object` saved at `version`, before the fields pickled as `tail`.
+fn without_tail<T: ObjectImpl>(object: &T, unset: &[u8], version: u8) -> Vec<u8> {
     let mut bytes = object.to_pickled_vec();
     assert!(bytes.ends_with(&unset));
     bytes.truncate(bytes.len() - unset.len());
@@ -200,12 +206,16 @@ fn logos_saved_before_dark_mode_read_back_without_a_dark_logo() {
         logo_url: Some("https://example.org/server.png".to_string()),
         ..Default::default()
     };
+    // The passkey switch is stored after the dark logo
+    let mut unset = Vec::new();
+    None::<String>.pickle(&mut unset);
+    true.pickle(&mut unset);
     assert_eq!(
-        read(ObjectType::Domain, &without_last_field(&domain, 1)),
+        read(ObjectType::Domain, &without_tail(&domain, &unset, 1)),
         ObjectInner::Domain(domain.clone())
     );
     assert_eq!(
-        read(ObjectType::Tenant, &without_last_field(&tenant, 0)),
+        read(ObjectType::Tenant, &without_tail(&tenant, &unset, 0)),
         ObjectInner::Tenant(tenant.clone())
     );
     assert_eq!(
@@ -331,5 +341,75 @@ fn spam_settings_saved_before_qr_codes_read_back_with_scanning_off() {
     assert_eq!(
         read(ObjectType::SpamSettings, &settings.to_pickled_vec()),
         ObjectInner::SpamSettings(settings)
+    );
+}
+
+// passkeys spec: settings, domains and tenants saved before the passkey
+// settings read back with passkeys allowed and the limit at 10; saved now,
+// with what was set
+#[test]
+fn passkey_settings_saved_before_read_back_allowed() {
+    let auth = Authentication {
+        password_min_length: 12,
+        max_app_passwords: Some(3),
+        ..Default::default()
+    };
+    let mut unset = Vec::new();
+    true.pickle(&mut unset);
+    None::<String>.pickle(&mut unset);
+    10u64.pickle(&mut unset);
+    let read_back = read(ObjectType::Authentication, &without_tail(&auth, &unset, 0));
+    assert_eq!(read_back, ObjectInner::Authentication(auth.clone()));
+    let ObjectInner::Authentication(read_back) = read_back else {
+        unreachable!()
+    };
+    assert!(read_back.passkeys_allowed);
+    assert_eq!(read_back.max_passkeys, 10);
+
+    let domain = Domain {
+        name: "example.org".to_string(),
+        logo_dark: Some("https://example.org/dark.png".to_string()),
+        ..Default::default()
+    };
+    let tenant = Tenant {
+        name: "t".to_string(),
+        ..Default::default()
+    };
+    let mut unset = Vec::new();
+    true.pickle(&mut unset);
+    assert_eq!(
+        read(ObjectType::Domain, &without_tail(&domain, &unset, 2)),
+        ObjectInner::Domain(domain.clone())
+    );
+    assert_eq!(
+        read(ObjectType::Tenant, &without_tail(&tenant, &unset, 1)),
+        ObjectInner::Tenant(tenant.clone())
+    );
+
+    let auth = Authentication {
+        passkeys_allowed: false,
+        passkey_rp_id: Some("example.org".to_string()),
+        max_passkeys: 3,
+        ..auth
+    };
+    let domain = Domain {
+        passkeys_allowed: false,
+        ..domain
+    };
+    let tenant = Tenant {
+        passkeys_allowed: false,
+        ..tenant
+    };
+    assert_eq!(
+        read(ObjectType::Authentication, &auth.to_pickled_vec()),
+        ObjectInner::Authentication(auth)
+    );
+    assert_eq!(
+        read(ObjectType::Domain, &domain.to_pickled_vec()),
+        ObjectInner::Domain(domain)
+    );
+    assert_eq!(
+        read(ObjectType::Tenant, &tenant.to_pickled_vec()),
+        ObjectInner::Tenant(tenant)
     );
 }

@@ -643,7 +643,7 @@
             // is good once, for two minutes.
             var usedPasskey = false;
             var autofill = null;
-            var canPasskey = !isDevice && window.PublicKeyCredential && navigator.credentials &&
+            var canPasskey = window.PublicKeyCredential && navigator.credentials &&
                 typeof navigator.credentials.get === 'function' && window.AbortController;
 
             function fromB64(s) {
@@ -698,6 +698,11 @@
 
             function signInWithPasskey(assertion) {
                 clearAlert();
+                if (isDevice && !($('device-code').value || '').trim()) {
+                    showError('Please enter the device code.');
+                    startAutofill();
+                    return;
+                }
                 usedPasskey = true;
                 var body = buildRequest({ account_name: '', account_secret: '' }, null);
                 delete body.accountName;
@@ -724,7 +729,6 @@
             }
 
             if (canPasskey) {
-                show($('passkey-btn'));
                 $('passkey-btn').addEventListener('click', function () {
                     if (autofill) { autofill.abort(); autofill = null; }
                     clearAlert();
@@ -736,7 +740,17 @@
                         startAutofill();
                     });
                 });
-                startAutofill();
+                // Offered only when the server allows them (PK-9)
+                fetch('/api/auth/passkey', {
+                    method: 'POST',
+                    credentials: 'omit',
+                    cache: 'no-store',
+                    headers: { 'Accept': 'application/json' }
+                }).then(function (res) {
+                    if (res.status !== 200) return;
+                    show($('passkey-btn'));
+                    startAutofill();
+                }, function () {});
             }
 
             // Digit-only filter on OTP and auto-submit on 6 digits.

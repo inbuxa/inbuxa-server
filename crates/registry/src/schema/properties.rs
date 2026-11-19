@@ -998,6 +998,10 @@ pub enum Property {
     LogoUrlDark = 942,
     // inbuxa: #401, links in QR codes
     ScanQrCodes = 943,
+    // inbuxa: passkeys spec, the settings
+    PasskeysAllowed = 944,
+    PasskeyRpId = 945,
+    MaxPasskeys = 946,
     RequireClientRegistration = 615,
     RequireScopes = 608,
     RequireTls = 525,

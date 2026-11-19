@@ -870,6 +870,9 @@ impl EnumImpl for Property {
             b"logoUrl" => Property::LogoUrl,
             b"logoDark" => Property::LogoDark,
             b"logoUrlDark" => Property::LogoUrlDark,
+            b"passkeysAllowed" => Property::PasskeysAllowed,
+            b"passkeyRpId" => Property::PasskeyRpId,
+            b"maxPasskeys" => Property::MaxPasskeys,
             b"loiterBanPeriod" => Property::LoiterBanPeriod,
             b"loiterBanRate" => Property::LoiterBanRate,
             b"lossy" => Property::Lossy,
@@ -1819,6 +1822,9 @@ impl EnumImpl for Property {
             Property::LogoUrl => "logoUrl",
             Property::LogoDark => "logoDark",
             Property::LogoUrlDark => "logoUrlDark",
+            Property::PasskeysAllowed => "passkeysAllowed",
+            Property::PasskeyRpId => "passkeyRpId",
+            Property::MaxPasskeys => "maxPasskeys",
             Property::LoiterBanPeriod => "loiterBanPeriod",
             Property::LoiterBanRate => "loiterBanRate",
             Property::Lossy => "lossy",
@@ -3048,6 +3054,9 @@ impl EnumImpl for Property {
             941 => Some(Property::LogoDark),
             942 => Some(Property::LogoUrlDark),
             943 => Some(Property::ScanQrCodes),
+            944 => Some(Property::PasskeysAllowed),
+            945 => Some(Property::PasskeyRpId),
+            946 => Some(Property::MaxPasskeys),
             615 => Some(Property::RequireClientRegistration),
             608 => Some(Property::RequireScopes),
             525 => Some(Property::RequireTls),
@@ -3259,7 +3268,7 @@ impl EnumImpl for Property {
         }
     }
 
-    const COUNT: usize = 944;
+    const COUNT: usize = 947;
 }
 
 impl serde::Serialize for Property {

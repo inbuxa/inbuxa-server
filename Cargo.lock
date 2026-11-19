@@ -4596,6 +4596,7 @@ dependencies = [
  "mail-parser",
  "nlp",
  "p256 0.13.2",
+ "psl",
  "rand 0.10.3",
  "registry",
  "reqwest 0.13.5",

@@ -36,7 +36,8 @@ use directory::Credentials;
 use http_proto::{HttpResponse, HttpSessionData, JsonResponse, ToHttpResponse};
 use inbuxa_features::audit::Via;
 use inbuxa_features::passkey::{self, Activated, HANDLE_LEN, Passkey};
-use registry::schema::enums::Permission;
+use jmap::inbuxa::passkey::{allowed_for, settings};
+use registry::schema::{enums::Permission, structs::Authentication};
 use serde::{Deserialize, Serialize};
 use store::{
     dispatch::lookup::KeyValue,
@@ -122,10 +123,14 @@ struct Ceremony {
     state: PasskeyRegistration,
 }
 
-/// The WebAuthn relying party for this server (PK-3): the host of its public
-/// HTTPS URL, which is also the only origin it accepts.
-pub fn relying_party(server: &Server) -> trc::Result<(Webauthn, String)> {
-    let rp_id = jmap::inbuxa::passkey::current_rp_id(server);
+/// The WebAuthn relying party for this server (PK-3): `passkeyRpId` or the
+/// host of its public HTTPS URL. That URL is the only origin it accepts
+/// (PK-2).
+pub fn relying_party(
+    server: &Server,
+    settings: &Authentication,
+) -> trc::Result<(Webauthn, String)> {
+    let rp_id = jmap::inbuxa::passkey::current_rp_id(server, settings);
     let origin = Url::parse(&server.core.network.http.url_https).map_err(|err| {
         trc::AuthEvent::Error
             .into_err()
@@ -137,10 +142,16 @@ pub fn relying_party(server: &Server) -> trc::Result<(Webauthn, String)> {
         .map_err(|err| {
             trc::AuthEvent::Error
                 .into_err()
-                .details("Passkeys need the server's public URL to name a host.")
+                .details("Passkeys need the server's public URL to name a host within the relying-party id.")
                 .reason(err)
         })?;
     Ok((webauthn, rp_id))
+}
+
+fn turned_off() -> RegisterResponse {
+    RegisterResponse::Refused {
+        reason: "Passkeys are turned off for this account.".to_string(),
+    }
 }
 
 fn ceremony_key(ticket: &str) -> Vec<u8> {
@@ -173,7 +184,12 @@ struct ChallengeResponse {
 /// options name no credentials: the browser offers the passkeys it holds for
 /// this relying party.
 pub async fn challenge(server: &Server) -> trc::Result<HttpResponse> {
-    let (webauthn, rp_id) = relying_party(server)?;
+    // PK-9: offered when they're allowed server-wide
+    let settings = settings(server).await?;
+    if !settings.passkeys_allowed {
+        return Err(trc::ResourceEvent::NotFound.into_err());
+    }
+    let (webauthn, rp_id) = relying_party(server, &settings)?;
     let (options, state) = webauthn
         .start_discoverable_authentication()
         .map_err(|err| {
@@ -261,7 +277,10 @@ pub async fn sign_in(
                     .into_err()
                     .ctx(trc::Key::RemoteIp, session.remote_ip))
             } else {
-                Err(err.ctx(trc::Key::RemoteIp, session.remote_ip))
+                // PK-18: auth.failed, told apart from a password by its type
+                Err(err
+                    .ctx(trc::Key::RemoteIp, session.remote_ip)
+                    .ctx(trc::Key::Type, "passkey"))
             }
         }
     }
@@ -291,7 +310,8 @@ async fn check_assertion(
             .details("Invalid passkey sign-in")
             .reason(err)
     })?;
-    let (webauthn, rp_id) = relying_party(server)?;
+    let settings = settings(server).await?;
+    let (webauthn, rp_id) = relying_party(server, &settings)?;
     if rp_id != ceremony.rp_id {
         return Err(refused("The relying-party id changed during sign-in"));
     }
@@ -311,6 +331,11 @@ async fn check_assertion(
         != Some(record.account_id)
     {
         return Err(refused("The passkey belongs to another account")
+            .ctx(trc::Key::AccountId, record.account_id));
+    }
+    // PK-12, PK-13: switched off for the account, or its directory signs it in
+    if !allowed_for(server, &settings, record.account_id).await? {
+        return Err(refused("Passkeys are turned off for this account")
             .ctx(trc::Key::AccountId, record.account_id));
     }
     // PK-4: a passkey works only for the relying-party id it was made for
@@ -336,12 +361,13 @@ async fn check_assertion(
     ) {
         Ok(result) => result,
         Err(WebauthnError::CredentialPossibleCompromise) => {
+            // PK-18
             trc::event!(
-                Auth(trc::AuthEvent::Failed),
+                Auth(trc::AuthEvent::PasskeyCounter),
                 AccountId = record.account_id,
                 Id = passkey::passkey_id(record.account_id, record.number),
                 SpanId = session.session_id,
-                Details = "Passkey counter went backwards: the passkey may be cloned",
+                Details = "The passkey may have been copied",
             );
             return Err(refused("Passkey counter went backwards")
                 .ctx(trc::Key::AccountId, record.account_id));
@@ -416,6 +442,11 @@ async fn start(
     let Some(pending) = passkey::by_ticket(server.store(), ticket, now()).await? else {
         return Ok(RegisterResponse::Expired);
     };
+    // PK-12, PK-13
+    let settings = settings(server).await?;
+    if !allowed_for(server, &settings, pending.account_id).await? {
+        return Ok(turned_off());
+    }
     let account = server
         .account(pending.account_id)
         .await
@@ -463,7 +494,7 @@ async fn start(
         return Ok(RegisterResponse::Failure);
     }
 
-    let (webauthn, rp_id) = relying_party(server)?;
+    let (webauthn, rp_id) = relying_party(server, &settings)?;
     let fresh = rng().random::<[u8; HANDLE_LEN]>();
     let handle = passkey::ensure_user_handle(server.store(), pending.account_id, fresh).await?;
     let user_id = Uuid::from_slice(&handle).map_err(|err| {
@@ -563,7 +594,11 @@ async fn finish(
         return Ok(RegisterResponse::Expired);
     };
 
-    let (webauthn, rp_id) = relying_party(server)?;
+    let settings = settings(server).await?;
+    if !allowed_for(server, &settings, pending.account_id).await? {
+        return Ok(turned_off());
+    }
+    let (webauthn, rp_id) = relying_party(server, &settings)?;
     if rp_id != ceremony.rp_id {
         return Ok(RegisterResponse::Expired);
     }
