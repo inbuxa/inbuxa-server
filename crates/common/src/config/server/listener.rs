@@ -48,7 +48,24 @@ impl Listeners {
         // Parse servers
         if !bp.registry.is_recovery_mode() {
             let system = bp.setting_infallible::<SystemSettings>().await;
+            // inbuxa: K-C6: PROXY copies of mail listeners, from the environment
+            let proxy = match crate::manager::listener_ports::proxy_listeners(
+                types::branding::env_var("MAIL_PROXY_LISTENERS")
+                    .ok()
+                    .as_deref(),
+                types::branding::env_var("MAIL_PROXY_TRUSTED_NETWORKS")
+                    .ok()
+                    .as_deref(),
+            ) {
+                Ok(proxy) => proxy,
+                Err(err) => {
+                    bp.build_error(ObjectType::NetworkListener.singleton(), err);
+                    None
+                }
+            };
+            let mut names = Vec::new();
             for listener in bp.list_infallible::<NetworkListener>().await {
+                names.push(listener.object.name.clone());
                 if bp.role.as_ref().is_none_or(|r| match &r.listeners {
                     ClusterListenerGroup::EnableAll => true,
                     ClusterListenerGroup::DisableAll => false,
@@ -59,7 +76,39 @@ impl Listeners {
                         !group.listener_ids.iter().any(|id| *id == listener.id.id())
                     }
                 }) {
+                    let copy = proxy.as_ref().and_then(|proxy| {
+                        let (name, port) = proxy
+                            .ports
+                            .iter()
+                            .find(|(name, _)| *name == listener.object.name)?;
+                        let mut object = listener.object.clone();
+                        object.name = format!("{name}-proxy");
+                        object.bind =
+                            Map::new(vec![SocketAddr::from_str(&format!("[::]:{port}")).unwrap()]);
+                        object.override_proxy_trusted_networks = Map::new(proxy.trusted.clone());
+                        Some(RegistryObject {
+                            id: listener.id,
+                            object,
+                            revision: listener.revision,
+                        })
+                    });
                     servers.parse_server(bp, listener, &system);
+                    if let Some(copy) = copy {
+                        servers.parse_server(bp, copy, &system);
+                    }
+                }
+            }
+            if let Some(proxy) = &proxy {
+                for (name, _) in &proxy.ports {
+                    if !names.iter().any(|n| n == name) {
+                        bp.build_warning(
+                            ObjectType::NetworkListener.singleton(),
+                            format!(
+                                "INBUXA_MAIL_PROXY_LISTENERS names '{name}', but this server \
+                                 has no listener of that name to copy"
+                            ),
+                        );
+                    }
                 }
             }
         } else {
