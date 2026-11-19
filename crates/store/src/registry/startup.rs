@@ -4,23 +4,24 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-//! inbuxa: K-S6: why the data store couldn't be opened at start-up.
+//! inbuxa: K-S6, K-C5: why a part of the data layer couldn't be used.
 //!
-//! Each case has its own exit code (from sysexits.h) and its own first words
-//! on the error line, so a supervisor, a Kubernetes pre-flight check or a
-//! person reading `kubectl describe` can tell them apart without parsing a
-//! database driver's message:
+//! Each case has its own exit code (from sysexits.h) and its own words on the
+//! error line, after the part's name, so a supervisor, a Kubernetes pre-flight
+//! check or a person reading `kubectl describe` can tell them apart without
+//! parsing a driver's message:
 //!
-//! | exit | line starts                                | meaning                                   |
-//! |------|--------------------------------------------|-------------------------------------------|
-//! | 78   | `data store: bad configuration`            | the settings file, a secret file it names, or the database name |
-//! | 69   | `data store: unreachable`                  | no answer: refused, unknown host, timed out, or the server is starting or full |
-//! | 77   | `data store: credentials refused`          | wrong user or password, or the role lacks a permission it needs |
-//! | 76   | `data store: TLS failed`                   | the TLS handshake failed: an unknown CA, or TLS the server doesn't offer |
-//! | 1    | `data store: error`                        | anything else                             |
+//! | exit | line starts                     | meaning                                   |
+//! |------|---------------------------------|-------------------------------------------|
+//! | 78   | `<part>: bad configuration`     | the settings, a secret file they name, the database or bucket name |
+//! | 69   | `<part>: unreachable`           | no answer: refused, unknown host, timed out, or the server is starting or full |
+//! | 77   | `<part>: credentials refused`   | wrong user, password or key, or a permission it needs is missing |
+//! | 76   | `<part>: TLS failed`            | the TLS handshake failed: an unknown CA, or TLS the server doesn't offer |
+//! | 1    | `<part>: error`                 | anything else                             |
 //!
-//! PostgreSQL errors are told apart fully. Other stores report bad
-//! configuration (78) and otherwise 1.
+//! The part is `data store` (at every start, and `--check`), `blob store` or
+//! `coordinator` (`--check` only). PostgreSQL, S3 and NATS errors are told
+//! apart; other stores report bad configuration and otherwise 1.
 
 use std::fmt;
 
@@ -31,6 +32,32 @@ pub enum StartupFailure {
     Credentials,
     Tls,
     Other,
+}
+
+/// Which part of the data layer failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Part {
+    DataStore,
+    BlobStore,
+    Coordinator,
+}
+
+impl Part {
+    pub fn name(self) -> &'static str {
+        match self {
+            Part::DataStore => "data store",
+            Part::BlobStore => "blob store",
+            Part::Coordinator => "coordinator",
+        }
+    }
+
+    fn what(self) -> &'static str {
+        match self {
+            Part::DataStore => "the database",
+            Part::BlobStore => "the blob store",
+            Part::Coordinator => "NATS",
+        }
+    }
 }
 
 impl StartupFailure {
@@ -44,41 +71,66 @@ impl StartupFailure {
         }
     }
 
+    /// The case, in the words that follow the part's name.
     pub fn label(self) -> &'static str {
         match self {
-            StartupFailure::Config => "data store: bad configuration",
-            StartupFailure::Unreachable => "data store: unreachable",
-            StartupFailure::Credentials => "data store: credentials refused",
-            StartupFailure::Tls => "data store: TLS failed",
-            StartupFailure::Other => "data store: error",
+            StartupFailure::Config => "bad configuration",
+            StartupFailure::Unreachable => "unreachable",
+            StartupFailure::Credentials => "credentials refused",
+            StartupFailure::Tls => "TLS failed",
+            StartupFailure::Other => "error",
         }
     }
 
     /// What to check, in a sentence.
-    pub fn hint(self) -> &'static str {
-        match self {
-            StartupFailure::Config => {
+    pub fn hint(self, part: Part) -> String {
+        let what = part.what();
+        match (self, part) {
+            (StartupFailure::Config, Part::DataStore) => {
                 "Check the data store settings file, the secret files it names and the database name."
+                    .into()
             }
-            StartupFailure::Unreachable => {
-                "Check that the database is running and that its host and port are reachable from here."
+            (StartupFailure::Config, Part::BlobStore) => {
+                "Check the blob store settings: the bucket, its region and endpoint, and the secret files they name."
+                    .into()
             }
-            StartupFailure::Credentials => {
-                "Check the user name and password, and that the user may use the database."
+            (StartupFailure::Config, Part::Coordinator) => {
+                "Check the coordinator settings and the secret files they name.".into()
             }
-            StartupFailure::Tls => {
-                "Check that the database offers TLS and that its certificate is trusted here."
+            (StartupFailure::Unreachable, _) => format!(
+                "Check that {what} is running and that its host and port are reachable from here."
+            ),
+            (StartupFailure::Credentials, Part::BlobStore) => {
+                "Check the access key and secret, and that they may write and delete in the bucket."
+                    .into()
             }
-            StartupFailure::Other => "",
+            (StartupFailure::Credentials, Part::DataStore) => {
+                "Check the user name and password, and that the user may use the database.".into()
+            }
+            (StartupFailure::Credentials, Part::Coordinator) => {
+                "Check the user name and password, or the token.".into()
+            }
+            (StartupFailure::Tls, _) => {
+                format!("Check that {what} offers TLS and that its certificate is trusted here.")
+            }
+            (StartupFailure::Other, _) => String::new(),
         }
     }
 
-    /// What a data store error at start-up means.
+    /// What a data store error means.
     pub fn of(err: &trc::Error) -> Self {
+        let code = err.value_as_str(trc::Key::Code);
+        let reason = err.value_as_str(trc::Key::Reason).unwrap_or_default();
         if err.matches(trc::EventType::Store(trc::StoreEvent::PostgresqlError)) {
-            Self::of_postgres(
-                err.value_as_str(trc::Key::Code),
-                err.value_as_str(trc::Key::Reason).unwrap_or_default(),
+            Self::of_postgres(code, reason)
+        } else if err.matches(trc::EventType::Store(trc::StoreEvent::S3Error)) {
+            Self::of_s3(
+                err.value(trc::Key::Code).and_then(|v| match v {
+                    trc::Value::UInt(n) => Some(*n),
+                    trc::Value::Int(n) => u64::try_from(*n).ok(),
+                    _ => None,
+                }),
+                reason,
             )
         } else {
             StartupFailure::Other
@@ -106,27 +158,76 @@ impl StartupFailure {
             None => StartupFailure::Other,
         }
     }
+
+    /// `status` is the HTTP status when the service answered; otherwise
+    /// `reason` is the HTTP client's chain of errors.
+    fn of_s3(status: Option<u64>, reason: &str) -> Self {
+        match status {
+            // A key the service doesn't know, a bad signature, or a policy
+            // that refuses the operation
+            Some(401 | 403) => StartupFailure::Credentials,
+            // No such bucket, or a bucket in another region or endpoint
+            Some(301 | 307 | 400 | 404) => StartupFailure::Config,
+            Some(429 | 500..=599) => StartupFailure::Unreachable,
+            Some(_) => StartupFailure::Other,
+            None => {
+                let reason = reason.to_ascii_lowercase();
+                if ["certificate", "tls", "ssl", "handshake"]
+                    .iter()
+                    .any(|w| reason.contains(w))
+                {
+                    StartupFailure::Tls
+                } else if [
+                    "connect",
+                    "dns error",
+                    "failed to lookup",
+                    "timed out",
+                    "connection refused",
+                    "connection reset",
+                ]
+                .iter()
+                .any(|w| reason.contains(w))
+                {
+                    StartupFailure::Unreachable
+                } else {
+                    StartupFailure::Other
+                }
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
 pub struct StartupError {
+    pub part: Part,
     pub kind: StartupFailure,
     pub message: String,
 }
 
 impl StartupError {
+    /// A data store failure.
     pub fn new(kind: StartupFailure, message: impl Into<String>) -> Self {
+        Self::of_part(Part::DataStore, kind, message)
+    }
+
+    pub fn of_part(part: Part, kind: StartupFailure, message: impl Into<String>) -> Self {
         StartupError {
+            part,
             kind,
             message: message.into(),
         }
+    }
+
+    /// "data store: unreachable"
+    pub fn headline(&self) -> String {
+        format!("{}: {}", self.part.name(), self.kind.label())
     }
 }
 
 impl fmt::Display for StartupError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}: {}", self.kind.label(), self.message)?;
-        let hint = self.kind.hint();
+        write!(f, "{}: {}", self.headline(), self.message)?;
+        let hint = self.kind.hint(self.part);
         if !hint.is_empty() {
             write!(f, "\n  {hint}")?;
         }
@@ -136,7 +237,10 @@ impl fmt::Display for StartupError {
 
 #[cfg(test)]
 mod tests {
-    use super::StartupFailure::{self, *};
+    use super::{
+        Part,
+        StartupFailure::{self, *},
+    };
 
     #[test]
     fn postgres_cases() {
@@ -208,14 +312,47 @@ mod tests {
     }
 
     #[test]
-    fn codes_are_distinct() {
+    fn s3_cases() {
+        let cases: &[(Option<u64>, &str, StartupFailure)] = &[
+            (Some(403), "<Code>InvalidAccessKeyId</Code>", Credentials),
+            (Some(403), "<Code>SignatureDoesNotMatch</Code>", Credentials),
+            (Some(404), "<Code>NoSuchBucket</Code>", Config),
+            (Some(301), "<Code>PermanentRedirect</Code>", Config),
+            (Some(503), "<Code>SlowDown</Code>", Unreachable),
+            (
+                None,
+                "error sending request: client error (Connect): tcp connect error: Connection refused (os error 111)",
+                Unreachable,
+            ),
+            (
+                None,
+                "error sending request: client error (Connect): dns error: failed to lookup address information",
+                Unreachable,
+            ),
+            (
+                None,
+                "error sending request: client error (Connect): invalid peer certificate: UnknownIssuer",
+                Tls,
+            ),
+            (Some(418), "", Other),
+        ];
+        for (status, reason, want) in cases {
+            assert_eq!(StartupFailure::of_s3(*status, reason), *want, "{reason}");
+        }
+    }
+
+    #[test]
+    fn codes_and_words_are_distinct() {
         let all = [Config, Unreachable, Credentials, Tls, Other];
         for a in all {
             for b in all {
                 if a != b {
                     assert_ne!(a.exit_code(), b.exit_code());
-                    assert!(!a.label().starts_with(b.label()), "{}", a.label());
+                    assert_ne!(a.label(), b.label());
                 }
+            }
+            for part in [Part::DataStore, Part::BlobStore, Part::Coordinator] {
+                assert_eq!(a.hint(part).is_empty(), a == Other);
             }
         }
     }

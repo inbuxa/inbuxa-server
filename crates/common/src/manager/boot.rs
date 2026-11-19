@@ -67,6 +67,7 @@ Options:
   -u, --upgrade-store              Upgrade the store's layout, then exit
       --seed <PATH>                Set up a new store from a file, then exit
       --upgrade-plan               Print what --upgrade-store would do, then exit
+      --check                      Check the data, blob store and coordinator, then exit
   -h, --help                       Print help
   -V, --version                    Print version
 
@@ -94,6 +95,14 @@ of JSON, the layout steps --upgrade-store would run, and exits: 0 when there
 are none, 3 when there are and every one can run with older nodes still up,
 4 when one needs every other node stopped first, 2 when a newer release has
 changed the store, 1 when it can't tell (the message says why).
+
+--check opens the data store, then tests the blob store (writing, reading
+and deleting one small object) and the coordinator (connecting to NATS), and
+prints a line for each. It starts nothing. It exits 0 when all three can be
+used; otherwise the failing part and why are on its last lines, and the exit
+code says which kind of failure: 78 bad configuration, 69 unreachable,
+77 credentials refused, 76 TLS failed, 1 anything else. A server start that
+can't open the data store exits the same way.
 "#
 );
 
@@ -108,6 +117,8 @@ enum StoreOp {
     Seed(PathBuf),
     // inbuxa: K-C9
     UpgradePlan,
+    // inbuxa: K-C5
+    Check,
     None,
 }
 
@@ -174,6 +185,9 @@ impl BootManager {
                 ("upgrade-plan", None) => {
                     import_export = StoreOp::UpgradePlan;
                 }
+                ("check", None) => {
+                    import_export = StoreOp::Check;
+                }
                 ("seed", Some(value)) => {
                     import_export = StoreOp::Seed(value.into());
                 }
@@ -194,6 +208,11 @@ impl BootManager {
             }
             // A job that asked for a store operation must not pass without one
             failed("Missing '--config' argument (or CONFIG_PATH) for this command.");
+        }
+
+        // inbuxa: K-C5: a check runs on its own and exits
+        if import_export == StoreOp::Check {
+            super::check::run(PathBuf::from(config_path.unwrap())).await;
         }
 
         // Initialize registry
@@ -386,6 +405,8 @@ impl BootManager {
                 core.queue_reindex(&imported).await;
                 std::process::exit(0);
             }
+            // inbuxa: K-C5: ran and exited before the registry
+            StoreOp::Check => unreachable!(),
             StoreOp::Console => {
                 // Store console
                 store_console(
@@ -432,7 +453,7 @@ pub fn build_ipc(has_pubsub: bool) -> (Ipc, IpcReceivers) {
 fn startup_failed(err: store::registry::startup::StartupError) -> ! {
     trc::event!(
         Server(trc::ServerEvent::StartupError),
-        Details = err.kind.label(),
+        Details = err.headline(),
         Reason = err.message.clone()
     );
 

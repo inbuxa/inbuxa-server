@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::Coordinator;
@@ -63,6 +65,22 @@ impl Coordinator {
                 bp.build_error(ObjectType::Coordinator.singleton(), err);
                 None
             }
+        }
+    }
+
+    /// inbuxa: K-C5: whether the coordinator a setting names answers, for
+    /// `--check`. `Ok(None)` when there's none, or it's of a kind not
+    /// checked here.
+    pub async fn probe(
+        config: structs::Coordinator,
+    ) -> Result<Option<String>, (store::registry::startup::StartupFailure, String)> {
+        match config {
+            structs::Coordinator::Disabled => Ok(None),
+            #[cfg(feature = "nats")]
+            structs::Coordinator::Nats(nats) => crate::backend::nats::NatsPubSub::probe(nats)
+                .await
+                .map(Some),
+            _ => Ok(None),
         }
     }
 
