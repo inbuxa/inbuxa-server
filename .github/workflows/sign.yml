@@ -1,0 +1,254 @@
+# Signs a release's images, and attaches what they're made of and how they
+# were built, so anyone can check an image came from this repository's
+# workflow before running it (K-S7).
+#
+# Keyless: cosign signs with a short-lived certificate for this workflow's
+# GitHub identity, and the signature is recorded in Sigstore's public log.
+# There is no key to keep. A signature names the workflow that made it, so
+# it checks against this repository, not against a key:
+#
+#   cosign verify <image>@<digest> \
+#     --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+#     --certificate-identity-regexp \
+#       '^https://github.com/inbuxa/inbuxa-server/\.github/workflows/sign\.yml@refs/(tags/v.+|heads/main)$'
+#
+#   gh attestation verify oci://<image>@<digest> --owner inbuxa
+#
+# What it does, for the server image and the inbuxa Relay image:
+#   * signs the multi-arch index by digest, in the registry the images are
+#     published to (vars.REGISTRY) and in the GHCR copy;
+#   * writes an SPDX SBOM for each architecture (syft) and attests it
+#     against that architecture's image, in GitHub's attestation store;
+#   * when called by ci.yml from the release's own run, attests the build
+#     (SLSA provenance) against the index: that run built it. A signing run
+#     started by hand built nothing, so it attests no build;
+#   * attaches the SBOMs to the release on Gitea.
+#
+# Two ways in:
+#   * workflow_call, from ci.yml on a v* tag, once the images, their index
+#     and the release exist.
+#   * workflow_dispatch, from main, with an existing release's tag: signs a
+#     version that was published before this workflow existed, or whose
+#     signing failed. Signing again is harmless: an image can carry more than
+#     one signature.
+#
+# The attestations are kept by GitHub, keyed by digest, rather than pushed to
+# the registry, so nothing here depends on what the registry stores beside an
+# image. The signatures go to the registry with the image, where cosign looks.
+#
+# cosign and syft are downloaded at pinned versions and checked against
+# pinned SHA-256 sums; actions are pinned to full commit SHAs. Only GitHub's
+# own actions and the docker/* ones are used, as in ci.yml.
+name: sign
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: The release's tag (v27.1-rc.34)
+        required: true
+        type: string
+      built-here:
+        description: The calling run built these images, so it attests the build
+        required: true
+        type: boolean
+      ghcr:
+        description: The GHCR copy exists and is signed too
+        required: true
+        type: boolean
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: An existing release's tag (v27.1-rc.33)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  COSIGN_VERSION: v3.1.4
+  COSIGN_SHA256: 424e2c97d0b45fd7a6b608a87f090f35633f4c23ece5f092d48bba11aaf4bbfa
+  SYFT_VERSION: 1.55.0
+  SYFT_SHA256: bb65249542db5fedeeb4d3f9b018b75e7264dbfbbb10486f044581a92f90490d
+
+jobs:
+  sign:
+    if: ${{ vars.BUILD_ON == 'github' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # The certificate's identity, from GitHub's OIDC token
+      id-token: write
+      # GitHub's attestation store
+      attestations: write
+      # The signature on the GHCR copy
+      packages: write
+    env:
+      TAG: ${{ inputs.tag }}
+      GITEA_URL: ${{ vars.GITEA_URL }}
+      REGISTRY: ${{ vars.REGISTRY }}
+      GHCR: ${{ github.event_name == 'workflow_dispatch' || inputs.ghcr }}
+    steps:
+      - id: v
+        run: |
+          set -euo pipefail
+          # v27.1-rc.34 -> 27.1-rc.34, the image tag. Only a release's tag.
+          [[ "$TAG" =~ ^v[0-9]{2,4}\.[0-9]+(\.[0-9]+){0,2}(-rc\.[0-9]+)?$ ]] || { echo "not a release tag: $TAG" >&2; exit 1; }
+          version="${TAG#v}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          echo "server=$REGISTRY/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+          echo "relay=$REGISTRY/$owner/inbuxa-relay" >> "$GITHUB_OUTPUT"
+          echo "server_ghcr=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+          echo "relay_ghcr=ghcr.io/$owner/inbuxa-relay" >> "$GITHUB_OUTPUT"
+      - name: cosign and syft, checked against their pinned sums
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/bin"; cd "$RUNNER_TEMP"
+          curl -fsSL -o cosign "https://github.com/sigstore/cosign/releases/download/$COSIGN_VERSION/cosign-linux-amd64"
+          echo "$COSIGN_SHA256  cosign" | sha256sum -c -
+          install -m 0755 cosign bin/cosign
+          curl -fsSL -o syft.tar.gz "https://github.com/anchore/syft/releases/download/v$SYFT_VERSION/syft_${SYFT_VERSION}_linux_amd64.tar.gz"
+          echo "$SYFT_SHA256  syft.tar.gz" | sha256sum -c -
+          tar -xzf syft.tar.gz syft && install -m 0755 syft bin/syft
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - run: |
+          cosign version | grep -i gitversion
+          syft version | grep -i '^version'
+      - uses: docker/setup-buildx-action@594f3bf4285d9ea8dc53c9a0c9c4092420091003 # v4.4.0
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ${{ vars.REGISTRY }}
+          username: jcoffey-dev
+          password: ${{ secrets.GITEA_TOKEN }}
+      - if: ${{ env.GHCR == 'true' }}
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      # Digests, read once: everything below is by digest, never by tag,
+      # so a tag moving mid-run can't change what is signed.
+      - id: d
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+          SERVER: ${{ steps.v.outputs.server }}
+          RELAY: ${{ steps.v.outputs.relay }}
+        run: |
+          set -euo pipefail
+          digest() { docker buildx imagetools inspect "$1" --format '{{json .Manifest.Digest}}' | tr -d '"'; }
+          arch() { docker buildx imagetools inspect "$1" --raw |
+                   jq -r --arg a "$2" '.manifests[] | select(.platform.os == "linux" and .platform.architecture == $a) | .digest'; }
+          s="$(digest "$SERVER:$VERSION")"
+          echo "server=$s" >> "$GITHUB_OUTPUT"
+          echo "server_amd64=$(arch "$SERVER@$s" amd64)" >> "$GITHUB_OUTPUT"
+          echo "server_arm64=$(arch "$SERVER@$s" arm64)" >> "$GITHUB_OUTPUT"
+          # A version from before inbuxa Relay has no relay image
+          if r="$(digest "$RELAY:$VERSION" 2>/dev/null)" && [ -n "$r" ]; then
+            echo "relay=$r" >> "$GITHUB_OUTPUT"
+            echo "relay_amd64=$(arch "$RELAY@$r" amd64)" >> "$GITHUB_OUTPUT"
+            echo "relay_arm64=$(arch "$RELAY@$r" arm64)" >> "$GITHUB_OUTPUT"
+          fi
+          cat "$GITHUB_OUTPUT"
+
+      - name: sign the indexes
+        env:
+          SERVER: ${{ steps.v.outputs.server }}@${{ steps.d.outputs.server }}
+          SERVER_GHCR: ${{ steps.v.outputs.server_ghcr }}@${{ steps.d.outputs.server }}
+          RELAY: ${{ steps.d.outputs.relay && format('{0}@{1}', steps.v.outputs.relay, steps.d.outputs.relay) || '' }}
+          RELAY_GHCR: ${{ steps.d.outputs.relay && format('{0}@{1}', steps.v.outputs.relay_ghcr, steps.d.outputs.relay) || '' }}
+        run: |
+          set -euo pipefail
+          sign() { echo "signing $1"; cosign sign --yes "$1"; }
+          sign "$SERVER"
+          [ -z "$RELAY" ] || sign "$RELAY"
+          if [ "$GHCR" = true ]; then
+            # The GHCR copy is the same digest; a version GHCR never got is
+            # skipped, not failed
+            for ref in "$SERVER_GHCR" ${RELAY_GHCR:+"$RELAY_GHCR"}; do
+              if docker buildx imagetools inspect "$ref" >/dev/null 2>&1; then sign "$ref"
+              else echo "::warning::$ref isn't on GHCR; not signed there"; fi
+            done
+          fi
+          # Check at once, as a user would
+          for ref in "$SERVER" ${RELAY:+"$RELAY"}; do
+            cosign verify "$ref" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              --certificate-identity-regexp "^https://github.com/$GITHUB_REPOSITORY/\.github/workflows/sign\.yml@refs/(tags/v.+|heads/main)$" \
+              >/dev/null
+            echo "verified $ref"
+          done
+
+      - name: SBOMs, one per architecture
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+          SERVER: ${{ steps.v.outputs.server }}
+          RELAY: ${{ steps.v.outputs.relay }}
+          S_AMD64: ${{ steps.d.outputs.server_amd64 }}
+          S_ARM64: ${{ steps.d.outputs.server_arm64 }}
+          R_AMD64: ${{ steps.d.outputs.relay_amd64 }}
+          R_ARM64: ${{ steps.d.outputs.relay_arm64 }}
+        run: |
+          set -euo pipefail
+          mkdir -p sbom
+          sbom() { syft "registry:$1" --quiet -o "spdx-json=sbom/$2"; echo "sbom/$2: $(jq '.packages | length' "sbom/$2") packages"; }
+          sbom "$SERVER@$S_AMD64" "inbuxa-$VERSION-linux-amd64.spdx.json"
+          sbom "$SERVER@$S_ARM64" "inbuxa-$VERSION-linux-arm64.spdx.json"
+          if [ -n "$R_AMD64" ]; then
+            sbom "$RELAY@$R_AMD64" "inbuxa-relay-$VERSION-linux-amd64.spdx.json"
+            sbom "$RELAY@$R_ARM64" "inbuxa-relay-$VERSION-linux-arm64.spdx.json"
+          fi
+      - uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
+        with:
+          subject-name: ${{ steps.v.outputs.server }}
+          subject-digest: ${{ steps.d.outputs.server_amd64 }}
+          sbom-path: sbom/inbuxa-${{ steps.v.outputs.version }}-linux-amd64.spdx.json
+      - uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
+        with:
+          subject-name: ${{ steps.v.outputs.server }}
+          subject-digest: ${{ steps.d.outputs.server_arm64 }}
+          sbom-path: sbom/inbuxa-${{ steps.v.outputs.version }}-linux-arm64.spdx.json
+      - if: ${{ steps.d.outputs.relay }}
+        uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
+        with:
+          subject-name: ${{ steps.v.outputs.relay }}
+          subject-digest: ${{ steps.d.outputs.relay_amd64 }}
+          sbom-path: sbom/inbuxa-relay-${{ steps.v.outputs.version }}-linux-amd64.spdx.json
+      - if: ${{ steps.d.outputs.relay }}
+        uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
+        with:
+          subject-name: ${{ steps.v.outputs.relay }}
+          subject-digest: ${{ steps.d.outputs.relay_arm64 }}
+          sbom-path: sbom/inbuxa-relay-${{ steps.v.outputs.version }}-linux-arm64.spdx.json
+
+      # How it was built: only from the run that built it
+      - if: ${{ inputs.built-here == true }}
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ steps.v.outputs.server }}
+          subject-digest: ${{ steps.d.outputs.server }}
+      - if: ${{ inputs.built-here == true && steps.d.outputs.relay }}
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ steps.v.outputs.relay }}
+          subject-digest: ${{ steps.d.outputs.relay }}
+
+      - name: attach the SBOMs to the release on Gitea
+        env:
+          GITEA_TOKEN: ${{ secrets.GITEA_TOKEN }}
+        run: |
+          set -euo pipefail
+          api="$GITEA_URL/api/v1/repos/$GITHUB_REPOSITORY"
+          rel="$(curl -fsS -H "Authorization: token $GITEA_TOKEN" "$api/releases/tags/$TAG")"
+          id="$(jq -r .id <<<"$rel")"
+          for f in sbom/*.spdx.json; do
+            name="$(basename "$f")"
+            if jq -e --arg n "$name" '.assets[]? | select(.name == $n)' <<<"$rel" >/dev/null; then
+              echo "$name is already on the release"; continue
+            fi
+            curl -fsS -o /dev/null -H "Authorization: token $GITEA_TOKEN" \
+              -F "attachment=@$f;type=application/json" "$api/releases/$id/assets?name=$name"
+            echo "attached $name"
+          done
