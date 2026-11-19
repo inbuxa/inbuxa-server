@@ -404,6 +404,8 @@ Not a rebuild: **the store layout, changed in steps** is INBUXA's own design (`f
 
 Not a rebuild: **inbuxa-relay** is INBUXA's own design (`features/relay.md`, settled 2026-10-29, in progress). It's a small edge appliance that takes mail in on port 25 for one downstream server or cluster, and sends that downstream's outgoing mail on. The downstream dials out to it over JMAP (`urn:inbuxa:jmap:relay`), so the protected network exposes no mail port, and it is administered only from the downstream's inbuxa-admin.
 
+Not a rebuild: **passkeys** are INBUXA's own design (`features/passkeys.md`, inbuxa-server #334, approved 2026-11-18). People sign in to the browser apps on the server's login page with a passkey instead of a password, in the OAuth code and device flows; IMAP, SMTP and the other protocols keep passwords and app passwords. Planned for the series after 27.1.
+
 ## 5. The web front ends
 
 **Which ihasmail.** Public ihasmail stays Stalwart-facing: its code, docs,
