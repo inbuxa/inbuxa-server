@@ -26,7 +26,8 @@
 #
 # Every `uses:` is pinned to a full commit SHA with the release in the
 # trailing comment. A tag is a mutable pointer; do not "simplify" a pin back
-# to one. Only GitHub's own actions and the three docker/* ones are used.
+# to one. Only GitHub's own actions and the three docker/* ones are used
+# (sign.yml adds GitHub's attest-sbom and attest-build-provenance).
 name: ci
 
 on:
@@ -619,13 +620,36 @@ jobs:
             --notes-file notes.md "$kind" "${files[@]}"
           echo "created the GitHub release for $TAG with ${#files[@]} file(s)"
 
+  # ------------------------------------------------------------- sign ------
+  # Signs the images (keyless, cosign), attaches an SBOM per architecture and
+  # attests the build: sign.yml says how and how to check. After the release
+  # exists, for the SBOMs; after the GHCR copy, so it can sign that too, but
+  # a GHCR failure only leaves the copy unsigned. Part of the report, so the
+  # tag's check on Gitea fails when signing does. (The forum announcement
+  # goes out when the release is published, before this: a failure here
+  # is fixed by running sign.yml by hand, not by a new release.)
+  sign:
+    if: ${{ !cancelled() && vars.BUILD_ON == 'github' && github.ref_type == 'tag' && needs.index.result == 'success' && needs.relay-index.result == 'success' && needs.release.result == 'success' }}
+    needs: [version, index, relay-index, release, ghcr]
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      packages: write
+    uses: ./.github/workflows/sign.yml
+    with:
+      tag: ${{ github.ref_name }}
+      built-here: true
+      ghcr: ${{ needs.ghcr.result == 'success' }}
+    secrets: inherit
+
   # ------------------------------------------------------------- report ------
   # One commit status on Gitea for the whole run: what Gitea's ci.yml and
   # publish.yml wait on. Skipped jobs (the tag jobs on a branch, and the other
   # way round) count as passing; a failed or cancelled one does not.
   report:
     if: ${{ always() && vars.BUILD_ON == 'github' }}
-    needs: [start, fork-checks, changes, build, version, publish, index, relay-publish, relay-index, release, binaries]
+    needs: [start, fork-checks, changes, build, version, publish, index, relay-publish, relay-index, release, binaries, sign]
     runs-on: ubuntu-latest
     steps:
       - env:
