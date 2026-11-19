@@ -80,6 +80,12 @@ async fn main() -> std::io::Result<()> {
         std::process::exit(Box::pin(seed_and_exit(&server, &path, init.store_was_new)).await);
     }
 
+    // inbuxa: K-C11: --store-check runs a check and exits
+    if let Some(mode) = init.store_check.clone() {
+        let server = init.inner.build_server();
+        std::process::exit(Box::pin(store_check_and_exit(&server, &mode)).await);
+    }
+
     // Migrate database
     if let Err(err) = migration::try_migrate(&init.inner.build_server()).await {
         trc::event!(
@@ -271,6 +277,60 @@ async fn seed_and_exit(
         }
     };
     eprintln!("{message}");
+    flush_and_exit_code(code).await
+}
+
+/// inbuxa: K-C11: `--store-check`: 0 found nothing wrong, 3 found problems,
+/// 2 another check was running, 1 failed
+async fn store_check_and_exit(server: &common::Server, mode: &str) -> i32 {
+    use services::inbuxa_store_check::{
+        CheckMode as Mode, CheckRefusal as Refusal, CheckStatus as Status,
+    };
+
+    let mode = Mode::parse(mode).unwrap_or(Mode::Quick);
+    let (code, message) = match services::inbuxa_store_check::run_now(server, mode).await {
+        Ok(Ok(check)) => {
+            let p = &check.progress;
+            let summary = format!(
+                "Store check {} ({}): {} blobs, {} links, {} messages checked, {} bytes read. \
+                 Missing {}, damaged {}, unlinked {}, unreadable {}.",
+                check.id,
+                mode.as_str(),
+                p.blobs_checked,
+                p.links_checked,
+                p.messages_checked,
+                p.bytes_read,
+                p.missing,
+                p.damaged,
+                p.unlinked,
+                p.unreadable,
+            );
+            match check.status {
+                Status::Done if p.problems() == 0 => (0, format!("{summary} Nothing wrong.")),
+                Status::Done => (
+                    3,
+                    format!(
+                        "{summary} {} problems: the console's Store checks page lists them.",
+                        p.problems()
+                    ),
+                ),
+                status => (
+                    1,
+                    format!(
+                        "{summary} It ended {}: {}",
+                        status.as_str(),
+                        check.error.as_deref().unwrap_or("no reason given")
+                    ),
+                ),
+            }
+        }
+        Ok(Err(Refusal::Running(id))) => (
+            2,
+            format!("Store check {id} is running: one check runs at a time."),
+        ),
+        Err(err) => (1, format!("The store check failed: {err}")),
+    };
+    println!("{message}");
     flush_and_exit_code(code).await
 }
 

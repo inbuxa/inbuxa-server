@@ -6,7 +6,7 @@
  * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
-use super::backup::MAGIC_MARKER;
+use super::backup::{MAGIC_MARKER, S3_EXPORT_MANIFEST};
 use crate::{Core, DATABASE_SCHEMA_VERSION};
 use lz4_flex::frame::FrameDecoder;
 use registry::{
@@ -22,7 +22,7 @@ use std::{
     path::{Path, PathBuf},
 };
 use store::{
-    BlobStore, IterateParams, SUBSPACE_BLOBS, SUBSPACE_COUNTER, SUBSPACE_INDEXES,
+    BlobStore, IterateParams, SUBSPACE_BLOBS, SUBSPACE_COUNTER, SUBSPACE_INBUXA, SUBSPACE_INDEXES,
     SUBSPACE_PROPERTY, SUBSPACE_QUOTA, SUBSPACE_REGISTRY_PK, SUBSPACE_TELEMETRY_SPAN, Store,
     U32_LEN,
     write::{
@@ -37,6 +37,12 @@ impl Core {
     /// Imports an export into an empty store and returns the subspaces it
     /// wrote. inbuxa: the caller hands them to [`Core::queue_reindex`].
     pub async fn restore(&self, src: PathBuf) -> Vec<u8> {
+        // inbuxa: K-C11: an export in S3
+        let src_text = src.to_string_lossy().to_string();
+        if store::inbuxa_transfer::is_s3_url(&src_text) {
+            return self.restore_s3(&src_text).await;
+        }
+
         // Backup the core
         let paths = if src.is_dir() {
             let mut paths = Vec::new();
@@ -52,11 +58,91 @@ impl Core {
             vec![src]
         };
 
+        let sources = paths.into_iter().map(Source::File).collect::<Vec<_>>();
+        self.restore_sources(sources).await
+    }
+
+    /// inbuxa: K-C11: `s3://bucket/prefix/<name>`, or the newest finished
+    /// export under `s3://bucket/prefix`. An export without its manifest
+    /// didn't finish, and is refused.
+    async fn restore_s3(&self, url: &str) -> Vec<u8> {
+        use store::inbuxa_transfer::S3Transfer;
+        let base =
+            S3Transfer::open(url).unwrap_or_else(|err| failed(&format!("Import failed: {err}")));
+        let (transfer, manifest) = match base.get(S3_EXPORT_MANIFEST).await {
+            Ok(Some(manifest)) => (base, manifest),
+            Ok(None) => {
+                let names = base
+                    .children_with(S3_EXPORT_MANIFEST)
+                    .await
+                    .unwrap_or_else(|err| failed(&format!("Import failed: {err}")));
+                let Some(newest) = names.last() else {
+                    failed(&format!(
+                        "Import failed: no finished export at {url} or under it (an export is \
+                         finished once its {S3_EXPORT_MANIFEST} is written)."
+                    ));
+                };
+                let transfer = base.join(newest);
+                println!(
+                    "Importing the newest finished export, {}.",
+                    transfer.location()
+                );
+                let manifest = transfer
+                    .get(S3_EXPORT_MANIFEST)
+                    .await
+                    .ok()
+                    .flatten()
+                    .unwrap_or_else(|| failed("Import failed: the export's manifest went away"));
+                (transfer, manifest)
+            }
+            Err(err) => failed(&format!("Import failed: {err}")),
+        };
+        let manifest: serde_json::Value = serde_json::from_slice(&manifest)
+            .unwrap_or_else(|err| failed(&format!("Import failed: {S3_EXPORT_MANIFEST}: {err}")));
+        let sources = manifest["files"]
+            .as_array()
+            .unwrap_or_else(|| {
+                failed(&format!(
+                    "Import failed: {S3_EXPORT_MANIFEST} lists no files"
+                ))
+            })
+            .iter()
+            .map(|file| {
+                let name = file["name"].as_str().unwrap_or_default();
+                let subspace = file["subspace"].as_u64().and_then(|s| u8::try_from(s).ok());
+                match (name, subspace) {
+                    (name, Some(subspace))
+                        if name.starts_with("subspace_") && !name.contains('/') =>
+                    {
+                        Source::S3 {
+                            transfer: transfer.clone(),
+                            name: name.to_string(),
+                            subspace,
+                        }
+                    }
+                    _ => failed(&format!(
+                        "Import failed: {S3_EXPORT_MANIFEST}: a bad file entry: {file}"
+                    )),
+                }
+            })
+            .collect::<Vec<_>>();
+        self.restore_sources(sources).await
+    }
+
+    async fn restore_sources(&self, paths: Vec<Source>) -> Vec<u8> {
         let mut conflicts = Vec::new();
         for path in &paths {
-            let subspace = KeyValueReader::new(path).subspace;
+            let subspace = path.subspace();
+            // inbuxa: K-C11: every start writes the fork's own subspace, this
+            // import's too: where the blob store is (W), the permission
+            // grants (P), the log files' setting (T). Its records are keyed
+            // values, which an import sets over, never duplicates; a store in
+            // use still has data in the other subspaces, which are checked.
+            if subspace == SUBSPACE_INBUXA {
+                continue;
+            }
             if subspace_has_data(&self.storage.data, subspace).await {
-                conflicts.push(path.clone());
+                conflicts.push(path.describe());
             }
         }
 
@@ -68,32 +154,83 @@ impl Core {
                  start the server before importing. Conflicting dumps:"
             );
             for path in conflicts {
-                eprintln!("  {}", path.display());
+                eprintln!("  {path}");
             }
             std::process::exit(1);
         }
 
-        let mut imported = paths
-            .iter()
-            .map(|path| KeyValueReader::new(path).subspace)
-            .collect::<Vec<_>>();
+        let mut imported = paths.iter().map(Source::subspace).collect::<Vec<_>>();
         imported.sort_unstable();
         imported.dedup();
 
+        // inbuxa: K-C11: the blobs last, into the blob store the imported
+        // settings name. This process started on an empty store, whose
+        // blob store is the data store; a server started on the imported
+        // one reads blobs from wherever its x:BlobStore says (S3, say), so
+        // blobs written to the data store would be missing there.
+        let (blobs, rest): (Vec<_>, Vec<_>) = paths
+            .into_iter()
+            .partition(|path| path.subspace() == SUBSPACE_BLOBS);
+
         let mut tasks = Vec::new();
-        for path in paths {
+        for path in rest {
             let storage = self.storage.clone();
             let blob_store = self.storage.blob.clone();
             tasks.push(tokio::spawn(async move {
                 restore_file(storage.data, blob_store, &path).await;
             }));
         }
-
         for task in tasks {
             task.await.failed("Failed to wait for task");
         }
 
+        if !blobs.is_empty() {
+            let blob_store = self.imported_blob_store().await;
+            let mut tasks = Vec::new();
+            for path in blobs {
+                let storage = self.storage.clone();
+                let blob_store = blob_store.clone();
+                tasks.push(tokio::spawn(async move {
+                    restore_file(storage.data, blob_store, &path).await;
+                }));
+            }
+            for task in tasks {
+                task.await.failed("Failed to wait for task");
+            }
+        }
+
         imported
+    }
+
+    /// inbuxa: K-C11: the blob store the store's x:BlobStore names now,
+    /// after the import wrote it
+    async fn imported_blob_store(&self) -> BlobStore {
+        use registry::{schema::structs::BlobStore as BlobStoreSetting, types::ObjectImpl};
+        let setting = self
+            .storage
+            .registry
+            .object::<BlobStoreSetting>(BlobStoreSetting::OBJECT.singleton().id())
+            .await
+            .failed("Failed to read the imported blob store setting")
+            .unwrap_or_default();
+        if matches!(setting, BlobStoreSetting::Default) {
+            println!("Importing blobs into the data store, as the export's settings say.");
+            return self.storage.data.clone().into();
+        }
+        let mut warnings = Vec::new();
+        let store = BlobStore::open(setting, &self.storage.data, &mut warnings)
+            .await
+            .unwrap_or_else(|err| {
+                failed(&format!(
+                    "Can't open the blob store the export's settings name, to import the \
+                     blobs into: {err}"
+                ))
+            });
+        for warning in warnings {
+            eprintln!("Blob store: {warning}");
+        }
+        println!("Importing blobs into the blob store the export's settings name.");
+        store
     }
 
     /// inbuxa: an export never carries the full-text index. It is built by
@@ -172,10 +309,59 @@ async fn subspace_has_data(store: &Store, subspace: u8) -> bool {
     has_data
 }
 
-async fn restore_file(store: Store, blob_store: BlobStore, path: &Path) {
-    println!("Importing database dump from {}.", path.to_str().unwrap());
+/// inbuxa: K-C11: one export file: on disk, or in S3
+enum Source {
+    File(PathBuf),
+    S3 {
+        transfer: store::inbuxa_transfer::S3Transfer,
+        name: String,
+        /// From the manifest, so the file needn't be opened to know it
+        subspace: u8,
+    },
+}
 
-    let mut reader = KeyValueReader::new(path);
+impl Source {
+    fn subspace(&self) -> u8 {
+        match self {
+            Source::File(path) => KeyValueReader::new(path).subspace,
+            Source::S3 { subspace, .. } => *subspace,
+        }
+    }
+
+    fn describe(&self) -> String {
+        match self {
+            Source::File(path) => path.display().to_string(),
+            Source::S3 { transfer, name, .. } => format!("{}/{name}", transfer.location()),
+        }
+    }
+
+    fn open(&self) -> KeyValueReader {
+        match self {
+            Source::File(path) => KeyValueReader::new(path),
+            Source::S3 {
+                transfer,
+                name,
+                subspace,
+            } => {
+                let reader =
+                    KeyValueReader::from_reader(Box::new(transfer.reader(name)), &self.describe());
+                if reader.subspace != *subspace {
+                    failed(&format!(
+                        "{} holds subspace {}, but the manifest says {subspace}",
+                        self.describe(),
+                        reader.subspace
+                    ));
+                }
+                reader
+            }
+        }
+    }
+}
+
+async fn restore_file(store: Store, blob_store: BlobStore, path: &Source) {
+    println!("Importing database dump from {}.", path.describe());
+
+    let mut reader = path.open();
     let mut batch = BatchBuilder::new();
 
     match reader.subspace {
@@ -276,14 +462,20 @@ async fn restore_file(store: Store, blob_store: BlobStore, path: &Path) {
 
 struct KeyValueReader {
     subspace: u8,
-    file: FrameDecoder<BufReader<File>>,
+    file: FrameDecoder<BufReader<Box<dyn Read + Send>>>,
 }
 
 impl KeyValueReader {
     fn new(path: &Path) -> Self {
-        let mut file = FrameDecoder::new(BufReader::new(
-            File::open(path).failed("Failed to open file"),
-        ));
+        Self::from_reader(
+            Box::new(File::open(path).failed("Failed to open file")),
+            &path.display().to_string(),
+        )
+    }
+
+    // inbuxa: K-C11: any reader: a file, or a download from S3
+    fn from_reader(reader: Box<dyn Read + Send>, path: &str) -> Self {
+        let mut file = FrameDecoder::new(BufReader::new(reader));
         let mut buf = [0u8; 1];
         file.read_exact(&mut buf)
             .failed(&format!("Failed to read magic marker from {path:?}"));
