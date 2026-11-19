@@ -545,6 +545,27 @@ impl Http {
             Err(_) => ForwardedHeader::XForwardedFor,
         };
 
+        // inbuxa: whether to read the forwarding header at all. The store's
+        // setting, unless INBUXA_HTTP_USE_FORWARDED says otherwise: a
+        // deployment that only ever reaches the server through its own
+        // proxies (Kubernetes, behind an ingress) sets it, so the limits and
+        // bans for failed sign-ins count each client, not the proxy.
+        let use_forwarded = match types::branding::env_var("HTTP_USE_FORWARDED") {
+            Ok(value) => match parse_env_bool(&value) {
+                Some(value) => value,
+                None => {
+                    bp.build_warning(
+                        ObjectType::Http.singleton(),
+                        format!(
+                            "INBUXA_HTTP_USE_FORWARDED is {value:?}; expected true or false. The setting in the store applies."
+                        ),
+                    );
+                    http.use_x_forwarded
+                }
+            },
+            Err(_) => http.use_x_forwarded,
+        };
+
         if use_permissive_cors {
             http_headers.push((
                 hyper::header::ACCESS_CONTROL_ALLOW_ORIGIN,
@@ -602,7 +623,7 @@ impl Http {
             },
             response_headers: http_headers,
             cors_origins,
-            use_forwarded: http.use_x_forwarded,
+            use_forwarded,
             trusted_proxies,
             forwarded_header,
             redirect_root: http.redirect_root,
@@ -619,6 +640,15 @@ pub enum ForwardedHeader {
     XForwardedFor,
     /// RFC 7239 `Forwarded` (HAProxy `option forwarded`)
     Forwarded,
+}
+
+// inbuxa: true/1/yes/on or false/0/no/off, any case; None for anything else.
+fn parse_env_bool(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "on" => Some(true),
+        "false" | "0" | "no" | "off" => Some(false),
+        _ => None,
+    }
 }
 
 // inbuxa: loopback and the private ranges, where a reverse proxy on the same
@@ -724,6 +754,24 @@ impl Default for ClusterRoles {
             outbound_mta: true,
             task_manager: true,
             task_scheduler: true,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_env_bool;
+
+    #[test]
+    fn env_bool() {
+        for yes in ["true", "TRUE", " 1 ", "yes", "On"] {
+            assert_eq!(parse_env_bool(yes), Some(true), "{yes}");
+        }
+        for no in ["false", "0", "no", "OFF"] {
+            assert_eq!(parse_env_bool(no), Some(false), "{no}");
+        }
+        for neither in ["", "2", "enabled", "y"] {
+            assert_eq!(parse_env_bool(neither), None, "{neither:?}");
         }
     }
 }
