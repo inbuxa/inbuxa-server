@@ -150,6 +150,8 @@ pub const KV_PORT_REACHABILITY: u8 = 200;
 pub const KV_OAUTH_DEVICE: u8 = 201;
 // inbuxa: K-S4: revoked OAuth tokens, one list per account
 pub const KV_OAUTH_REVOKED: u8 = 202;
+// inbuxa: passkeys: a registration or sign-in between its two steps
+pub const KV_PASSKEY_CEREMONY: u8 = 203;
 
 #[derive(Clone)]
 pub struct Server {

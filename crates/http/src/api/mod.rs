@@ -11,7 +11,8 @@ pub mod diagnose;
 use crate::{
     api::diagnose::{DeliveryStage, parse_delivery_target, spawn_delivery_diagnose},
     auth::{
-        authenticate::Authenticator, oauth::auth::OAuthApiHandler, permissions::AccountApiHandler,
+        authenticate::Authenticator, oauth::auth::OAuthApiHandler,
+        passkey::PasskeyRegistrationHandler, permissions::AccountApiHandler,
     },
 };
 use common::{
@@ -69,6 +70,16 @@ impl ManagementApi for Server {
                 self.is_http_anonymous_request_allowed(session.remote_ip)
                     .await?;
                 Box::pin(self.handle_login_request(
+                    session,
+                    body.ok_or_else(|| trc::LimitEvent::SizeRequest.into_err())?,
+                ))
+                .await
+            }
+            // inbuxa: passkeys: the registration page's two steps (PK-6 to PK-8)
+            "passkey" if is_post && path.get(1).copied() == Some("register") => {
+                self.is_http_anonymous_request_allowed(session.remote_ip)
+                    .await?;
+                Box::pin(self.handle_passkey_registration(
                     session,
                     body.ok_or_else(|| trc::LimitEvent::SizeRequest.into_err())?,
                 ))

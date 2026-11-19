@@ -8,5 +8,6 @@
 
 pub mod authenticate;
 pub mod oauth;
+pub mod passkey; // inbuxa: passkeys
 pub mod permissions;
 pub mod token_only;
