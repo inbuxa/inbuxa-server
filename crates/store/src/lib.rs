@@ -11,6 +11,8 @@
 pub mod backend;
 pub mod build;
 pub mod dispatch;
+// inbuxa: K-C11: exports to and from S3
+pub mod inbuxa_transfer;
 pub mod query;
 pub mod registry;
 pub mod search;

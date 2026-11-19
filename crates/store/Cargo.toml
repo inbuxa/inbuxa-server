@@ -65,7 +65,7 @@ foundation = ["foundationdb", "futures"]
 fdb-chunked-bm = []
 
 # Blob stores
-s3 = ["rust-s3", "dep:reqwest_s3"]
+s3 = ["rust-s3", "dep:reqwest_s3", "futures"]
 azure = ["azure_core", "azure_storage", "azure_storage_blobs", "futures"]
 
 # In-memory stores

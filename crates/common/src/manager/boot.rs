@@ -42,6 +42,9 @@ pub struct BootManager {
     /// inbuxa: K-S8: whether the store was new when this process started,
     /// before the defaults went in
     pub store_was_new: bool,
+    /// inbuxa: K-C11: started with `--store-check quick|full`: like
+    /// `--upgrade-plan`, then main runs a store check here and exits
+    pub store_check: Option<String>,
 }
 
 pub struct IpcReceivers {
@@ -61,13 +64,14 @@ Usage: inbuxa [OPTIONS]
 
 Options:
   -c, --config <PATH>              Start server with the specified configuration file
-  -e, --export <PATH>              Export all store data to a specific path
-  -i, --import <PATH>              Import store data from a specific path
+  -e, --export <PATH>              Export all store data to a directory or s3://bucket/prefix
+  -i, --import <PATH>              Import store data from a directory or s3:// address
   -o, --console                    Open the store console
   -u, --upgrade-store              Upgrade the store's layout, then exit
       --seed <PATH>                Set up a new store from a file, then exit
       --upgrade-plan               Print what --upgrade-store would do, then exit
       --check                      Check the data, blob store and coordinator, then exit
+      --store-check <quick|full>   Check every blob the store names, then exit
   -h, --help                       Print help
   -V, --version                    Print version
 
@@ -77,6 +81,20 @@ index, which belongs to one search backend. An import into an empty store
 queues the index to be rebuilt when the server next starts. EXPORT_TYPES
 limits an export to some of: data, registry, blob, changelog, queue, report,
 telemetry, tasks.
+
+An export to s3://bucket/prefix streams to a new folder there, named for the
+time (20261119T204500Z), and writes export.json last: an export without it
+didn't finish. An import from s3://bucket/prefix/<name> reads one back; from
+s3://bucket/prefix, the newest finished one. INBUXA_EXPORT_S3_ENDPOINT names
+an S3-compatible service (otherwise AWS), INBUXA_EXPORT_S3_REGION its region,
+and INBUXA_EXPORT_S3_ACCESS_KEY_FILE and INBUXA_EXPORT_S3_SECRET_KEY_FILE
+files holding its keys (otherwise the AWS_ variables or the instance's role).
+
+--store-check runs a store check, as the console's Store checks page does:
+quick finds blobs that are missing, full also reads each one and checks its
+hash. It is saved with the others, and prints a summary. It exits 0 when it
+found nothing wrong, 3 when it found problems (the console lists them),
+2 when another check was running, 1 when it failed.
 
 --upgrade-store does what a start does to the store before it serves, and
 exits: 0 when the store is at this release's layout (whether it upgraded it
@@ -119,6 +137,8 @@ enum StoreOp {
     UpgradePlan,
     // inbuxa: K-C5
     Check,
+    // inbuxa: K-C11
+    StoreCheck(String),
     None,
 }
 
@@ -150,7 +170,7 @@ impl BootManager {
             };
             let takes_value = matches!(
                 key.as_str(),
-                "config" | "c" | "export" | "e" | "import" | "i" | "seed"
+                "config" | "c" | "export" | "e" | "import" | "i" | "seed" | "store-check"
             );
             let value = if takes_value {
                 inline.or_else(|| args.next())
@@ -191,6 +211,10 @@ impl BootManager {
                 ("seed", Some(value)) => {
                     import_export = StoreOp::Seed(value.into());
                 }
+                ("store-check", Some(value)) => match value.as_str() {
+                    "quick" | "full" => import_export = StoreOp::StoreCheck(value),
+                    _ => failed("--store-check takes quick or full."),
+                },
                 (_, None) if takes_value => failed(&format!(
                     "Missing value for argument '{key}', try '--help'."
                 )),
@@ -223,7 +247,11 @@ impl BootManager {
         };
         // inbuxa: K-S8: a seed run boots as --upgrade-store does
         let upgrade_plan = import_export == StoreOp::UpgradePlan;
-        let one_shot = upgrade_store || upgrade_plan || seed.is_some();
+        let store_check = match &import_export {
+            StoreOp::StoreCheck(mode) => Some(mode.clone()),
+            _ => None,
+        };
+        let one_shot = upgrade_store || upgrade_plan || seed.is_some() || store_check.is_some();
         let registry = RegistryStore::init(
             PathBuf::from(config_path.unwrap()),
             import_export == StoreOp::None || one_shot,
@@ -232,8 +260,9 @@ impl BootManager {
         .unwrap_or_else(|err| startup_failed(err));
         if one_shot && (registry.is_bootstrap_mode() || registry.is_recovery_mode()) {
             failed(
-                "--upgrade-store and --seed need a configured server: there is no data \
-                 store in bootstrap mode, and recovery mode is for a person at the console.",
+                "--upgrade-store, --seed and --store-check need a configured server: there is \
+                 no data store in bootstrap mode, and recovery mode is for a person at the \
+                 console.",
             );
         }
         let mut bootstrap = Bootstrap::new(registry).await;
@@ -267,7 +296,11 @@ impl BootManager {
         let telemetry = Telemetry::parse(&mut bootstrap, &storage).await;
 
         match import_export {
-            StoreOp::None | StoreOp::UpgradeStore | StoreOp::UpgradePlan | StoreOp::Seed(_) => {
+            StoreOp::None
+            | StoreOp::UpgradeStore
+            | StoreOp::UpgradePlan
+            | StoreOp::Seed(_)
+            | StoreOp::StoreCheck(_) => {
                 // Parse components
                 let core: Box<Core> =
                     Box::new(Box::pin(Core::parse(&mut bootstrap, storage)).await);
@@ -285,6 +318,8 @@ impl BootManager {
                             "Started with --upgrade-store: upgrading the store layout, then exiting"
                         } else if upgrade_plan {
                             "Started with --upgrade-plan: reporting what an upgrade would do, then exiting"
+                        } else if store_check.is_some() {
+                            "Started with --store-check: checking the store's blobs, then exiting"
                         } else {
                             "Started with --seed: setting up a new store from a file, then exiting"
                         },
@@ -381,6 +416,7 @@ impl BootManager {
                     upgrade_plan,
                     seed,
                     store_was_new,
+                    store_check,
                 }
             }
             StoreOp::Export(path) => {

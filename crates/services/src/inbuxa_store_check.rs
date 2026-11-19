@@ -74,6 +74,35 @@ pub async fn start(
     Ok(Ok(id))
 }
 
+// inbuxa: K-C11: for main's --store-check
+pub use inbuxa_features::store_check::{
+    Mode as CheckMode, Refusal as CheckRefusal, Status as CheckStatus,
+};
+
+/// inbuxa: K-C11: the node id a `--store-check` run records. Leased node
+/// ids are 16-bit, so no server's start-up (SV-8) takes it for its own.
+pub const ONE_SHOT_NODE_ID: u64 = 1 << 32;
+
+/// inbuxa: K-C11: `--store-check`: a check run here, to its end, for a
+/// scheduled job. Saved like any other, so the console shows it.
+pub async fn run_now(server: &Server, mode: Mode) -> trc::Result<Result<StoreCheck, Refusal>> {
+    let now = now();
+    let check = StoreCheck::new(mode, "store-check job".to_string(), ONE_SHOT_NODE_ID, now);
+    let id = match model::create(server.store(), &check, now).await? {
+        Ok(id) => id,
+        Err(refusal) => return Ok(Err(refusal)),
+    };
+    run(server, StoreCheck { id, ..check }).await;
+    Ok(model::get(server.store(), id)
+        .await?
+        .ok_or_else(|| {
+            trc::StoreEvent::NotFound
+                .into_err()
+                .details("The check went away")
+        })
+        .map(Ok)?)
+}
+
 /// SV-8: asks a running check to stop. Any node can: the one running it
 /// sees the request at its next save. None if there's no such check.
 pub async fn stop(server: &Server, id: u32) -> trc::Result<Option<StoreCheck>> {

@@ -11,7 +11,7 @@ use ahash::AHashSet;
 use lz4_flex::frame::FrameEncoder;
 use std::{
     io::{BufWriter, Write},
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::mpsc::{self, SyncSender},
 };
 use store::{
@@ -19,7 +19,7 @@ use store::{
     *,
 };
 use types::blob_hash::{BLOB_HASH_LEN, BlobHash};
-use utils::{UnwrapFailure, codec::leb128::Leb128_};
+use utils::{UnwrapFailure, codec::leb128::Leb128_, failed};
 
 pub(super) const MAGIC_MARKER: u8 = 123;
 
@@ -52,9 +52,31 @@ pub struct BackupParams {
     families: AHashSet<Family>,
 }
 
+/// inbuxa: K-C11: where the export files go
+enum Sink {
+    Dir(PathBuf),
+    S3(store::inbuxa_transfer::S3Transfer),
+}
+
+type Upload = tokio::task::JoinHandle<Result<u64, String>>;
+
+/// inbuxa: K-C11: an export in S3 ends with this, written last, naming its
+/// files: an export without one didn't finish.
+pub const S3_EXPORT_MANIFEST: &str = "export.json";
+
 impl Core {
     pub async fn backup(&self, mut params: BackupParams) {
-        if !params.dest.exists() {
+        // inbuxa: K-C11: s3://bucket/prefix exports to a new folder there
+        let dest_text = params.dest.to_string_lossy().to_string();
+        let sink = if store::inbuxa_transfer::is_s3_url(&dest_text) {
+            let transfer = store::inbuxa_transfer::S3Transfer::open(&dest_text)
+                .unwrap_or_else(|err| failed(&format!("Export failed: {err}")));
+            Sink::S3(transfer.join(&store::inbuxa_transfer::export_name(store::write::now())))
+        } else {
+            Sink::Dir(params.dest.clone())
+        };
+        if let Sink::S3(_) = &sink {
+        } else if !params.dest.exists() {
             std::fs::create_dir_all(&params.dest).failed("Failed to create backup directory");
         } else if !params.dest.is_dir() {
             eprintln!("Backup destination {:?} is not a directory.", params.dest);
@@ -73,7 +95,9 @@ impl Core {
             .failed("Could not retrieve database schema version.")
             .failed("Could not retrieve database schema version.");
 
+        let mut families_given = true;
         if params.families.is_empty() {
+            families_given = false;
             params.families = [
                 Family::Data,
                 Family::Registry,
@@ -89,34 +113,81 @@ impl Core {
             .collect();
         }
 
-        for subspace in params
-            .families
-            .into_iter()
-            .flat_map(|f| f.subspaces())
-            .copied()
-        {
+        // inbuxa: K-C11: blobs last. An export taken while the server runs
+        // then holds every blob the rest of it names: a message stored
+        // during the export is either in it whole or not at all. (In a set's
+        // order, the blobs could go first, and the messages stored after
+        // them would point at blobs the export never got.)
+        let mut families = params.families.into_iter().collect::<Vec<_>>();
+        families.sort_by_key(|f| (*f == Family::Blob, *f as u8));
+
+        let mut uploads: Vec<(String, u8, Upload)> = Vec::new();
+        for subspace in families.into_iter().flat_map(|f| f.subspaces()).copied() {
+            let name = format!("subspace_{}", store::subspace_name(subspace));
+            let (writer, upload) = match &sink {
+                Sink::Dir(dir) => (Output::File(dir.join(&name)), None),
+                Sink::S3(transfer) => {
+                    println!("Exporting database to {}/{name}.", transfer.location());
+                    let (writer, upload) = transfer.writer(&name);
+                    (Output::S3(writer), Some(upload))
+                }
+            };
             let (async_handle, sync_handle) = if subspace == SUBSPACE_BLOBS {
-                self.backup_blobs(&params.dest, subspace, schema_version)
+                self.backup_blobs(writer, subspace, schema_version)
             } else {
-                self.backup_subspace(&params.dest, subspace, schema_version)
+                self.backup_subspace(writer, subspace, schema_version)
             };
             async_handle.await.failed("Task failed");
             sync_handles.push(sync_handle);
+            if let Some(upload) = upload {
+                uploads.push((name, subspace, upload));
+            }
         }
 
         for handle in sync_handles {
             handle.join().expect("Failed to join thread");
         }
+
+        // inbuxa: K-C11: the uploads, then the manifest that says the
+        // export is whole
+        if let Sink::S3(transfer) = &sink {
+            let mut files = Vec::new();
+            let mut bytes = 0u64;
+            for (name, subspace, upload) in uploads {
+                let size = upload
+                    .await
+                    .failed("Upload task failed")
+                    .unwrap_or_else(|err| failed(&format!("Export failed: {err}")));
+                bytes += size;
+                files.push(serde_json::json!({"name": name, "subspace": subspace, "bytes": size}));
+            }
+            let manifest = serde_json::json!({
+                "format": 1,
+                "version": types::brand_version!(),
+                "schemaVersion": schema_version,
+                "createdAt": store::write::now(),
+                "partial": families_given,
+                "files": files,
+            });
+            transfer
+                .put(
+                    S3_EXPORT_MANIFEST,
+                    &serde_json::to_vec_pretty(&manifest).unwrap_or_default(),
+                )
+                .await
+                .unwrap_or_else(|err| failed(&format!("Export failed: {err}")));
+            println!(
+                "Exported {} files, {bytes} bytes compressed, to {}.",
+                manifest["files"].as_array().map_or(0, Vec::len),
+                transfer.location()
+            );
+        }
     }
 
-    fn backup_blobs(&self, dest: &Path, subspace: u8, schema_version: u32) -> TaskHandle {
+    fn backup_blobs(&self, output: Output, subspace: u8, schema_version: u32) -> TaskHandle {
         let store = self.storage.data.clone();
         let blob_store = self.storage.blob.clone();
-        let (handle, writer) = spawn_writer(
-            dest.join(format!("subspace_{}", store::subspace_name(subspace))),
-            subspace,
-            schema_version,
-        );
+        let (handle, writer) = spawn_writer(output, subspace, schema_version);
         (
             tokio::spawn(async move {
                 let mut blobs = Vec::new();
@@ -175,13 +246,9 @@ impl Core {
         )
     }
 
-    fn backup_subspace(&self, dest: &Path, subspace: u8, schema_version: u32) -> TaskHandle {
+    fn backup_subspace(&self, output: Output, subspace: u8, schema_version: u32) -> TaskHandle {
         let store = self.storage.data.clone();
-        let (handle, writer) = spawn_writer(
-            dest.join(format!("subspace_{}", store::subspace_name(subspace))),
-            subspace,
-            schema_version,
-        );
+        let (handle, writer) = spawn_writer(output, subspace, schema_version);
         (
             tokio::spawn(async move {
                 if !store.is_sql() || (subspace != SUBSPACE_COUNTER && subspace != SUBSPACE_QUOTA) {
@@ -253,20 +320,60 @@ impl Core {
     }
 }
 
+/// inbuxa: K-C11: one export file's destination
+enum Output {
+    File(PathBuf),
+    S3(store::inbuxa_transfer::PartWriter),
+}
+
+/// inbuxa: K-C11: the sending end of an export file's writer. The export's
+/// tasks send from the runtime's workers; when the writer is behind (an
+/// upload to S3 waits on the runtime too), a plain blocking send would hold
+/// the worker it needs, and with one worker (a pod limited to one CPU) the
+/// export would stop there. A send that has to wait hands its worker over
+/// first.
+struct ExportSender(SyncSender<(Vec<u8>, Vec<u8>)>);
+
+impl ExportSender {
+    fn send(&self, item: (Vec<u8>, Vec<u8>)) -> Result<(), mpsc::SendError<(Vec<u8>, Vec<u8>)>> {
+        match self.0.try_send(item) {
+            Ok(()) => Ok(()),
+            Err(mpsc::TrySendError::Full(item)) => {
+                if can_block_in_place() {
+                    tokio::task::block_in_place(|| self.0.send(item))
+                } else {
+                    self.0.send(item)
+                }
+            }
+            Err(mpsc::TrySendError::Disconnected(item)) => Err(mpsc::SendError(item)),
+        }
+    }
+}
+
+/// Whether this thread is a worker of a multi-threaded runtime, the only
+/// kind `block_in_place` works on
+fn can_block_in_place() -> bool {
+    tokio::runtime::Handle::try_current()
+        .is_ok_and(|h| h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread)
+}
+
 #[allow(clippy::type_complexity)]
 fn spawn_writer(
-    path: PathBuf,
+    output: Output,
     subspace: u8,
     version: u32,
-) -> (std::thread::JoinHandle<()>, SyncSender<(Vec<u8>, Vec<u8>)>) {
+) -> (std::thread::JoinHandle<()>, ExportSender) {
     let (tx, rx) = mpsc::sync_channel::<(Vec<u8>, Vec<u8>)>(10);
 
     let handle = std::thread::spawn(move || {
-        println!("Exporting database to {}.", path.to_str().unwrap());
-
-        let mut file = FrameEncoder::new(BufWriter::new(
-            std::fs::File::create(path).failed("Failed to create backup file"),
-        ));
+        let out: Box<dyn Write + Send> = match output {
+            Output::File(path) => {
+                println!("Exporting database to {}.", path.to_str().unwrap());
+                Box::new(std::fs::File::create(path).failed("Failed to create backup file"))
+            }
+            Output::S3(writer) => Box::new(writer),
+        };
+        let mut file = FrameEncoder::new(BufWriter::new(out));
         file.write_all(&[MAGIC_MARKER, subspace])
             .failed("Failed to write version");
         file.write_all(&version.to_le_bytes())
@@ -290,7 +397,7 @@ fn spawn_writer(
         file.flush().failed("Failed to flush backup file");
     });
 
-    (handle, tx)
+    (handle, ExportSender(tx))
 }
 
 impl BackupParams {
