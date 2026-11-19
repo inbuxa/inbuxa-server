@@ -16,9 +16,14 @@ use crate::utils::{
     server::{TestServer, TestServerBuilder},
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use registry::schema::{
-    prelude::{ObjectType, Property},
-    structs::Authentication,
+use common::manager::defaults::BootstrapDefaults;
+use registry::{
+    schema::{
+        enums::Permission,
+        prelude::{ObjectType, Property},
+        structs::{Authentication, Role},
+    },
+    types::EnumImpl,
 };
 use ring::{
     rand::SystemRandom,
@@ -26,6 +31,12 @@ use ring::{
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use store::{
+    SUBSPACE_INBUXA,
+    registry::bootstrap::Bootstrap,
+    write::{AnyClass, BatchBuilder, ValueClass},
+};
+use types::id::Id;
 
 /// The page's origin: the test server's public URL.
 const ORIGIN: &str = "https://localhost:8899";
@@ -832,6 +843,131 @@ async fn policy(admin: &Account, user: &Account, key: &SoftKey, client_id: &str)
     assert_eq!(response["type"], "authenticated", "{response}");
 }
 
+const PASSKEY_PERMISSIONS: [Permission; 4] = [
+    Permission::SysPasskeyGet,
+    Permission::SysPasskeyCreate,
+    Permission::SysPasskeyUpdate,
+    Permission::SysPasskeyDestroy,
+];
+
+/// #478: an install from before passkeys stored its default roles without
+/// the passkey permissions. Start-up adds them once to the user, tenant
+/// administrator and administrator roles, and never to the group role.
+async fn upgraded_install(test: &TestServer, admin: &Account) {
+    let auth = admin.registry_get::<Authentication>(Id::singleton()).await;
+    let roles = [
+        ("user", auth.default_user_role_ids.as_slice()[0], "Pguser:"),
+        (
+            "tenant",
+            auth.default_tenant_role_ids.as_slice()[0],
+            "Pgtenant:",
+        ),
+        ("admin", auth.default_admin_role_ids.as_slice()[0], "Pg"),
+    ];
+    let group_role = auth.default_group_role_ids.as_slice()[0];
+    let held = |role_id: Id| async move {
+        let role = admin.registry_get::<Role>(role_id).await;
+        PASSKEY_PERMISSIONS
+            .iter()
+            .filter(|p| role.enabled_permissions.as_slice().contains(p))
+            .count()
+    };
+    for (name, role_id, _) in roles {
+        assert_eq!(
+            held(role_id).await,
+            4,
+            "a new install's {name} role has them"
+        );
+    }
+
+    // Back to how a pre-passkey install stored them
+    let mut batch = BatchBuilder::new();
+    for (_, role_id, prefix) in roles {
+        let others: serde_json::Map<String, Value> = admin
+            .registry_get::<Role>(role_id)
+            .await
+            .enabled_permissions
+            .as_slice()
+            .iter()
+            .filter(|p| !PASSKEY_PERMISSIONS.contains(p))
+            .map(|p| (p.as_str().to_string(), Value::Bool(true)))
+            .collect();
+        admin
+            .registry_update_object(
+                ObjectType::Role,
+                role_id,
+                json!({Property::EnabledPermissions: others}),
+            )
+            .await;
+        for permission in PASSKEY_PERMISSIONS {
+            batch.clear(ValueClass::Any(AnyClass {
+                subspace: SUBSPACE_INBUXA,
+                key: format!("{prefix}{}", permission.as_str()).into_bytes(),
+            }));
+        }
+    }
+    let mut bp = Bootstrap::new_uninitialized(test.server.registry().clone());
+    bp.data_store.write(batch.build_all()).await.unwrap();
+    for (name, role_id, _) in roles {
+        assert_eq!(held(role_id).await, 0, "{name} role stripped");
+    }
+    let before = admin
+        .create_user_account(
+            "passkey-before@example.com",
+            "passkey-before-7712",
+            "Before the upgrade",
+            &[],
+            vec![],
+        )
+        .await;
+    let (name, response) = call(&before, "inbuxa:Passkey/get", json!({"ids": null})).await;
+    assert_eq!(name, "error", "refused before the upgrade: {response}");
+
+    // The upgrade: start-up grants them once
+    bp.insert_safe_defaults().await;
+    assert!(bp.errors.is_empty(), "{:?}", bp.errors);
+    for (name, role_id, _) in roles {
+        assert_eq!(held(role_id).await, 4, "{name} role granted on upgrade");
+    }
+    assert_eq!(held(group_role).await, 0, "never the group role");
+    // Start-up grants before anything is cached; here the server is already
+    // running, so drop its caches as a restart would
+    test.server.invalidate_all_local_caches();
+    let after = admin
+        .create_user_account(
+            "passkey-after@example.com",
+            "passkey-after-8823",
+            "After the upgrade",
+            &[],
+            vec![],
+        )
+        .await;
+    assert!(list(&after, &after).await.is_empty());
+
+    // An operator who takes them away again keeps them away
+    let user_role = roles[0].1;
+    let others: serde_json::Map<String, Value> = admin
+        .registry_get::<Role>(user_role)
+        .await
+        .enabled_permissions
+        .as_slice()
+        .iter()
+        .filter(|p| **p != Permission::SysPasskeyCreate)
+        .map(|p| (p.as_str().to_string(), Value::Bool(true)))
+        .collect();
+    admin
+        .registry_update_object(
+            ObjectType::Role,
+            user_role,
+            json!({Property::EnabledPermissions: others}),
+        )
+        .await;
+    Bootstrap::new_uninitialized(test.server.registry().clone())
+        .insert_safe_defaults()
+        .await;
+    assert_eq!(held(user_role).await, 3, "not granted twice");
+}
+
 #[ignore]
 #[tokio::test(flavor = "multi_thread")]
 pub async fn passkey_tests() {
@@ -845,6 +981,8 @@ pub async fn passkey_tests() {
     let admin = test.create_admin_account("admin@example.com").await;
     test.insert_account(admin);
     self::test(&mut test).await;
+    let admin = test.account("admin@example.com");
+    upgraded_install(&test, admin).await;
     if test.is_reset() {
         test.temp_dir.delete();
     }
