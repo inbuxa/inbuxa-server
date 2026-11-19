@@ -91,6 +91,15 @@ impl SessionHandler for Server {
         )
         .await
         .caused_by(trc::location!())?;
+        // inbuxa: PK-19: whether adding a passkey would be refused
+        let passkey_settings = crate::inbuxa::passkey::settings(self).await?;
+        let passkeys_allowed = access_token.has_permission(Permission::SysPasskeyCreate)
+            && crate::inbuxa::passkey::allowed_for(
+                self,
+                &passkey_settings,
+                access_token.account_id(),
+            )
+            .await?;
         account.account_capabilities.append(
             Capability::Inbuxa,
             Capabilities::Inbuxa(InbuxaAccountCapabilities {
@@ -100,6 +109,8 @@ impl SessionHandler for Server {
                 ai_explain,
                 mail_sharing: sharing.mail_sharing,
                 add_accounts: sharing.add_accounts,
+                passkeys_allowed,
+                max_passkeys: passkey_settings.max_passkeys.clamp(1, 100),
             }),
         );
         // inbuxa: Fastmail's Masked Email API, for accounts that may hold masks

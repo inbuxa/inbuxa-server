@@ -170,6 +170,12 @@ passwords.
 - **PK-16.** An administrator can destroy any account's passkeys, which is the
   recovery path for a user who lost them all. Deleting an account deletes its
   passkeys, its user handle and both index entries.
+- **PK-19.** The session's `urn:inbuxa:jmap` capability on the signed-in
+  principal's own account carries `passkeysAllowed` (it holds
+  `sysPasskeyCreate` and PK-12 and PK-13 leave passkeys on for it) and
+  `maxPasskeys`. A client uses it to say up front that passkeys are off
+  instead of offering an add that the server will refuse. An older server
+  leaves both out; a client then offers the add and shows the refusal.
 
 ### Recording
 
@@ -229,6 +235,9 @@ passwords.
    account can't use a passkey whose user handle belonged to it (PK-16).
 10. The audit log shows create, rename and destroy; the Logs page shows the
     sign-in with `type = passkey` (PK-17, PK-18).
+12. The session says `passkeysAllowed: true` and `maxPasskeys` for an account
+    that may add one, and `false` once its domain switches passkeys off
+    (PK-19).
 11. A server built before this feature starts on a store holding passkeys and
     signs everyone in with passwords (rollback).
 
