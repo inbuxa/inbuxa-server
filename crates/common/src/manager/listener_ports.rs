@@ -95,9 +95,151 @@ pub fn default_listeners(spec: Option<&str>) -> Result<Vec<(&'static str, u16, b
     Ok(listeners)
 }
 
+/// inbuxa: K-C6: PROXY protocol copies of the mail listeners, from the
+/// environment. Behind a load balancer that sends PROXY v2 (a cloud LB,
+/// HAProxy), the server needs listeners that take the client's address from
+/// the header, trusting it only from the load balancer:
+///
+/// ```text
+/// INBUXA_MAIL_PROXY_LISTENERS=smtp=10025,submissions=10465,imaps=10993
+/// INBUXA_MAIL_PROXY_TRUSTED_NETWORKS=10.0.0.10,10.0.0.11
+/// ```
+///
+/// Each named listener in the store gets a copy on the port given, with the
+/// same protocol and TLS, that trusts PROXY headers from those networks
+/// only. The copies aren't stored; the listeners they copy keep serving as
+/// they are, without PROXY. A network wider than /8 (IPv4) or /8 (IPv6) is
+/// refused: trusting everyone lets anyone who reaches the port say who they
+/// are.
+pub const PROXY_ENV_VAR: &str = "INBUXA_MAIL_PROXY_LISTENERS";
+pub const PROXY_NETWORKS_ENV_VAR: &str = "INBUXA_MAIL_PROXY_TRUSTED_NETWORKS";
+
+/// The listeners `INBUXA_MAIL_PROXY_LISTENERS` may copy.
+pub const MAIL_LISTENERS: [&str; 5] = ["smtp", "submissions", "imaps", "pop3s", "sieve"];
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct ProxyListeners {
+    /// Listener name and the port of its copy
+    pub ports: Vec<(&'static str, u16)>,
+    pub trusted: Vec<registry::types::ipmask::IpAddrOrMask>,
+}
+
+/// `None` when neither variable is set.
+pub fn proxy_listeners(
+    spec: Option<&str>,
+    networks: Option<&str>,
+) -> Result<Option<ProxyListeners>, String> {
+    let spec = spec.map(str::trim).filter(|s| !s.is_empty());
+    let networks = networks.map(str::trim).filter(|s| !s.is_empty());
+    let (spec, networks) = match (spec, networks) {
+        (None, None) => return Ok(None),
+        (Some(_), None) => {
+            return Err(format!(
+                "{PROXY_ENV_VAR} is set without {PROXY_NETWORKS_ENV_VAR}: name the load \
+                 balancer's addresses, the only ones whose PROXY headers are believed"
+            ));
+        }
+        (None, Some(_)) => {
+            return Err(format!(
+                "{PROXY_NETWORKS_ENV_VAR} is set without {PROXY_ENV_VAR}, which names the \
+                 listeners that take PROXY headers"
+            ));
+        }
+        (Some(spec), Some(networks)) => (spec, networks),
+    };
+
+    let mut ports: Vec<(&'static str, u16)> = Vec::new();
+    for item in spec.split(',').map(str::trim).filter(|i| !i.is_empty()) {
+        let Some((name, port)) = item.split_once('=') else {
+            return Err(format!(
+                "{PROXY_ENV_VAR}: '{item}' is not name=port (for example smtp=10025)"
+            ));
+        };
+        let (name, port) = (name.trim(), port.trim());
+        let Some(name) = MAIL_LISTENERS.iter().copied().find(|n| *n == name) else {
+            return Err(format!(
+                "{PROXY_ENV_VAR}: '{name}' is not a mail listener; they are {}",
+                MAIL_LISTENERS.join(", ")
+            ));
+        };
+        let port = match port.parse::<u16>() {
+            Ok(port) if port > 0 => port,
+            _ => {
+                return Err(format!(
+                    "{PROXY_ENV_VAR}: '{port}' is not a port for '{name}' (1 to 65535)"
+                ));
+            }
+        };
+        if ports.iter().any(|(n, _)| *n == name) {
+            return Err(format!("{PROXY_ENV_VAR}: '{name}' is given twice"));
+        }
+        if let Some((other, _)) = ports.iter().find(|(_, p)| *p == port) {
+            return Err(format!(
+                "{PROXY_ENV_VAR}: '{other}' and '{name}' would both listen on port {port}"
+            ));
+        }
+        ports.push((name, port));
+    }
+
+    let mut trusted = Vec::new();
+    for item in networks
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .filter(|i| !i.is_empty())
+    {
+        trusted.push(item.parse().map_err(|_| {
+            format!(
+                "{PROXY_NETWORKS_ENV_VAR}: '{item}' is not an address or a network of /8 or \
+                 narrower"
+            )
+        })?);
+    }
+    if ports.is_empty() || trusted.is_empty() {
+        return Err(format!(
+            "{PROXY_ENV_VAR} and {PROXY_NETWORKS_ENV_VAR} name nothing"
+        ));
+    }
+    Ok(Some(ProxyListeners { ports, trusted }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn proxy_listeners_read() {
+        assert_eq!(proxy_listeners(None, None), Ok(None));
+        assert_eq!(proxy_listeners(Some(" "), Some("")), Ok(None));
+        let found = proxy_listeners(
+            Some("smtp=10025, imaps=10993"),
+            Some("10.0.0.10 192.168.0.0/16,fd00::/8"),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(found.ports, vec![("smtp", 10025), ("imaps", 10993)]);
+        assert_eq!(found.trusted.len(), 3);
+    }
+
+    #[test]
+    fn proxy_listeners_refused() {
+        for (spec, networks, said) in [
+            (
+                "smtp=10025",
+                "",
+                "without INBUXA_MAIL_PROXY_TRUSTED_NETWORKS",
+            ),
+            ("", "10.0.0.1", "without INBUXA_MAIL_PROXY_LISTENERS"),
+            ("http=10080", "10.0.0.1", "not a mail listener"),
+            ("smtp=0", "10.0.0.1", "not a port"),
+            ("smtp=1,smtp=2", "10.0.0.1", "given twice"),
+            ("smtp=1,imaps=1", "10.0.0.1", "would both listen"),
+            ("smtp=10025", "0.0.0.0/0", "narrower"),
+            ("smtp=10025", "::/0", "narrower"),
+            ("smtp=10025", "not-an-address", "narrower"),
+        ] {
+            let err = proxy_listeners(Some(spec), Some(networks)).unwrap_err();
+            assert!(err.contains(said), "{spec} {networks}: {err}");
+        }
+    }
 
     fn ports(spec: &str) -> Vec<(&'static str, u16)> {
         default_listeners(Some(spec))
