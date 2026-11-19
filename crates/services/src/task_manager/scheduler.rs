@@ -272,7 +272,7 @@ pub fn spawn_task_scheduler(inner: Arc<Inner>) {
                         if let Some(otel) = &server.core.metrics.otel {
                             queue.schedule(Instant::now() + otel.interval, Event::OtelMetrics);
 
-                            if roles.metrics_push {
+                            if roles.metrics_push || otel.every_node {
                                 let otel = otel.clone();
 
                                 tokio::spawn(async move {

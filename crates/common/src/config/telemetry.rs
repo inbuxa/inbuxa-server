@@ -71,6 +71,11 @@ pub struct OtelMetrics {
     pub instrumentation: InstrumentationScope,
     pub exporter: MetricExporter,
     pub interval: Duration,
+    // inbuxa: K-C10: pushed by every node, whatever its role. Each process
+    // counts only its own traffic; an exporter set from the environment
+    // names its pod in the resource (OTEL_RESOURCE_ATTRIBUTES), so every
+    // pod pushes and the collector adds them up.
+    pub every_node: bool,
 }
 
 #[derive(Debug)]
@@ -680,6 +685,7 @@ impl Metrics {
                             interval: otel.interval.into_inner(),
                             resource,
                             instrumentation,
+                            every_node: false,
                         })),
                         Err(err) => {
                             bp.build_error(
@@ -706,6 +712,7 @@ impl Metrics {
                             interval: otel.interval.into_inner(),
                             resource,
                             instrumentation,
+                            every_node: false,
                         })),
                         Err(err) => {
                             bp.build_error(
@@ -988,6 +995,7 @@ fn otel_from_env(
             interval,
             resource: resource.clone(),
             instrumentation: instrumentation.clone(),
+            every_node: true,
         })),
         Err(err) => {
             bp.build_error(
