@@ -55,6 +55,12 @@ async fn call(account: &Account, method: &str, mut arguments: Value) -> (String,
     )
 }
 
+/// PK-19: the session's flag for the signed-in account.
+async fn session_allows(account: &Account) -> Value {
+    let session = account.jmap_session_object().await;
+    session.0["accounts"][account.id_string()]["accountCapabilities"]["urn:inbuxa:jmap"].clone()
+}
+
 async fn list(account: &Account, of: &Account) -> Vec<Value> {
     let (name, response) = call(
         account,
@@ -731,6 +737,11 @@ async fn policy(admin: &Account, user: &Account, key: &SoftKey, client_id: &str)
         )
         .await;
 
+    // PK-19: the session says adding would work
+    let caps = session_allows(user).await;
+    assert_eq!(caps["passkeysAllowed"], true, "{caps}");
+    assert_eq!(caps["maxPasskeys"], 10, "{caps}");
+
     // PK-12: the domain's off switch stops adding and signing in
     let domain_id = admin.find_or_create_domain("example.com").await;
     admin
@@ -750,6 +761,9 @@ async fn policy(admin: &Account, user: &Account, key: &SoftKey, client_id: &str)
         response["notCreated"]["k"]["type"], "forbidden",
         "{response}"
     );
+    // PK-19: and the session says so up front
+    let caps = session_allows(user).await;
+    assert_eq!(caps["passkeysAllowed"], false, "{caps}");
     let challenge = new_challenge().await;
     let response = login(client_id, key.get(&challenge, 9, ORIGIN)).await;
     assert_eq!(response["type"], "failure", "{response}");

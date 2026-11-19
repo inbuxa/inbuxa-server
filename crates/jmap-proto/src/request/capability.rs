@@ -190,6 +190,14 @@ pub struct InbuxaAccountCapabilities {
     pub mail_sharing: bool,
     #[serde(rename(serialize = "addAccounts"))]
     pub add_accounts: bool,
+    /// PK-19: whether the principal may add a passkey to their own account
+    /// now: it holds `sysPasskeyCreate` and no switch turns passkeys off
+    /// for it (PK-12, PK-13). Lets a client show that up front.
+    #[serde(rename(serialize = "passkeysAllowed"))]
+    pub passkeys_allowed: bool,
+    /// PK-19: how many passkeys an account may have (`maxPasskeys`).
+    #[serde(rename(serialize = "maxPasskeys"))]
+    pub max_passkeys: u64,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]

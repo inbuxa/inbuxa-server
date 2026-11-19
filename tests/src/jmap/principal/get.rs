@@ -254,7 +254,7 @@ pub async fn test(test: &TestServer) {
             // inbuxa: MT-22, the logo that applies to the account, and
             // LP-19, whether the legacy protocols are open to it, and
             // ai-explain EX-1, whether Explain can be offered
-            "urn:inbuxa:jmap": { "logo": null, "legacyProtocols": "enabled", "legacyAllowed": ["imap", "pop3", "manageSieve", "submission"], "aiExplain": false, "mailSharing": true, "addAccounts": true },
+            "urn:inbuxa:jmap": { "logo": null, "legacyProtocols": "enabled", "legacyAllowed": ["imap", "pop3", "manageSieve", "submission"], "aiExplain": false, "mailSharing": true, "addAccounts": true, "passkeysAllowed": true, "maxPasskeys": 10 },
             "https://www.fastmail.com/dev/maskedemail": {}
           }
         }
