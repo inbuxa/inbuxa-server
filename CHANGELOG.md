@@ -15,6 +15,50 @@ https://github.com/inbuxa/inbuxa-server/security/advisories.
 Every version PR adds that version's entry here. CI refuses a version this
 file has no entry for (`tools/release/version.py --changelog`).
 
+## [27.1-rc.33] - 2026-11-19
+
+Passkeys that work on upgraded installs, a Passkeys link in the console's
+own Account section, a data-layer check, and certificates read from
+mounted directories.
+
+### Added
+- `inbuxa --config <path> --check` opens the data store the way a start
+  does, writes, reads and deletes one small object in the blob store, and
+  connects to the coordinator (NATS) once. It prints a line per part and
+  exits, starting nothing. A part that can't be used is reported as
+  `<part>: <case>: ...`, with the data-store exit codes from 27.1-rc.32.
+  Before, a wrong S3 key or NATS password only showed after the start.
+  (#473)
+- `INBUXA_TLS_CERTIFICATE_DIRS` names directories that each hold `tls.crt`
+  and `tls.key`, as a Kubernetes TLS Secret mounts them. Their certificates
+  are used for the names in them and aren't stored. Every node checks those
+  files, and the files of file-backed stored certificates, once a minute,
+  and reloads its certificates when they change, so a renewal no longer
+  waits for a restart. (#477)
+- Console: the Account section gets a Passkeys link under Credentials, so
+  people can manage their own passkeys without opening Directory ›
+  Accounts. Needs a console that has the page; an older one hides the link.
+  Thanks to Stefan. (#481)
+
+### Fixed
+- Passkeys: an install from before 27.1-rc.32 never got the passkey
+  permissions added to its stored default roles, so nobody on it, not even
+  the administrator, could list or add a passkey, and they couldn't be
+  granted by hand either. Start-up now adds them once to the user, tenant
+  administrator and administrator roles. A role that turns one off keeps it
+  off. A test now fails if a later permission is missed the same way.
+  Thanks to Faisal. (#483, fixes #478)
+- Two nodes starting together on a fresh store could both add the
+  defaults, and the second came up without its HTTP listener. Adding the
+  defaults now takes a short store lease, one node at a time. (#482, fixes
+  #436)
+
+### Upgrading
+- Nothing special: 27.1-rc.32 to 27.1-rc.33 rolls like any update, with no
+  store layout step.
+- Passkeys start working on an upgraded install at the first start of
+  27.1-rc.33. Nothing needs changing by hand.
+
 ## [27.1-rc.32] - 2026-11-19
 
 Passkey sign-in, a Logs page that can filter and follow, subjects in
