@@ -83,6 +83,10 @@ pub struct Directory {
     pub new_nonce: String,
     pub new_account: String,
     pub new_order: String,
+    /// inbuxa: a tenant's provider, so every request goes only to public
+    /// HTTPS addresses (see `http::https`).
+    #[serde(skip)]
+    pub public_only: bool,
 }
 
 #[derive(Debug, Deserialize, Eq, PartialEq, Clone, Copy)]

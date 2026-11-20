@@ -269,6 +269,49 @@ pub async fn test(test: &mut TestServer) {
     let key = registration(&user).await;
     let client_id = sign_in(&user, &key).await;
     policy(&admin, &user, &key, &client_id).await;
+    challenge_race(&key, &client_id).await;
+    claim_race(&test.server).await;
+}
+
+/// H1, without HTTP in the way: many readers of one challenge, all at once,
+/// and exactly one may use it. A ticket's next ceremony is a new claim.
+pub async fn claim_race(server: &common::Server) {
+    let store = server.in_memory_store();
+    let key = b"passkey-claim-race".to_vec();
+    let claims = (0..64)
+        .map(|_| http::auth::passkey::claim_once(store, &key, "ceremony-1", 60))
+        .collect::<Vec<_>>();
+    let won = futures::future::join_all(claims)
+        .await
+        .into_iter()
+        .filter(|claim| *claim.as_ref().unwrap())
+        .count();
+    assert_eq!(
+        won, 1,
+        "one challenge, read at once by 64, used {won} times"
+    );
+    assert!(
+        http::auth::passkey::claim_once(store, &key, "ceremony-2", 60)
+            .await
+            .unwrap(),
+        "a new ceremony under the same ticket is its own claim"
+    );
+}
+
+/// PK-10 under load (security batch 11, H1): one challenge sent several
+/// times at once signs in once. Each copy is signed with its own, higher
+/// counter, so only the challenge being used up can stop the rest.
+async fn challenge_race(key: &SoftKey, client_id: &str) {
+    let challenge = new_challenge().await;
+    let attempts = (0..6)
+        .map(|n| login(client_id, key.get(&challenge, 100 + n, ORIGIN)))
+        .collect::<Vec<_>>();
+    let responses = futures::future::join_all(attempts).await;
+    let signed_in = responses
+        .iter()
+        .filter(|response| response["type"] == "authenticated")
+        .count();
+    assert_eq!(signed_in, 1, "{responses:?}");
 }
 
 /// A software authenticator: one P-256 key, user verification always done.

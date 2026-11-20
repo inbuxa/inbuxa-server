@@ -39,7 +39,9 @@ use inbuxa_features::passkey::{self, Activated, HANDLE_LEN, Passkey};
 use jmap::inbuxa::passkey::{allowed_for, settings};
 use registry::schema::{enums::Permission, structs::Authentication};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use store::{
+    InMemoryStore,
     dispatch::lookup::KeyValue,
     rand::{RngExt, distr::Alphanumeric, rng},
     write::now,
@@ -164,6 +166,44 @@ fn challenge_key(id: &str) -> Vec<u8> {
     let mut key = vec![b'a'];
     key.extend_from_slice(id.as_bytes());
     KeyValue::<()>::build_key(KV_PASSKEY_CEREMONY, key)
+}
+
+/// Reads a challenge or ceremony and makes sure only one request gets it.
+///
+/// Reading and then deleting is two steps, so two requests sent together
+/// could both read it before either deleted it. Each reader also counts
+/// itself on a claim counter for what it read, which every in-memory store
+/// increments atomically (Redis, SQL, the key-value stores, sharded or not),
+/// and only the first one is handed the value. The counter is named after
+/// the value as well as the key: a registration ticket starts a new ceremony
+/// under the same key after a failed try, and that one gets its own claim.
+/// The counter expires with the challenge, so it needs no cleanup.
+async fn take_once(server: &Server, key: Vec<u8>, ttl: u64) -> trc::Result<Option<String>> {
+    let store = server.in_memory_store();
+    let Some(value) = store.key_get::<String>(key.clone()).await? else {
+        return Ok(None);
+    };
+    let first = claim_once(store, &key, &value, ttl).await?;
+    store.key_delete(key).await?;
+    Ok(first.then_some(value))
+}
+
+/// Counts a reader of `value` under `key`; true only for the first one.
+/// Public for the race test, which calls it directly: two sign-ins rarely
+/// land between a read and a delete over HTTP, but here they all do.
+pub async fn claim_once(
+    store: &InMemoryStore,
+    key: &[u8],
+    value: &str,
+    ttl: u64,
+) -> trc::Result<bool> {
+    let mut claim = key.to_vec();
+    claim.push(b'!');
+    claim.extend_from_slice(&Sha256::digest(value.as_bytes())[..16]);
+    store
+        .counter_incr(KeyValue::new(claim, 1).expires(ttl), true)
+        .await
+        .map(|claims| claims == 1)
 }
 
 /// A sign-in challenge between the two requests.
@@ -296,14 +336,9 @@ async fn check_assertion(
         return Err(refused("Unknown passkey challenge"));
     }
     let key = challenge_key(&assertion.challenge_id);
-    let Some(ceremony) = server
-        .in_memory_store()
-        .key_get::<String>(key.clone())
-        .await?
-    else {
+    let Some(ceremony) = take_once(server, key, CHALLENGE_SECONDS).await? else {
         return Err(refused("Unknown, used or expired passkey challenge"));
     };
-    server.in_memory_store().key_delete(key).await?;
     let ceremony = serde_json::from_str::<SignInCeremony>(&ceremony).map_err(|err| {
         trc::StoreEvent::DataCorruption
             .into_err()
@@ -571,16 +606,11 @@ async fn finish(
     ticket: &str,
     credential: &RegisterPublicKeyCredential,
 ) -> trc::Result<RegisterResponse> {
-    // Good once: read and deleted
+    // Good once: claimed, then deleted
     let key = ceremony_key(ticket);
-    let Some(ceremony) = server
-        .in_memory_store()
-        .key_get::<String>(key.clone())
-        .await?
-    else {
+    let Some(ceremony) = take_once(server, key, CEREMONY_SECONDS).await? else {
         return Ok(RegisterResponse::Expired);
     };
-    server.in_memory_store().key_delete(key).await?;
     let ceremony = serde_json::from_str::<Ceremony>(&ceremony).map_err(|err| {
         trc::StoreEvent::DataCorruption
             .into_err()

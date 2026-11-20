@@ -75,6 +75,7 @@ impl OpenIdDirectory {
         };
 
         Self::new(OidcConfig {
+            public_only: config.member_tenant_id.is_some(),
             issue_url: config.issuer_url,
             require_aud: config.require_audience,
             require_scopes: config.require_scopes.into_inner(),
@@ -90,9 +91,21 @@ impl OpenIdDirectory {
     }
 
     pub async fn new(mut config: OidcConfig) -> Result<Self, OidcError> {
-        let http = utils::http::http_client_builder(false)
+        let mut http = utils::http::http_client_builder(false)
             .user_agent("inbuxa/1.0") // types::brand!(); this crate does not depend on types
-            .timeout(Duration::from_secs(30))
+            .timeout(Duration::from_secs(30));
+        // inbuxa: a tenant's directory reaches only public addresses, with no
+        // redirects (a redirect to an IP literal would skip the resolver)
+        if config.public_only && !is_test_loopback(&config.issue_url) {
+            check_tenant_url("issuerUrl", &config.issue_url)?;
+            if let OpaqueTokens::Introspection(Introspection { url: Some(url), .. }) =
+                &config.opaque_tokens
+            {
+                check_tenant_url("introspectionUrl", url)?;
+            }
+            http = utils::public_ip::public_only(http).redirect(reqwest::redirect::Policy::none());
+        }
+        let http = http
             .build()
             .map_err(|e| OidcError::Network(format!("HTTP client build failed: {e}")))?;
 
@@ -114,6 +127,16 @@ impl OpenIdDirectory {
                 Err(err) => return Err(err),
             }
         };
+
+        // inbuxa: the provider names the rest of its URLs; a tenant's must be
+        // public too
+        if config.public_only && !is_test_loopback(&config.issue_url) {
+            check_tenant_url("jwks_uri", &document.jwks_uri)?;
+            check_tenant_url("userinfo_endpoint", &document.userinfo_endpoint)?;
+            if let Some(url) = &document.introspection_endpoint {
+                check_tenant_url("introspection_endpoint", url)?;
+            }
+        }
 
         // inbuxa: http-directory-services-13
         if let OpaqueTokens::Introspection(introspection) = &mut config.opaque_tokens
@@ -242,6 +265,51 @@ impl OpenIdDirectory {
     }
 }
 
+/// The test harness runs its identity provider (Keycloak) on localhost, as
+/// it serves push and reports on 127.0.0.1 (`common::network::public_only`).
+/// Never true outside test builds.
+fn is_test_loopback(_url: &str) -> bool {
+    #[cfg(feature = "test_mode")]
+    {
+        if let Some(host) = reqwest::Url::parse(_url)
+            .ok()
+            .and_then(|url| url.host_str().map(str::to_string))
+        {
+            return host == "localhost"
+                || host
+                    .trim_start_matches('[')
+                    .trim_end_matches(']')
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|ip| ip.is_loopback());
+        }
+    }
+    false
+}
+
+/// inbuxa: a URL a tenant's directory may use: HTTPS, and not an IP literal
+/// outside the public range. Host names are checked when they resolve
+/// (`utils::public_ip::public_only`).
+pub(crate) fn check_tenant_url(field: &str, url: &str) -> Result<(), OidcError> {
+    let refused = || {
+        OidcError::Config(format!(
+            "A tenant's directory must use public HTTPS addresses ({field})"
+        ))
+    };
+    let parsed = reqwest::Url::parse(url).map_err(|_| refused())?;
+    if parsed.scheme() != "https" {
+        return Err(refused());
+    }
+    let host = parsed.host_str().ok_or_else(refused)?;
+    let host = host
+        .strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+        .unwrap_or(host);
+    match host.parse::<std::net::IpAddr>() {
+        Ok(ip) if !utils::public_ip::is_global_ip(&ip) => Err(refused()),
+        _ => Ok(()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -270,6 +338,33 @@ mod tests {
                 }),
                 chosen
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tenant_url_tests {
+    use super::check_tenant_url;
+
+    #[test]
+    fn tenant_directory_urls() {
+        for bad in [
+            "http://idp.example.org",
+            "https://127.0.0.1/realms/x",
+            "https://10.0.0.5:8443/",
+            "https://[::1]/",
+            "https://[fd12::1]/",
+            "https://169.254.169.254/",
+            "not a url",
+        ] {
+            assert!(check_tenant_url("issuerUrl", bad).is_err(), "{bad}");
+        }
+        for ok in [
+            "https://idp.example.org/realms/x",
+            "https://8.8.8.8/",
+            "https://[2606:4700::1111]/",
+        ] {
+            assert!(check_tenant_url("issuerUrl", ok).is_ok(), "{ok}");
         }
     }
 }

@@ -44,6 +44,7 @@ pub mod principals;
 pub mod prop;
 pub mod put_get;
 pub mod sync;
+pub mod user_content; // inbuxa: uploaded files never run on this origin
 
 #[tokio::test(flavor = "multi_thread")]
 pub async fn webdav_tests() {
@@ -189,6 +190,7 @@ pub async fn webdav_tests() {
     basic::test(&test).await;
     put_get::test(&test).await;
     file_tasks::test(&test).await;
+    user_content::test(&test).await;
     mkcol::test(&test).await;
     copy_move::test(&test, assisted_discovery).await;
     prop::test(&test, assisted_discovery).await;
