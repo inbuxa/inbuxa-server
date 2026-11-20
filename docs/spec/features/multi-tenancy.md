@@ -263,6 +263,25 @@ Each requirement has an ID, and tests name the IDs they check.
   `usedDiskQuota` from its members' actual usage. `resetTenantQuotas`
   recomputes every tenant. Both can run while the server is live.
 
+- **MT-24.** A tenant proves it owns the domain names it adds. A domain
+  name or alias that a tenant administrator adds is saved in the domain's
+  `unverifiedNames`, and the domain gets a `verificationToken` (32
+  characters, set by the server, read-only). An unverified name is not a
+  local domain: mail for it isn't taken in, it gives no addresses to send
+  as, and nothing is signed for it. A domain whose own name is unverified is
+  all of that for every name it has. The tenant proves a name by publishing
+  a TXT record at `_inbuxa-verification.<name>` with the value
+  `inbuxa-verification=<token>`, then taking the name off `unverifiedNames`.
+  The save looks the record up and is refused with `invalidProperties`
+  naming the record if it isn't there. Names a server administrator adds are
+  trusted, and a server administrator may clear or add entries freely.
+  Names saved before MT-24 are trusted. Every name counts against
+  `maxDomains`: a domain is 1 plus its aliases, on create, on an update that
+  adds aliases, and on a move into a tenant.
+  **Why:** a domain name on a server belongs to whoever controls it in DNS,
+  and a tenant's names should be its own, the same rule hosted mail
+  services use (inbuxa-admin#257 follow-up).
+
 ### Branding
 
 - **MT-22.** A signed-in principal can read the logo that applies to it: its
@@ -343,7 +362,7 @@ Built 2026-09-18 from this spec, clean-room (hand-off brief
 `inbuxa: MT-n`. Acceptance tests 1 to 14 pass as `tests/src/system/tenant.rs`,
 called from `system_tests` with no gate.
 
-- **MT-1 to MT-18, MT-20 to MT-23:** built.
+- **MT-1 to MT-18, MT-20 to MT-24:** built.
 - **MT-19, MT-19a:** built, except the submission-time warning, **deferred**
   (see MT-19a) until the contract defines a warnings shape.
 - **ihasmail changes** (the section above) belong to inbuxa-webmail and

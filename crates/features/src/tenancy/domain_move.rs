@@ -167,7 +167,12 @@ pub async fn plan(
 
     // The destination's limits, the domain itself included
     if let Some(tenant_id) = to {
-        *adding.entry(TenantStorageQuota::MaxDomains).or_default() += 1;
+        // the domain itself, each of its names (MT-24)
+        let names = match registry.get(domain).await? {
+            Some(object) => quota::domain_names(&object.inner),
+            None => 1,
+        };
+        *adding.entry(TenantStorageQuota::MaxDomains).or_default() += names;
         let mut quotas = adding.into_iter().collect::<Vec<_>>();
         quotas.sort_unstable_by_key(|(quota, _)| *quota as u16);
         for (quota, count) in quotas {

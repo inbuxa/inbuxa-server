@@ -129,8 +129,15 @@ pub async fn check(
         && !matches!(new.inner, ObjectInner::Domain(_) if old.is_some())
     {
         let limit = limits(registry, tenant_id).await?;
-        if let Err(reached) =
-            quota::check(registry, tenant_id.document_id(), quota, limit(quota), 1).await?
+        let adding = quota::domain_names(&new.inner);
+        if let Err(reached) = quota::check(
+            registry,
+            tenant_id.document_id(),
+            quota,
+            limit(quota),
+            adding,
+        )
+        .await?
         {
             return Ok(Err(over_quota(reached, tenant_id)));
         }
@@ -150,6 +157,29 @@ pub async fn check(
             quota::check(registry, tenant_id.document_id(), quota, limit(quota), keys).await?
         {
             return Ok(Err(over_quota(reached, tenant_id)));
+        }
+    }
+
+    // MT-24: a domain given more aliases counts each one against maxDomains
+    if let (Some(old), Some(tenant_id), ObjectInner::Domain(_)) = (old, tenant, &new.inner)
+        && old.inner.member_tenant_id() == tenant
+    {
+        let before = quota::domain_names(&old.inner);
+        let now = quota::domain_names(&new.inner);
+        if now > before {
+            let quota = TenantStorageQuota::MaxDomains;
+            let limit = limits(registry, tenant_id).await?;
+            if let Err(reached) = quota::check(
+                registry,
+                tenant_id.document_id(),
+                quota,
+                limit(quota),
+                now - before,
+            )
+            .await?
+            {
+                return Ok(Err(over_quota(reached, tenant_id)));
+            }
         }
     }
 
@@ -199,7 +229,10 @@ pub fn locked_tenant(old: Option<&Object>, new: &Object) -> Option<Id> {
     let tenant = new.inner.member_tenant_id()?;
     let counted = quota::limit_for(&new.inner).is_some() && joins_tenant(old, new);
     let dkim = added_dkim_keys(old, new).is_some_and(|keys| keys > 0);
-    if counted || dkim {
+    // MT-24: a domain given more aliases takes more of maxDomains
+    let names = matches!(new.inner, ObjectInner::Domain(_))
+        && old.is_some_and(|old| quota::domain_names(&new.inner) > quota::domain_names(&old.inner));
+    if counted || dkim || names {
         Some(tenant)
     } else {
         disk_quota_tenant(old, new)
@@ -485,6 +518,15 @@ mod disk_quota_tests {
         assert_eq!(locked_tenant(Some(&two), &two), None);
         // Disk quota growth still locks
         assert_eq!(locked_tenant(Some(&staying), &account(Some(7), 10)), tenant);
+        // A domain given another alias (MT-24), or losing one
+        let plain = domain(Some(7));
+        let aliased = Object::from(Domain {
+            member_tenant_id: Some(Id::from(7u64)),
+            aliases: Map::new(vec!["alias.example.org".to_string()]),
+            ..Default::default()
+        });
+        assert_eq!(locked_tenant(Some(&plain), &aliased), tenant);
+        assert_eq!(locked_tenant(Some(&aliased), &plain), None);
     }
 
     #[test]

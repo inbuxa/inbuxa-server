@@ -179,6 +179,43 @@ fn without_last_field<T: ObjectImpl>(object: &T, version: u8) -> Vec<u8> {
 }
 
 /// `object` saved at `version`, before the fields pickled as `tail`.
+/// The MT-24 fields a domain saved before version 4 lacks, as they pickle
+/// when unset: no unverified names, no token.
+fn verification_tail() -> Vec<u8> {
+    let mut tail = Vec::new();
+    Map::<String>::default().pickle(&mut tail);
+    None::<String>.pickle(&mut tail);
+    tail
+}
+
+// MT-24: domains saved before name verification read back with every name
+// trusted; saved now, with what's still unverified and its token
+#[test]
+fn domains_saved_before_verification_trust_their_names() {
+    let domain = Domain {
+        name: "example.org".to_string(),
+        aliases: Map::new(vec!["example.net".to_string()]),
+        passkeys_allowed: false,
+        ..Default::default()
+    };
+    assert_eq!(
+        read(
+            ObjectType::Domain,
+            &without_tail(&domain, &verification_tail(), 3)
+        ),
+        ObjectInner::Domain(domain.clone())
+    );
+    let domain = Domain {
+        unverified_names: Map::new(vec!["example.net".to_string()]),
+        verification_token: Some("abc".to_string()),
+        ..domain
+    };
+    assert_eq!(
+        read(ObjectType::Domain, &domain.to_pickled_vec()),
+        ObjectInner::Domain(domain)
+    );
+}
+
 fn without_tail<T: ObjectImpl>(object: &T, unset: &[u8], version: u8) -> Vec<u8> {
     let mut bytes = object.to_pickled_vec();
     assert!(bytes.ends_with(&unset));
@@ -211,7 +248,14 @@ fn logos_saved_before_dark_mode_read_back_without_a_dark_logo() {
     None::<String>.pickle(&mut unset);
     true.pickle(&mut unset);
     assert_eq!(
-        read(ObjectType::Domain, &without_tail(&domain, &unset, 1)),
+        read(
+            ObjectType::Domain,
+            &without_tail(
+                &domain,
+                &[unset.as_slice(), &verification_tail()].concat(),
+                1
+            )
+        ),
         ObjectInner::Domain(domain.clone())
     );
     assert_eq!(
@@ -378,7 +422,14 @@ fn passkey_settings_saved_before_read_back_allowed() {
     let mut unset = Vec::new();
     true.pickle(&mut unset);
     assert_eq!(
-        read(ObjectType::Domain, &without_tail(&domain, &unset, 2)),
+        read(
+            ObjectType::Domain,
+            &without_tail(
+                &domain,
+                &[unset.as_slice(), &verification_tail()].concat(),
+                2
+            )
+        ),
         ObjectInner::Domain(domain.clone())
     );
     assert_eq!(

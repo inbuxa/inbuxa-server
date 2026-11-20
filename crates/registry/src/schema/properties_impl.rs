@@ -1323,6 +1323,7 @@ impl EnumImpl for Property {
             b"ttl" => Property::Ttl,
             b"unpackDirectory" => Property::UnpackDirectory,
             b"unboundListeners" => Property::UnboundListeners,
+            b"unverifiedNames" => Property::UnverifiedNames,
             b"updateRecords" => Property::UpdateRecords,
             b"uploadQuota" => Property::UploadQuota,
             b"uploadTtl" => Property::UploadTtl,
@@ -1343,6 +1344,7 @@ impl EnumImpl for Property {
             b"validateDomain" => Property::ValidateDomain,
             b"value" => Property::Value,
             b"variableName" => Property::VariableName,
+            b"verificationToken" => Property::VerificationToken,
             b"verifyAfterWrite" => Property::VerifyAfterWrite,
             b"version" => Property::Version,
             b"viewName" => Property::ViewName,
@@ -2276,6 +2278,8 @@ impl EnumImpl for Property {
             Property::Ttl => "ttl",
             Property::UnpackDirectory => "unpackDirectory",
             Property::UnboundListeners => "unboundListeners",
+            Property::UnverifiedNames => "unverifiedNames",
+            Property::VerificationToken => "verificationToken",
             Property::UpdateRecords => "updateRecords",
             Property::UploadQuota => "uploadQuota",
             Property::UploadTtl => "uploadTtl",
@@ -3060,6 +3064,8 @@ impl EnumImpl for Property {
             945 => Some(Property::PasskeyRpId),
             946 => Some(Property::MaxPasskeys),
             947 => Some(Property::UnboundListeners),
+            948 => Some(Property::UnverifiedNames),
+            949 => Some(Property::VerificationToken),
             615 => Some(Property::RequireClientRegistration),
             608 => Some(Property::RequireScopes),
             525 => Some(Property::RequireTls),
@@ -3271,7 +3277,7 @@ impl EnumImpl for Property {
         }
     }
 
-    const COUNT: usize = 948;
+    const COUNT: usize = 950;
 }
 
 impl serde::Serialize for Property {

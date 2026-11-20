@@ -73,6 +73,8 @@ pub const DOMAIN_FLAG_RELAY: u8 = 1;
 pub const DOMAIN_FLAG_SUB_ADDRESSING: u8 = 1 << 1;
 // inbuxa: SCIM-15, SCIM-58
 pub const DOMAIN_FLAG_SCIM: u8 = 1 << 2;
+// inbuxa: MT-24: a tenant added the domain and hasn't proven it owns its name
+pub const DOMAIN_FLAG_UNVERIFIED: u8 = 1 << 3;
 
 #[derive(Debug, Clone, Default)]
 pub struct AccountCache {
@@ -362,5 +364,22 @@ impl DomainCache {
     // inbuxa: SCIM-15, SCIM-58
     pub fn allows_scim(&self) -> bool {
         self.flags & DOMAIN_FLAG_SCIM != 0
+    }
+
+    // inbuxa: MT-24: whether the domain's own name is proven. An unproven
+    // domain receives no mail, gives its accounts no addresses to send as
+    // and signs nothing; its unproven aliases are left out of `names`.
+    pub fn is_verified(&self) -> bool {
+        self.flags & DOMAIN_FLAG_UNVERIFIED == 0
+    }
+
+    // inbuxa: MT-24: whether mail for `name` is this domain's: a proven
+    // domain and one of its proven names
+    pub fn serves(&self, name: &str) -> bool {
+        self.is_verified()
+            && self
+                .names
+                .iter()
+                .any(|known| known.eq_ignore_ascii_case(name))
     }
 }
