@@ -93,6 +93,13 @@ Tenant limits hold across many accounts and parallel writes, tenants
 verify the domain names they add, and a read-only config.json is reported
 clearly.
 
+### Security
+High
+- Multi-tenancy: a tenant administrator could add any domain name, as a
+  domain or as an alias, and the server then delivered mail that its other
+  accounts sent to that name into the tenant. Names a tenant adds now have
+  to be verified first, as described below. (GHSA-rvw7-gvh9-mx8g, #503)
+
 ### Changed
 - Multi-tenancy: a domain name a tenant administrator adds, as a new
   domain, a rename or an alias, has to be verified before the server uses
