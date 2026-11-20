@@ -520,15 +520,33 @@ impl Store {
     }
 
     pub async fn danger_destroy_account(&self, account_id: u32) -> trc::Result<()> {
-        for subspace in [SUBSPACE_LOGS, SUBSPACE_INDEXES, SUBSPACE_COUNTER] {
+        // inbuxa: MT-20: a tenant's usage counter sits beside the account
+        // with the same number, [id][u8::MAX - 1], and accounts and tenants
+        // are numbered apart, so clearing the account's counters skips it
+        let tenant_quota = KeySerializer::new(U32_LEN + 1)
+            .write(account_id)
+            .write(u8::MAX - 1)
+            .finalize();
+        let after_tenant_quota = KeySerializer::new(U32_LEN + 1)
+            .write(account_id)
+            .write(u8::MAX)
+            .finalize();
+        let start = KeySerializer::new(U32_LEN).write(account_id).finalize();
+        let end = KeySerializer::new(U32_LEN).write(account_id + 1).finalize();
+        for (subspace, from, to) in [
+            (SUBSPACE_LOGS, &start, &end),
+            (SUBSPACE_INDEXES, &start, &end),
+            (SUBSPACE_COUNTER, &start, &tenant_quota),
+            (SUBSPACE_COUNTER, &after_tenant_quota, &end),
+        ] {
             self.delete_range(
                 AnyKey {
                     subspace,
-                    key: KeySerializer::new(U32_LEN).write(account_id).finalize(),
+                    key: from.as_slice(),
                 },
                 AnyKey {
                     subspace,
-                    key: KeySerializer::new(U32_LEN).write(account_id + 1).finalize(),
+                    key: to.as_slice(),
                 },
             )
             .await

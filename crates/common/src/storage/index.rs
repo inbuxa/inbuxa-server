@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{auth::AccountTenantIds, sharing::notification::ShareNotification};
@@ -19,7 +21,7 @@ use store::{
     Serialize, SerializeInfallible,
     write::{
         Archive, Archiver, BatchBuilder, BlobLink, BlobOp, IntoOperations, Params, SearchIndex,
-        ValueClass,
+        TENANT_OF_ACCOUNT, ValueClass,
     },
 };
 use types::{
@@ -510,9 +512,11 @@ fn build_index(
 
             batch.add(ValueClass::Quota, value);
 
-            if let Some(tenant_id) = tenant_id {
-                batch.add(ValueClass::TenantQuota(tenant_id), value);
-            }
+            // inbuxa: MT-20: the tenant is the data owner's, set at commit
+            batch.add(
+                ValueClass::TenantQuota(tenant_id.unwrap_or(TENANT_OF_ACCOUNT)),
+                value,
+            );
         }
         IndexValue::LogItem {
             sync_collection,
@@ -731,9 +735,11 @@ fn merge_index(
             let value = new_used as i64 - old_used as i64;
             batch.add(ValueClass::Quota, value);
 
-            if let Some(tenant_id) = tenant_id {
-                batch.add(ValueClass::TenantQuota(tenant_id), value);
-            }
+            // inbuxa: MT-20: the tenant is the data owner's, set at commit
+            batch.add(
+                ValueClass::TenantQuota(tenant_id.unwrap_or(TENANT_OF_ACCOUNT)),
+                value,
+            );
         }
         (
             IndexValue::LogItem {

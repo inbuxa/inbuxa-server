@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{Server, ipc::PushNotification};
@@ -20,6 +22,8 @@ use utils::{map::bitmap::Bitmap, snowflake::SnowflakeIdGenerator};
 impl Server {
     pub async fn commit_batch(&self, mut builder: BatchBuilder) -> trc::Result<AssignedIds> {
         let mut assigned_ids = AssignedIds::default();
+        // inbuxa: MT-20: tenant storage changes follow the data's owner
+        self.resolve_tenant_quota(&mut builder).await?;
         let mut commit_points = builder.commit_points();
 
         for commit_point in commit_points.iter() {

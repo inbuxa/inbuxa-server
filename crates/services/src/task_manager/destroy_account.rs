@@ -57,12 +57,12 @@ async fn destroy_account(server: &Server, task: &TaskDestroyAccount) -> trc::Res
 
     // inbuxa: LH-8, LH-10: a kept account waits for its time, and a held one
     // for its release; "destroy now" clears the kept record first
-    if let Some(kept) =
-        inbuxa_features::undelete::data::kept_account(&server.core.storage.data, account_id).await?
-    {
+    let kept = inbuxa_features::undelete::data::kept_account(&server.core.storage.data, account_id)
+        .await?;
+    if let Some(kept) = &kept {
         let now = store::write::now();
         let held = inbuxa_features::hold::is_held_until(kept.kept_until)
-            || server.is_kept_held(account_id, &kept).await?;
+            || server.is_kept_held(account_id, kept).await?;
         if held || kept.kept_until > now {
             let retry = if held { now + 86_400 } else { kept.kept_until };
             return Ok(TaskResult::deferred(
@@ -179,12 +179,41 @@ async fn destroy_account(server: &Server, task: &TaskDestroyAccount) -> trc::Res
     // Unlink all accounts's blobs
     destroy_account_blobs(server, account_id).await?;
 
+    // inbuxa: MT-20: what the account stored leaves its tenant's usage with
+    // it. Read before the data goes and taken off after, so a retry after a
+    // failed destroy (the counter still there) or a finished one (gone, so
+    // zero) takes it off once.
+    let tenant_id = match &kept {
+        Some(kept) => kept.member_tenant_id.map(|id| id as u32),
+        None => server
+            .registry()
+            .object::<registry::schema::structs::Domain>(task.account_domain_id)
+            .await?
+            .and_then(|domain| domain.member_tenant_id)
+            .map(|id| id.document_id()),
+    };
+    let used = server.get_used_quota_account(account_id).await?.max(0);
+
     // Destroy account data
     server
         .store()
         .danger_destroy_account(account_id)
         .await
         .caused_by(trc::location!())?;
+
+    if let Some(tenant_id) = tenant_id
+        && used > 0
+    {
+        let mut batch = BatchBuilder::new();
+        batch.add(ValueClass::TenantQuota(tenant_id), -used);
+        server
+            .core
+            .storage
+            .data
+            .write(batch.build_all())
+            .await
+            .caused_by(trc::location!())?;
+    }
 
     Ok(TaskResult::Success(vec![]))
 }

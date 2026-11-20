@@ -205,6 +205,12 @@ pub enum ValueClass {
     NodeId(u16),
 }
 
+/// inbuxa: MT-20: a tenant storage change whose tenant isn't known yet. The
+/// change belongs to the tenant of the account whose data it is, which
+/// `BatchBuilder::retarget_tenant_quota` fills in before the write; one
+/// still unresolved when the batch is built is dropped.
+pub const TENANT_OF_ACCOUNT: u32 = u32::MAX;
+
 #[derive(Debug, PartialEq, Clone, Eq, Hash)]
 pub enum IndexPropertyClass {
     Hash { property: u8, hash: CheekyHash },
