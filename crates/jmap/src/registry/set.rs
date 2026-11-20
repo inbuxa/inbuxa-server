@@ -379,7 +379,13 @@ impl RegistrySet for Server {
 
                 // Process modifications
                 let mut cache_invalidator = CacheInvalidationBuilder::default();
+                // inbuxa: inbuxa-admin#257: the tenant disk-quota lock the last
+                // write took, released once it's saved or refused
+                let mut disk_lock: Option<u32> = None;
                 'outer: for (modification, mut value, mut new_object) in modifications {
+                    if let Some(tenant_id) = disk_lock.take() {
+                        crate::inbuxa::tenant_disk_lock::release(self, tenant_id).await;
+                    }
                     // Initial validations
                     let is_create = matches!(modification, Modification::Create { .. });
                     let mut unpatched_properties = VecMap::new();
@@ -655,6 +661,23 @@ impl RegistrySet for Server {
                         Modification::Update { id, object } => (Some(*id), Some(object)),
                         Modification::Create { .. } => (None, None),
                     };
+
+                    // inbuxa: inbuxa-admin#257: a write that could grow the
+                    // tenant's allocated disk space holds its lock until saved
+                    if let Some(tenant_id) =
+                        inbuxa_features::tenancy::writes::disk_quota_tenant(stored, &new_object)
+                    {
+                        let tenant_id = tenant_id.document_id();
+                        if !crate::inbuxa::tenant_disk_lock::acquire(self, tenant_id).await? {
+                            set.failed(
+                                modification,
+                                SetError::forbidden()
+                                    .with_description(crate::inbuxa::tenant_disk_lock::BUSY),
+                            );
+                            continue 'outer;
+                        }
+                        disk_lock = Some(tenant_id);
+                    }
                     let after_save = match inbuxa_features::tenancy::writes::check(
                         self.registry(),
                         stored_id,
@@ -670,12 +693,14 @@ impl RegistrySet for Server {
                         }
                     };
 
-                    // inbuxa: inbuxa-admin#257: an account's disk quota fits
-                    // within its tenant's
+                    // inbuxa: inbuxa-admin#257: the tenant's accounts' disk
+                    // quotas add up to no more than its own
                     if let Err(err) = inbuxa_features::tenancy::writes::check_disk_quota(
                         self.registry(),
+                        stored_id,
                         stored,
                         &new_object,
+                        false,
                     )
                     .await?
                     {
@@ -946,6 +971,9 @@ impl RegistrySet for Server {
                         }
                         set.server.notify_task_queue();
                     }
+                }
+                if let Some(tenant_id) = disk_lock.take() {
+                    crate::inbuxa::tenant_disk_lock::release(self, tenant_id).await;
                 }
 
                 // Process destroy

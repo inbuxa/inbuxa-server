@@ -963,7 +963,7 @@ pub async fn test(test: &mut TestServer) {
         .await;
 
     // inbuxa-admin#257: an account's disk quota can't exceed its tenant's,
-    // whoever sets it
+    // whoever sets it, and neither can its accounts' quotas together
     let d_limit = (two + one / 2) as u64;
     let with_quota = |name: &str, quota: u64| {
         structs::Account::User(structs::UserAccount {
@@ -983,6 +983,14 @@ pub async fn test(test: &mut TestServer) {
     let d4 = d_admin
         .registry_create_object(with_quota("d4", d_limit))
         .await;
+    // ... nor can several add up to more than it
+    for writer in [&d_admin, &admin] {
+        writer
+            .registry_create_object_expect_err(with_quota("d5", 1))
+            .await
+            .assert_type(SetErrorType::InvalidProperties)
+            .assert_description_contains("other accounts already have");
+    }
     d_admin
         .registry_update_object_expect_err(
             ObjectType::Account,
@@ -1001,6 +1009,14 @@ pub async fn test(test: &mut TestServer) {
             ObjectType::Account,
             d4,
             json!({ Property::Description: "still here" }),
+        )
+        .await;
+    // ... and its quota can still be lowered, even while over
+    d_admin
+        .registry_update_object(
+            ObjectType::Account,
+            d4,
+            json!({ Property::Quotas: VecMap::from_iter([(StorageQuota::MaxDiskQuota, d_limit - 1)]) }),
         )
         .await;
     admin
