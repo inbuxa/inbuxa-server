@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use super::jose::{Body, eab_sign, sign};
@@ -49,7 +51,12 @@ pub async fn acme_create_account(
         *contact = format!("mailto:{}", email);
     }
 
-    let directory = Directory::discover(&provider.directory, provider.max_retries as u32).await?;
+    let directory = Directory::discover(
+        &provider.directory,
+        provider.max_retries as u32,
+        provider.member_tenant_id.is_some(),
+    )
+    .await?;
     let account_key = EcdsaKeyPair::generate_pkcs8(ALG, &SystemRandom::new()).unwrap();
     let key_pair = EcdsaKeyPair::from_pkcs8(ALG, account_key.as_ref())
         .map_err(|err| AcmeError::Crypto(format!("Failed to create ECDSA key pair: {}", err)))?;
@@ -79,6 +86,7 @@ pub async fn acme_create_account(
             Method::POST,
             Some(body),
             provider.max_retries as u32,
+            directory.public_only,
         )
         .await?,
         "Location",
