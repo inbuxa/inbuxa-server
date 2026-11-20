@@ -15,6 +15,49 @@ https://github.com/inbuxa/inbuxa-server/security/advisories.
 Every version PR adds that version's entry here. CI refuses a version this
 file has no entry for (`tools/release/version.py --changelog`).
 
+## [27.1-rc.37] - 2026-11-20
+
+27.1-rc.36 with 2 security fixes from a private security review (1 high,
+1 medium), two hardening changes and a fix for spam-training samples left
+behind. 27.1-rc.1 to 27.1-rc.36 are affected, and so is 2026.x up to and
+including 2026.11.20. The same security fixes are in 2026.11.20.1.
+
+### Security
+High
+- WebDAV: an uploaded HTML or SVG file ran as a page of the server's
+  origin when opened in a browser. Every WebDAV file answer now carries
+  `Content-Security-Policy: default-src 'none'; frame-ancestors 'none';
+  sandbox` and `nosniff`; only raster images, audio, video and plain text
+  are shown inline, everything else downloads. (GHSA-v4c6-686h-h927, #511)
+
+Medium
+- Multi-tenancy: a tenant administrator could make the server send
+  requests to internal addresses through an ACME or DNS provider. A
+  tenant's providers now reach only public addresses (HTTPS for ACME and
+  HTTP-based DNS providers), RFC 2136 servers must be public, and fields
+  built into URLs must be plain names. ACME errors carry only the problem
+  type and detail. (GHSA-qmc9-xcrm-w836, #511)
+
+### Changed
+- A tenant's OIDC directory reaches only public HTTPS addresses,
+  discovered endpoints included. (#511)
+- Passkeys: a sign-in challenge or registration ceremony sent several
+  times at once is used once. (#511)
+
+### Fixed
+- Deleting a message whose spam-training sample was still held left the
+  sample's record behind for good, also after the account was deleted.
+  (#510)
+
+### Upgrading
+- WebDAV: HTML, SVG, XML, PDF and untyped files now download instead of
+  opening in the browser.
+- Tenant-owned ACME providers, DNS providers and OIDC directories at a
+  private, loopback or plain-HTTP address stop working; move them to a
+  public HTTPS address, or have a server administrator own them.
+- 27.1-rc.36 to 27.1-rc.37 rolls like any update, with no store layout
+  step.
+
 ## [27.1-rc.36] - 2026-11-20
 
 A tenant's disk usage now matches what its accounts store: calendar,
