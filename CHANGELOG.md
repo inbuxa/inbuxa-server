@@ -11,6 +11,25 @@ https://github.com/inbuxa/inbuxa-server/security/advisories.
 Every version PR adds that version's entry here. CI refuses a version this
 file has no entry for (`tools/release/changelog-check.py`).
 
+## [2026.11.20] - 2026-11-20
+
+### Changed
+- Multi-tenancy: a domain name a tenant administrator adds, as a new
+  domain, a rename or an alias, has to be verified before the server uses
+  it. The tenant publishes a TXT record at `_inbuxa-verification.<name>`
+  with `inbuxa-verification=<token>` (the domain's `verificationToken`),
+  then takes the name off the domain's `unverifiedNames`. Until then the
+  name takes no mail and gives no addresses to send as. Names a server
+  administrator adds need no record. Every name, aliases included, counts
+  toward the tenant's `maxDomains`. (#504)
+
+### Upgrading
+- Domain names saved before this version are kept as they are, verified.
+  If tenant administrators can manage domains on your server, review the
+  domains and aliases your tenants have added.
+- Domains are stored in a new format version; an upgrade to 27.1 reads them
+  back the same.
+
 ## [2026.11.18.3] - 2026-11-18
 
 3 security fixes from our own review of the suite (1 high, 1 medium, 1 low)
