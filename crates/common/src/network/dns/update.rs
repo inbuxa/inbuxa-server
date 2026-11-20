@@ -104,6 +104,8 @@ pub static DNS_RECORDS: std::sync::LazyLock<
 
 impl DnsUpdater {
     pub async fn build(server: DnsServer, core: Arc<Core>) -> Result<Self, String> {
+        // inbuxa: a tenant's provider only reaches public addresses (F3)
+        super::tenant_endpoints::check_tenant_dns_server(&server).await?;
         match server {
             DnsServer::Tsig(server) => Ok(DnsUpdater {
                 polling_interval: server.polling_interval.into_inner(),

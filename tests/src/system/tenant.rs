@@ -1297,6 +1297,8 @@ pub async fn test(test: &mut TestServer) {
                 .assert_destroyed(&[domain]);
         }
     }
+    tenant_outbound_requests(&admin, t_id).await;
+
     for tenant in [t_id, u_id, p_id, q_id, d_id] {
         admin
             .registry_destroy(ObjectType::Tenant, [tenant])
@@ -1304,6 +1306,116 @@ pub async fn test(test: &mut TestServer) {
             .assert_destroyed(&[tenant]);
     }
     let _ = u_domain;
+}
+
+/// A tenant's own ACME and DNS providers only reach public HTTPS addresses,
+/// and names that go into a provider's URL can't move its host (security
+/// batch 11, F2 and F3). The server's own providers keep any destination.
+async fn tenant_outbound_requests(admin: &Account, tenant: Id) {
+    use registry::schema::{
+        enums::{IpProtocol, TsigAlgorithm},
+        structs::{
+            AcmeProvider, DnsServer, DnsServerRoute53, DnsServerTsig, SecretKey, SecretKeyValue,
+        },
+    };
+    use registry::types::duration::Duration;
+
+    // ACME: an internal or plain-HTTP directory is refused before any request
+    for directory in [
+        "https://10.0.0.1/dir",
+        "https://169.254.169.254/latest/meta-data/",
+        "http://acme.example.org/dir",
+        "https://[::1]/dir",
+    ] {
+        admin
+            .registry_create_object_expect_err(AcmeProvider {
+                directory: directory.to_string(),
+                contact: Map::new(vec!["mailto:ops@t.example.org".to_string()]),
+                member_tenant_id: Some(tenant),
+                ..Default::default()
+            })
+            .await
+            .assert_type(SetErrorType::InvalidProperties)
+            .assert_description_contains("public HTTPS");
+    }
+    // ... and a host name that resolves to loopback is refused when it resolves
+    let err = admin
+        .registry_create_object_expect_err(AcmeProvider {
+            directory: "https://localhost:1/dir".to_string(),
+            contact: Map::new(vec!["mailto:ops@t.example.org".to_string()]),
+            member_tenant_id: Some(tenant),
+            ..Default::default()
+        })
+        .await;
+    err.assert_type(SetErrorType::InvalidProperties);
+    // The server's own provider isn't held to it: it fails only on the
+    // connection, and the refused body isn't reflected either way
+    let err = admin
+        .registry_create_object_expect_err(AcmeProvider {
+            directory: "https://127.0.0.1:1/dir".to_string(),
+            contact: Map::new(vec!["mailto:ops@example.org".to_string()]),
+            ..Default::default()
+        })
+        .await;
+    err.assert_type(SetErrorType::InvalidProperties);
+    assert!(
+        !err.description
+            .as_deref()
+            .unwrap_or_default()
+            .contains("public HTTPS"),
+        "server-owned ACME provider: {err:?}"
+    );
+
+    // DNS: RFC 2136 to a private address, and a region that moves the host
+    let tsig = |host: &str, member_tenant_id: Option<Id>| {
+        DnsServer::Tsig(DnsServerTsig {
+            host: host.parse().unwrap(),
+            port: 53,
+            key_name: "update-key".to_string(),
+            key: SecretKey::Value(SecretKeyValue {
+                secret: "c2VjcmV0".into(),
+            }),
+            protocol: IpProtocol::Udp,
+            tsig_algorithm: TsigAlgorithm::HmacSha256,
+            description: "tenant outbound test".to_string(),
+            member_tenant_id,
+            timeout: Duration::from_millis(1_000),
+            ttl: Duration::from_millis(60_000),
+            polling_interval: Duration::from_millis(100),
+            propagation_timeout: Duration::from_millis(1_000),
+            propagation_delay: None,
+        })
+    };
+    for host in ["10.0.0.53", "127.0.0.1", "fd00::53"] {
+        admin
+            .registry_create_object_expect_err(tsig(host, Some(tenant)))
+            .await
+            .assert_type(SetErrorType::InvalidProperties)
+            .assert_description_contains("public address");
+    }
+    let route53 = |region: &str| {
+        DnsServer::Route53(DnsServerRoute53 {
+            access_key_id: "AKIDEXAMPLE".to_string(),
+            secret_access_key: SecretKey::Value(SecretKeyValue {
+                secret: "secret".into(),
+            }),
+            region: region.to_string(),
+            description: "tenant outbound test".to_string(),
+            member_tenant_id: Some(tenant),
+            ..Default::default()
+        })
+    };
+    admin
+        .registry_create_object_expect_err(route53("x@10.0.0.1/"))
+        .await
+        .assert_type(SetErrorType::InvalidProperties)
+        .assert_description_contains("region may only contain");
+    // A private DNS server is a normal setup for the server's own provider
+    let server_owned = admin.registry_create_object(tsig("10.0.0.53", None)).await;
+    admin
+        .registry_destroy(ObjectType::DnsServer, [server_owned])
+        .await
+        .assert_destroyed(&[server_owned]);
 }
 
 /// Acceptance test 15 (compat): INBUXA's existing tenants, their members and
