@@ -15,6 +15,35 @@ https://github.com/inbuxa/inbuxa-server/security/advisories.
 Every version PR adds that version's entry here. CI refuses a version this
 file has no entry for (`tools/release/version.py --changelog`).
 
+## [27.1-rc.36] - 2026-11-20
+
+A tenant's disk usage now matches what its accounts store: calendar,
+contact and file writes are checked at the size they're charged, and
+destroying an account no longer upsets any tenant's count.
+
+### Fixed
+- Destroying an account could reset the disk usage of an unrelated tenant
+  that had the same number, so the tenant could store more than its
+  quota until a recount. Destroying an account now takes its usage off its
+  own tenant instead. (#507, fixes #499)
+- Copying or moving a single event or contact into another account didn't
+  check that account's quota or its tenant's. (#507, fixes #499)
+- CalDAV, CardDAV and WebDAV writes were checked at the bare body length,
+  not the size an item is charged, so each could go a few hundred bytes
+  past a limit. Creating, updating, copying and moving items now check the
+  charged size, and a refused file upload stores nothing. (#507, #508)
+- When a sharee, a delegate or an administrator wrote into someone else's
+  account, the change in usage could be counted against the writer's
+  tenant instead of the account's. (#507)
+- A tenant recount left out deleted members whose data is still kept.
+  (#507)
+
+### Upgrading
+- Run a tenant quota recount after upgrading if tenants' accounts have been
+  destroyed, to correct counters the old destroy reset.
+- 27.1-rc.35 to 27.1-rc.36 rolls like any update, with no store layout
+  step.
+
 ## [27.1-rc.35] - 2026-11-20
 
 Tenant limits hold across many accounts and parallel writes, tenants
@@ -60,6 +89,9 @@ clearly.
   domains and aliases your tenants have added.
 - Items deleted before this version aren't counted while they're kept;
   items deleted from now on are.
+- In a cluster, have tenants leave their domains alone until every node
+  runs 27.1-rc.35: a domain saved through an older node during the roll
+  loses its pending verification.
 - 27.1-rc.34 to 27.1-rc.35 rolls like any update, with no store layout
   step.
 
