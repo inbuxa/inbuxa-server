@@ -145,7 +145,8 @@ pub async fn test(test: &mut TestServer) {
     test.wait_for_tasks().await;
     assert_eq!(user.archived().await.len(), 4, "test 3");
 
-    // Acceptance test 13: archived copies don't count toward quota
+    // Acceptance test 13: archived copies count toward quota while kept
+    // (UD-14)
     let used = test
         .server
         .get_used_quota_account(user.id().document_id())
@@ -164,17 +165,35 @@ pub async fn test(test: &mut TestServer) {
     .await;
     client.email_destroy(&id).await.unwrap();
     test.wait_for_tasks().await;
-    assert_eq!(
-        test.server
-            .get_used_quota_account(user.id().document_id())
-            .await
-            .unwrap(),
-        used,
-        "test 13"
-    );
     let item = user.archived_with_subject("Two labels").await;
+    let size = item["size"].as_i64().expect("test 13: size");
+    assert_eq!(
+        used_now(&test.server, user.id().document_id()).await,
+        used + size,
+        "test 13: counted while kept"
+    );
+    // ... and a counted item restores even into a full account (UD-10)
+    admin
+        .registry_update_object(
+            ObjectType::Account,
+            user.id(),
+            json!({ Property::Quotas: {"maxDiskQuota": used + size} }),
+        )
+        .await;
     user.request_restore(item.object_id()).await;
     test.wait_for_tasks().await;
+    assert_eq!(
+        used_now(&test.server, user.id().document_id()).await,
+        used + size,
+        "test 13: the restored message counts instead, once"
+    );
+    admin
+        .registry_update_object(
+            ObjectType::Account,
+            user.id(),
+            json!({ Property::Quotas: {} }),
+        )
+        .await;
     let restored = user.email_with_subject("Two labels").await;
     assert_eq!(
         restored["mailboxIds"],
@@ -226,11 +245,18 @@ pub async fn test(test: &mut TestServer) {
     test.wait_for_tasks().await;
     assert_eq!(user.count_with_subject("Via JMAP").await, 1, "test 9");
 
-    // Acceptance test 10: the user destroys an archived item for good (UD-12)
+    // Acceptance test 10: the user destroys an archived item for good (UD-12),
+    // and its space comes back (UD-14)
     let item = user.archived_with_subject("Via IMAP").await;
+    let before = used_now(&test.server, user.id().document_id()).await;
     user.registry_destroy(ObjectType::ArchivedItem, [item.object_id()])
         .await
         .assert_destroyed(&[item.object_id()]);
+    assert_eq!(
+        used_now(&test.server, user.id().document_id()).await,
+        before - item["size"].as_i64().expect("test 10: size"),
+        "test 10: its bytes come off"
+    );
     assert!(
         user.archived()
             .await
@@ -425,7 +451,8 @@ pub async fn test(test: &mut TestServer) {
     );
 
     // Acceptance test 8: a restore past the account's quota is refused, and
-    // the item stays archived (UD-10)
+    // the item stays archived (UD-10). The item's own bytes already count, so
+    // the account has to be over its limit for that
     let used = test
         .server
         .get_used_quota_account(user.id().document_id())
@@ -435,7 +462,7 @@ pub async fn test(test: &mut TestServer) {
         .registry_update_object(
             ObjectType::Account,
             user.id(),
-            json!({ Property::Quotas: {"maxDiskQuota": used} }),
+            json!({ Property::Quotas: {"maxDiskQuota": used - 1} }),
         )
         .await;
     let item = user.archived_with_subject("Via POP3").await;
@@ -1065,4 +1092,9 @@ impl Account {
         )
         .await;
     }
+}
+
+// UD-14: what an account's usage counter says now
+async fn used_now(server: &common::Server, account_id: u32) -> i64 {
+    server.get_used_quota_account(account_id).await.unwrap()
 }

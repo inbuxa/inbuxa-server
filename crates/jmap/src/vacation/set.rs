@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use super::get::VacationResponseGet;
@@ -244,6 +246,7 @@ impl VacationResponseSet for Server {
                 }
             }
 
+            let prev_size = prev_sieve.as_ref().map_or(0, |prev| prev.inner.size as u64);
             let mut obj = ObjectIndexBuilder::new()
                 .with_current_opt(prev_sieve)
                 .with_changes(sieve)
@@ -265,14 +268,33 @@ impl VacationResponseSet for Server {
 
             // Create sieve script only if there are changes
             if build_script {
+                let script = self.build_script(obj.changes_mut().unwrap())?;
+
+                // inbuxa: a bigger script counts against quota, as a Sieve
+                // script's does
+                let new_size = obj.changes_mut().unwrap().size as u64;
+                if new_size > prev_size {
+                    let account = self.account(account_id).await?;
+                    match self
+                        .has_available_quota(&account, new_size - prev_size)
+                        .await
+                    {
+                        Ok(()) => {}
+                        Err(err)
+                            if err.matches(trc::EventType::Limit(trc::LimitEvent::Quota))
+                                || err.matches(trc::EventType::Limit(
+                                    trc::LimitEvent::TenantQuota,
+                                )) =>
+                        {
+                            return Ok(set_error(response, create_id, SetError::over_quota()));
+                        }
+                        Err(err) => return Err(err),
+                    }
+                }
+
                 // Upload new blob
-                let (blob_hash, blob_hold) = self
-                    .put_temporary_blob(
-                        account_id,
-                        &self.build_script(obj.changes_mut().unwrap())?,
-                        60,
-                    )
-                    .await?;
+                let (blob_hash, blob_hold) =
+                    self.put_temporary_blob(account_id, &script, 60).await?;
                 obj.changes_mut().unwrap().blob_hash = blob_hash;
                 batch.clear(blob_hold);
             };

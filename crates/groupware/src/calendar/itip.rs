@@ -263,11 +263,12 @@ impl ItipIngest for Server {
             let mut ical = itip.clone();
             itip_import_message(&mut ical)?;
 
-            // Validate quota
+            // Validate quota: inbuxa: both the event and the notification
+            // beside it are stored, each the message's size
             if self
                 .has_available_quota(
                     self.account(account_id).await?.as_ref(),
-                    itip_message.len() as u64,
+                    2 * itip_message.len() as u64,
                 )
                 .await
                 .is_err()
@@ -782,7 +783,10 @@ async fn commit_itip_merge(
     }
 
     // Validate quota
-    let extra_bytes = (event.size as u64).saturating_sub(event_.inner.size.to_native() as u64);
+    // inbuxa: the notification stored beside the update counts too
+    let extra_bytes = (event.size as u64)
+        .saturating_sub(event_.inner.size.to_native() as u64)
+        .saturating_add(itip_size as u64);
     if extra_bytes > 0
         && server
             .has_available_quota(server.account(account_id).await?.as_ref(), extra_bytes)

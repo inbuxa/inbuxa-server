@@ -133,6 +133,7 @@ pub async fn archive(
             mailboxes: note.mailboxes,
             keywords: note.keywords,
         },
+        note.size,
     )
     .await?;
 

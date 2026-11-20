@@ -8,17 +8,23 @@
 //! its account index, with no link to the account, so deleting an account
 //! isn't refused while it has archived items. Upstream's account removal
 //! task clears exactly these two keys.
+//!
+//! UD-14: an item counts toward its account's and its tenant's storage while
+//! it's kept, so deleting doesn't free space until the item goes. Without
+//! this, a member could fill the account, delete, and fill it again, keeping
+//! the limit's worth of data once more every time for the whole retention
+//! period.
 
 use crate::undelete::data::{self, Change};
 use registry::schema::prelude::Property;
 use registry::{
     schema::{prelude::ObjectType, structs::ArchivedItem},
-    types::{EnumImpl, ObjectImpl, index::IndexValue},
+    types::{EnumImpl, ObjectImpl, id::ObjectId, index::IndexValue},
 };
 use store::{
     RegistryStore, SerializeInfallible, Store,
     registry::RegistryQuery,
-    write::{BatchBuilder, BlobLink, BlobOp, RegistryClass, ValueClass, now},
+    write::{BatchBuilder, BlobLink, BlobOp, RegistryClass, ValueClass, assert::AssertValue, now},
 };
 use trc::AddContext;
 use types::id::Id;
@@ -39,13 +45,45 @@ fn item_class(item_id: u64) -> ValueClass {
     })
 }
 
+/// The tenant an account's usage counts toward: its own, or for a deleted
+/// account still kept, the one it had (UD-15).
+pub async fn tenant_of(
+    data: &Store,
+    registry: &RegistryStore,
+    account_id: u32,
+) -> trc::Result<Option<u32>> {
+    if let Some(account) = registry
+        .get(ObjectId::new(ObjectType::Account, Id::from(account_id)))
+        .await
+        .caused_by(trc::location!())?
+    {
+        return Ok(account.inner.member_tenant_id().map(|id| id.document_id()));
+    }
+    Ok(data::kept_account(data, account_id)
+        .await?
+        .and_then(|kept| kept.member_tenant_id)
+        .map(|id| Id::from(id).document_id()))
+}
+
+/// Adds `bytes` to an account's usage, and to its tenant's (MT-20).
+fn count(batch: &mut BatchBuilder, account_id: u32, tenant_id: Option<u32>, bytes: i64) {
+    batch
+        .with_account_id(account_id)
+        .add(ValueClass::Quota, bytes);
+    if let Some(tenant_id) = tenant_id {
+        batch.add(ValueClass::TenantQuota(tenant_id), bytes);
+    }
+}
+
 /// Writes a new archived item, holding its kept copy until `archivedUntil`,
-/// with what restore needs beside it. Returns its id.
+/// with what restore needs beside it, and counting its `size` toward the
+/// account and its tenant (UD-14). Returns its id.
 pub async fn insert(
     data: &Store,
     registry: &RegistryStore,
     item: &ArchivedItem,
     extra: &data::Extra,
+    size: u64,
 ) -> trc::Result<Id> {
     let item_id = registry.assign_id();
     let id = Id::new(item_id);
@@ -65,6 +103,11 @@ pub async fn insert(
     );
     data::set_extra(&mut batch, id, extra)?;
     data::set_blob_item(&mut batch, account_id, blob_hash.as_slice(), id);
+    if size > 0 {
+        let tenant_id = tenant_of(data, registry, account_id).await?;
+        count(&mut batch, account_id, tenant_id, size as i64);
+        batch.set(data::counted_class(account_id, id), size.serialize());
+    }
     data::log_change(
         &mut batch,
         account_id,
@@ -143,13 +186,57 @@ pub async fn set_deadline(
     Ok(updated)
 }
 
-/// Removes an archived item and releases its kept copy: on restore (UD-9),
-/// on destroy (UD-12) and past its deadline (UD-13).
+/// Removes an archived item for good and releases its kept copy: on
+/// destroy (UD-12) and past its deadline (UD-13). Its bytes come off the
+/// account's and tenant's usage (UD-14), and a message's spam-training
+/// holds end with it (UD-14a).
 pub async fn remove(
     data: &Store,
     registry: &RegistryStore,
     id: Id,
     item: &ArchivedItem,
+) -> trc::Result<()> {
+    remove_(data, registry, id, item, true).await?;
+    if let ArchivedItem::Email(email) = item {
+        crate::undelete::samples::release(
+            data,
+            email.account_id.document_id(),
+            &email.blob_id.hash,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// Removes an archived item that's been restored (UD-9): its bytes come
+/// off, since the restored item counts as itself from now on.
+pub async fn remove_restored(
+    data: &Store,
+    registry: &RegistryStore,
+    id: Id,
+    item: &ArchivedItem,
+) -> trc::Result<()> {
+    remove_(data, registry, id, item, true).await
+}
+
+/// Removes an archived item of an account being destroyed, leaving the
+/// usage counters alone: the account's goes with it, and its tenant's is
+/// settled from it.
+pub async fn discard(
+    data: &Store,
+    registry: &RegistryStore,
+    id: Id,
+    item: &ArchivedItem,
+) -> trc::Result<()> {
+    remove_(data, registry, id, item, false).await
+}
+
+async fn remove_(
+    data: &Store,
+    registry: &RegistryStore,
+    id: Id,
+    item: &ArchivedItem,
+    uncount: bool,
 ) -> trc::Result<()> {
     let account_id = item.account_id().document_id();
     let blob_hash = item.blob_id().hash.clone();
@@ -164,6 +251,27 @@ pub async fn remove(
         .await
         .caused_by(trc::location!())?;
 
+    // Its counted bytes come off once: the marker must still be there, or
+    // another removal already took them off
+    let counted = if uncount {
+        data::counted(data, account_id, id).await?
+    } else {
+        None
+    };
+    if let Some(size) = counted {
+        let tenant_id = tenant_of(data, registry, account_id).await?;
+        let mut batch = BatchBuilder::new();
+        batch
+            .assert_value(data::counted_class(account_id, id), AssertValue::Some)
+            .clear(data::counted_class(account_id, id));
+        count(&mut batch, account_id, tenant_id, -(size as i64));
+        match data.write(batch.build_all()).await {
+            Ok(_) => {}
+            Err(err) if err.is_assertion_failure() => {}
+            Err(err) => return Err(err.caused_by(trc::location!())),
+        }
+    }
+
     let mut batch = BatchBuilder::new();
     batch.with_account_id(account_id).clear(BlobOp::Link {
         hash: blob_hash.clone(),
@@ -171,6 +279,9 @@ pub async fn remove(
             until: item.archived_until().timestamp() as u64,
         },
     });
+    if !uncount {
+        batch.clear(data::counted_class(account_id, id));
+    }
     data::clear_extra(&mut batch, id);
     data::clear_blob_item(&mut batch, account_id, blob_hash.as_slice());
     data::clear_restore_requested(&mut batch, id);

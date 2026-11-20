@@ -22,6 +22,11 @@
 //! - `a` + address: an address a kept account holds reserved (UD-16).
 //! - `g` + kind + account + document: a deleted calendar event, contact or
 //!   file ([`super::groupware`]).
+//! - `s` + account + blob hash + until: a spam-training sample's hold on a
+//!   message's blob ([`super::samples`], UD-14a).
+//! - `q` + account + item id: the bytes an archived item counts toward its
+//!   account's and tenant's usage while it's kept (UD-14). Items archived
+//!   before counting began have none, and nothing is taken off for them.
 //!
 //! Values are JSON, so they read back across versions of the fork.
 
@@ -40,6 +45,7 @@ const KIND_RESTORE: u8 = b'r';
 const KIND_CHANGE: u8 = b'c';
 const KIND_KEPT: u8 = b'k';
 const KIND_RESERVED: u8 = b'a';
+const KIND_COUNTED: u8 = b'q';
 
 fn class(kind: u8, rest: &[u8]) -> ValueClass {
     let mut key = Vec::with_capacity(1 + rest.len());
@@ -249,6 +255,46 @@ pub fn clear_blob_item(batch: &mut BatchBuilder, account_id: u32, blob_hash: &[u
     batch.clear(class(KIND_BLOB, &account_blob(account_id, blob_hash)));
 }
 
+fn account_item(account_id: u32, item_id: Id) -> [u8; 12] {
+    let mut out = [0u8; 12];
+    out[..4].copy_from_slice(&account_id.to_be_bytes());
+    out[4..].copy_from_slice(&item_id.id().to_be_bytes());
+    out
+}
+
+/// UD-14: an archived item's counted bytes.
+pub fn counted_class(account_id: u32, item_id: Id) -> ValueClass {
+    class(KIND_COUNTED, &account_item(account_id, item_id))
+}
+
+pub async fn counted(data: &Store, account_id: u32, item_id: Id) -> trc::Result<Option<u64>> {
+    data.get_value::<u64>(key(KIND_COUNTED, &account_item(account_id, item_id)))
+        .await
+        .caused_by(trc::location!())
+}
+
+/// UD-14: the bytes all an account's archived items count, for recounting
+/// its usage from scratch.
+pub async fn counted_total(data: &Store, account_id: u32) -> trc::Result<u64> {
+    let mut total = 0u64;
+    data.iterate(
+        IterateParams::new(
+            key(KIND_COUNTED, &account_item(account_id, Id::new(0))),
+            key(KIND_COUNTED, &account_item(account_id, Id::new(u64::MAX))),
+        )
+        .ascending(),
+        |_, value| {
+            if let Ok(bytes) = <[u8; 8]>::try_from(value) {
+                total = total.saturating_add(u64::from_be_bytes(bytes));
+            }
+            Ok(true)
+        },
+    )
+    .await
+    .caused_by(trc::location!())?;
+    Ok(total)
+}
+
 pub fn set_restore_requested(batch: &mut BatchBuilder, item_id: Id) {
     batch.set(class(KIND_RESTORE, &item_id.id().to_be_bytes()), vec![1]);
 }
@@ -416,6 +462,8 @@ pub async fn clear_account(data: &Store, account_id: u32) -> trc::Result<()> {
         (vec![KIND_NOTE], vec![KIND_NOTE]),
         (vec![KIND_BLOB], vec![KIND_BLOB]),
         (vec![KIND_CHANGE], vec![KIND_CHANGE]),
+        (vec![KIND_COUNTED], vec![KIND_COUNTED]),
+        (vec![b's'], vec![b's']),
     ];
     // The groupware notes, `g` + kind + account + document
     for kind in 0u8..3 {

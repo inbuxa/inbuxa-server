@@ -73,9 +73,13 @@ pub(crate) async fn restore_other(
         return Ok(Some("The kept copy is gone.".into()));
     };
 
-    // UD-10: a restore counts against quota like anything new
+    // UD-10, UD-14: a restore counts against quota like anything new, less
+    // what the kept copy already counts
+    let counted = undelete::data::counted(&server.core.storage.data, account_id, item_id)
+        .await?
+        .unwrap_or(0);
     if server
-        .has_available_quota(&account, bytes.len() as u64)
+        .has_available_quota(&account, (bytes.len() as u64).saturating_sub(counted))
         .await
         .is_err()
     {
@@ -259,7 +263,8 @@ pub(crate) async fn restore_other(
     server.commit_batch(batch).await?;
 
     // UD-9: the record goes once the item is back
-    undelete::records::remove(&server.core.storage.data, server.registry(), item_id, item).await?;
+    undelete::records::remove_restored(&server.core.storage.data, server.registry(), item_id, item)
+        .await?;
     Ok(None)
 }
 

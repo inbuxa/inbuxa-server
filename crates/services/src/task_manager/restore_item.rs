@@ -95,6 +95,29 @@ async fn restore_item(server: &Server, task: &TaskRestoreArchivedItem) -> trc::R
                 return Ok(TaskResult::permanent("Blob not found"));
             };
 
+            // inbuxa: UD-10, UD-14: a restore counts against quota like
+            // anything new, less what the kept copy already counts. Ingest
+            // leaves a restore's check to this.
+            let counted = undelete::data::counted(data, account_id, item_id)
+                .await?
+                .unwrap_or(0);
+            let account = server
+                .account(account_id)
+                .await
+                .caused_by(trc::location!())?;
+            if server
+                .has_available_quota(&account, (bytes.len() as u64).saturating_sub(counted))
+                .await
+                .is_err()
+            {
+                let mut batch = BatchBuilder::new();
+                undelete::data::clear_restore_requested(&mut batch, item_id);
+                data.write(batch.build_all()).await?;
+                return Ok(TaskResult::permanent(
+                    "Not restored: the account or its tenant is over quota.".to_string(),
+                ));
+            }
+
             match server
                 .email_ingest(IngestEmail {
                     raw_message: &bytes,
@@ -111,7 +134,8 @@ async fn restore_item(server: &Server, task: &TaskRestoreArchivedItem) -> trc::R
             {
                 Ok(_) => {
                     // inbuxa: UD-9: the archived record goes, and its copy is released
-                    undelete::records::remove(data, server.registry(), item_id, &item).await?;
+                    undelete::records::remove_restored(data, server.registry(), item_id, &item)
+                        .await?;
                     Ok(TaskResult::Success(vec![]))
                 }
                 // inbuxa: UD-10: over quota, the item stays archived and the task says why

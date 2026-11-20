@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
@@ -12,6 +14,8 @@ use crate::{
 };
 use chrono::{TimeDelta, Utc};
 use jmap_client::core::response::VacationResponseSetResponse;
+use registry::schema::prelude::{ObjectType, Property};
+use serde_json::json;
 use std::time::Instant;
 
 pub async fn test(test: &TestServer) {
@@ -189,6 +193,41 @@ pub async fn test(test: &TestServer) {
         MockMessage::new("<jdoe@example.com>", ["<jane_smith@remote.org>"], "@Kokomo"),
     )
     .await;
+
+    // inbuxa: a bigger vacation script counts against quota, as a Sieve
+    // script's does
+    let admin = test.account("admin@example.com");
+    let used = server
+        .get_used_quota_account(account.id().document_id())
+        .await
+        .unwrap();
+    admin
+        .registry_update_object(
+            ObjectType::Account,
+            account.id(),
+            json!({ Property::Quotas: {"maxDiskQuota": used.max(1)} }),
+        )
+        .await;
+    let mut request = client.build();
+    request
+        .set_vacation_response()
+        .update("singleton")
+        .text_body(Some("x".repeat(4096)));
+    let mut response = request
+        .send_single::<VacationResponseSetResponse>()
+        .await
+        .unwrap();
+    assert!(
+        response.updated("singleton").is_err(),
+        "a vacation script past the quota is refused"
+    );
+    admin
+        .registry_update_object(
+            ObjectType::Account,
+            account.id(),
+            json!({ Property::Quotas: {} }),
+        )
+        .await;
 
     // Remove test data
     client.vacation_response_disable().await.unwrap();
