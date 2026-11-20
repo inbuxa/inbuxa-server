@@ -23,10 +23,18 @@
 //! Each hold is noted as `s` + account + blob hash + until (empty value), so
 //! it can be found from the message, with the link it set under that
 //! account.
+//!
+//! Ending a hold early also removes its `SpamTrainingSample`. The blob purge
+//! is what normally removes one: it finds the sample's id in the expired
+//! link. Once the link is cleared here, nothing would find it again.
 
+use registry::{
+    schema::prelude::{ObjectType, Property},
+    types::{EnumImpl, id::ObjectId},
+};
 use store::{
-    IterateParams, SUBSPACE_UNDELETE, Store, ValueKey,
-    write::{AnyClass, BatchBuilder, BlobLink, BlobOp, ValueClass, now},
+    IterateParams, SUBSPACE_UNDELETE, SerializeInfallible, Store, ValueKey,
+    write::{AnyClass, BatchBuilder, BlobLink, BlobOp, RegistryClass, ValueClass, now},
 };
 use trc::AddContext;
 use types::blob_hash::{BLOB_HASH_LEN, BlobHash};
@@ -82,11 +90,38 @@ pub async fn release(data: &Store, account_id: u32, hash: &BlobHash) -> trc::Res
     let mut batch = BatchBuilder::new();
     batch.with_account_id(account_id);
     for until in untils {
-        batch
-            .clear(BlobOp::Link {
-                hash: hash.clone(),
-                to: BlobLink::Temporary { until },
+        let link = BlobOp::Link {
+            hash: hash.clone(),
+            to: BlobLink::Temporary { until },
+        };
+        // The link's value is the sample's id: its registry entry goes too
+        let sample = data
+            .get_value::<ObjectId>(ValueKey {
+                account_id,
+                collection: 0,
+                document_id: 0,
+                class: ValueClass::Blob(link.clone()),
             })
+            .await
+            .caused_by(trc::location!())?
+            .filter(|id| id.object() == ObjectType::SpamTrainingSample);
+        if let Some(sample) = sample {
+            let object_id = ObjectType::SpamTrainingSample.to_id();
+            let item_id = sample.id().id();
+            batch
+                .clear(ValueClass::Registry(RegistryClass::Index {
+                    index_id: Property::AccountId.to_id(),
+                    object_id,
+                    item_id,
+                    key: (account_id as u64).serialize(),
+                }))
+                .clear(ValueClass::Registry(RegistryClass::Item {
+                    object_id,
+                    item_id,
+                }));
+        }
+        batch
+            .clear(link)
             .clear(class(account_id, hash.as_slice(), until));
     }
     data.write(batch.build_all())
