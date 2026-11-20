@@ -16,7 +16,10 @@ use registry::{
     types::EnumImpl,
 };
 use std::sync::Arc;
-use store::{ValueKey, write::ValueClass};
+use store::{
+    ValueKey,
+    write::{BatchBuilder, ValueClass},
+};
 use trc::AddContext;
 
 // inbuxa: the disk quota of the account a request writes into, with the bytes
@@ -50,6 +53,39 @@ impl Server {
             })
             .await
             .add_context(|err| err.caused_by(trc::location!()).account_id(account_id))
+    }
+
+    // inbuxa: MT-20: a batch's tenant storage changes go to the tenant of the
+    // account whose data changed, not the writer's: a sharee or delegate in
+    // another tenant, or a server administrator with none, would otherwise
+    // move the wrong counter. A deleted account still kept (UD-15) is its
+    // kept record's tenant's. Run before every write that carries them.
+    pub async fn resolve_tenant_quota(&self, batch: &mut BatchBuilder) -> trc::Result<()> {
+        let accounts = batch.tenant_quota_accounts();
+        if accounts.is_empty() {
+            return Ok(());
+        }
+        let mut tenants = Vec::with_capacity(accounts.len());
+        for account_id in accounts {
+            let tenant_id = match self.try_account(account_id).await? {
+                Some(account) => account.id_tenant,
+                None => inbuxa_features::undelete::data::kept_account(
+                    &self.core.storage.data,
+                    account_id,
+                )
+                .await?
+                .and_then(|kept| kept.member_tenant_id)
+                .map(|tenant_id| tenant_id as u32),
+            };
+            tenants.push((account_id, tenant_id));
+        }
+        batch.retarget_tenant_quota(|account_id| {
+            tenants
+                .iter()
+                .find(|(id, _)| *id == account_id)
+                .and_then(|(_, tenant_id)| *tenant_id)
+        });
+        Ok(())
     }
 
     // inbuxa: MT-20: storage used by all a tenant's members together

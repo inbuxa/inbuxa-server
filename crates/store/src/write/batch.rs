@@ -7,8 +7,8 @@
  */
 
 use super::{
-    Batch, BatchBuilder, ChangedCollection, IntoOperations, Operation, ValueClass, ValueOp,
-    assert::ToAssertValue, log::VanishedItem,
+    Batch, BatchBuilder, ChangedCollection, IntoOperations, Operation, TENANT_OF_ACCOUNT,
+    ValueClass, ValueOp, assert::ToAssertValue, log::VanishedItem,
 };
 use crate::{
     SerializeInfallible, U32_LEN,
@@ -25,6 +25,61 @@ use types::{
     field::FieldType,
 };
 use utils::{map::vec_map::VecMap, snowflake::SnowflakeIdGenerator};
+
+/// inbuxa: MT-20: sets each tenant storage change's tenant from the account
+/// it's under; one with no tenant becomes a repeat of its account switch,
+/// which writes nothing.
+fn retarget_tenant_quota(ops: &mut [Operation], tenant_of: impl Fn(u32) -> Option<u32>) {
+    let mut current = None;
+    for op in ops.iter_mut() {
+        let account_id = match op {
+            Operation::AccountId { account_id } => {
+                current = Some(*account_id);
+                continue;
+            }
+            Operation::Value {
+                class: ValueClass::TenantQuota(_),
+                ..
+            } => match current {
+                Some(account_id) => account_id,
+                None => continue,
+            },
+            _ => continue,
+        };
+        match tenant_of(account_id) {
+            Some(tenant_id) => {
+                if let Operation::Value {
+                    class: ValueClass::TenantQuota(tenant),
+                    ..
+                } = op
+                {
+                    *tenant = tenant_id;
+                }
+            }
+            None => *op = Operation::AccountId { account_id },
+        }
+    }
+}
+
+/// inbuxa: MT-20: a tenant storage change never resolved is dropped rather
+/// than written under the placeholder.
+fn drop_unresolved_tenant_quota(ops: &mut [Operation]) {
+    let mut current = None;
+    for op in ops.iter_mut() {
+        match op {
+            Operation::AccountId { account_id } => current = Some(*account_id),
+            Operation::Value {
+                class: ValueClass::TenantQuota(TENANT_OF_ACCOUNT),
+                ..
+            } => {
+                if let Some(account_id) = current {
+                    *op = Operation::AccountId { account_id };
+                }
+            }
+            _ => {}
+        }
+    }
+}
 
 impl BatchBuilder {
     pub fn new() -> Self {
@@ -436,7 +491,42 @@ impl BatchBuilder {
         }
     }
 
+    /// inbuxa: MT-20: the accounts whose data this batch's tenant storage
+    /// changes are for, so their tenants can be looked up.
+    pub fn tenant_quota_accounts(&self) -> Vec<u32> {
+        let mut accounts = Vec::new();
+        let mut current = None;
+        for op in &self.ops {
+            match op {
+                Operation::AccountId { account_id } => current = Some(*account_id),
+                Operation::Value {
+                    class: ValueClass::TenantQuota(_),
+                    ..
+                } => {
+                    if let Some(account_id) = current
+                        && !accounts.contains(&account_id)
+                    {
+                        accounts.push(account_id);
+                    }
+                }
+                _ => {}
+            }
+        }
+        accounts
+    }
+
+    /// inbuxa: MT-20: points each tenant storage change at the tenant of the
+    /// account whose data it is, whoever made the change, so an account's
+    /// usage and its tenant's always move together. A change for an account
+    /// with no tenant is dropped.
+    pub fn retarget_tenant_quota(&mut self, tenant_of: impl Fn(u32) -> Option<u32>) {
+        retarget_tenant_quota(&mut self.ops, tenant_of);
+    }
+
     pub fn build_one(&mut self, commit_point: CommitPoint) -> Batch<'_> {
+        drop_unresolved_tenant_quota(
+            &mut self.ops[commit_point.offset_start..commit_point.offset_end],
+        );
         Batch {
             changes: &self.changed_collections,
             ops: &mut self.ops[commit_point.offset_start..commit_point.offset_end],
@@ -445,6 +535,7 @@ impl BatchBuilder {
 
     pub fn build_all(&mut self) -> Batch<'_> {
         self.serialize_changes();
+        drop_unresolved_tenant_quota(&mut self.ops);
         Batch {
             changes: &self.changed_collections,
             ops: self.ops.as_mut_slice(),
@@ -554,5 +645,59 @@ impl Batch<'_> {
 impl Default for BatchBuilder {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tenant_quota_tests {
+    use super::*;
+
+    fn tenant_changes(batch: &mut BatchBuilder) -> Vec<(u32, i64)> {
+        let mut out = Vec::new();
+        for op in batch.build_all().ops.iter() {
+            if let Operation::Value {
+                class: ValueClass::TenantQuota(tenant),
+                op: ValueOp::AtomicAdd(by),
+            } = op
+            {
+                out.push((*tenant, *by));
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn tenant_changes_follow_the_owner() {
+        let mut batch = BatchBuilder::new();
+        // A writer in tenant 5 into account 1 (tenant 7); a writer with no
+        // tenant into account 2 (tenant 8); account 3 has none
+        batch
+            .with_account_id(1)
+            .add(ValueClass::Quota, 10)
+            .add(ValueClass::TenantQuota(5), 10)
+            .with_account_id(2)
+            .add(ValueClass::Quota, -4)
+            .add(ValueClass::TenantQuota(TENANT_OF_ACCOUNT), -4)
+            .with_account_id(3)
+            .add(ValueClass::Quota, 6)
+            .add(ValueClass::TenantQuota(5), 6);
+        assert_eq!(batch.tenant_quota_accounts(), vec![1, 2, 3]);
+        batch.retarget_tenant_quota(|account| match account {
+            1 => Some(7),
+            2 => Some(8),
+            _ => None,
+        });
+        assert_eq!(tenant_changes(&mut batch), vec![(7, 10), (8, -4)]);
+    }
+
+    #[test]
+    fn an_unresolved_change_is_dropped() {
+        let mut batch = BatchBuilder::new();
+        batch
+            .with_account_id(1)
+            .add(ValueClass::Quota, 10)
+            .add(ValueClass::TenantQuota(TENANT_OF_ACCOUNT), 10)
+            .add(ValueClass::TenantQuota(4), 10);
+        assert_eq!(tenant_changes(&mut batch), vec![(4, 10)]);
     }
 }

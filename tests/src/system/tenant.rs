@@ -1264,13 +1264,95 @@ pub async fn test(test: &mut TestServer) {
         .unwrap()
         .clear();
 
+    // MT-21: a deleted member still kept holds its data, so a recount keeps
+    // counting it; destroying it for good takes its usage off (MT-20)
+    let d1 = d_users[0].id();
+    let d1_used = test
+        .server
+        .get_used_quota_account(d1.document_id())
+        .await
+        .unwrap();
+    assert!(d1_used > 0, "MT-20: d1 holds a message");
+    admin
+        .registry_update_setting(
+            structs::DataRetention {
+                archive_deleted_accounts_for: Some(
+                    registry::types::duration::Duration::from_millis(86_400_000),
+                ),
+                ..Default::default()
+            },
+            &[Property::ArchiveDeletedAccountsFor],
+        )
+        .await;
+    admin
+        .registry_destroy(ObjectType::Account, [d1])
+        .await
+        .assert_destroyed(&[d1]);
+    test.wait_for_tasks_skip_not_due().await;
+    assert_eq!(
+        admin.tenant_usage(d_id).await,
+        two,
+        "MT-20: kept, still counted"
+    );
+    admin
+        .registry_create_object(Task::TenantMaintenance(TaskTenantMaintenance {
+            tenant_id: d_id,
+            maintenance_type: TaskTenantMaintenanceType::RecalculateQuota,
+            status: TaskStatus::now(),
+        }))
+        .await;
+    test.wait_for_tasks_skip_not_due().await;
+    assert_eq!(
+        admin.tenant_usage(d_id).await,
+        two,
+        "MT-21: a recount keeps a kept member"
+    );
+    let response = admin
+        .jmap_request(
+            &["urn:ietf:params:jmap:core", "urn:inbuxa:jmap"],
+            json!([["inbuxa:DeletedAccount/set", {
+                "accountId": admin.id_string(), "destroy": [d1.to_string()]
+            }, "0"]]),
+        )
+        .await
+        .to_string();
+    assert!(response.contains("destroyed"), "destroy now: {response}");
+    test.wait_for_tasks_skip_not_due().await;
+    assert_eq!(
+        admin.tenant_usage(d_id).await,
+        two - d1_used,
+        "MT-20: a destroyed member's usage leaves its tenant"
+    );
+    admin
+        .registry_update_setting(
+            structs::DataRetention::default(),
+            &[Property::ArchiveDeletedAccountsFor],
+        )
+        .await;
+
     // Clean up, leaving the server as the other tests expect it
-    for account in [
+    let d_usage = admin.tenant_usage(d_id).await;
+    let cleanup = [
         t_admin, t_user, t_group, u_admin, u_user, u_group, p_admin, p_user, s_user, d_admin,
-    ] {
+    ];
+    // MT-20: accounts and tenants are numbered apart, so one of these has
+    // tenant D's number, and destroying it leaves D's usage alone
+    assert!(
+        cleanup
+            .iter()
+            .any(|account| account.id().document_id() == d_id.document_id()),
+        "MT-20: no account shares tenant D's number"
+    );
+    for account in cleanup {
         admin.destroy_account(account).await;
     }
-    for name in ["d1", "d2", "d3"] {
+    test.wait_for_tasks().await;
+    assert_eq!(
+        admin.tenant_usage(d_id).await,
+        d_usage,
+        "MT-20: destroying another account changed tenant D's usage"
+    );
+    for name in ["d2", "d3"] {
         let id = admin.account_id_by_name(name).await;
         admin
             .registry_destroy(ObjectType::Account, [id])
@@ -1282,6 +1364,8 @@ pub async fn test(test: &mut TestServer) {
         .await
         .assert_destroyed(&[q1, q2]);
     test.wait_for_tasks().await;
+    // MT-20: with every member destroyed, nothing is left counted
+    assert_eq!(admin.tenant_usage(d_id).await, 0, "MT-20: all destroyed");
     for domain in admin
         .registry_query_ids(
             ObjectType::Domain,

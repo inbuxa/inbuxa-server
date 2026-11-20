@@ -559,6 +559,14 @@ async fn copy_event(
             name: new_name.to_string(),
             parent_id: to_calendar_id,
         }];
+        // inbuxa: into another account, it counts against that account's
+        // quota and its tenant's, as a whole calendar or address book does
+        server
+            .has_available_quota(
+                server.account(to_account_id).await?.as_ref(),
+                new_event.size() as u64,
+            )
+            .await?;
         let to_document_id = server
             .store()
             .assign_document_ids(to_account_id, Collection::CalendarEvent, 1)
@@ -750,6 +758,14 @@ async fn move_event(
             )
             .caused_by(trc::location!())?;
 
+        // inbuxa: into another account, it counts against that account's
+        // quota and its tenant's, as a whole calendar or address book does
+        server
+            .has_available_quota(
+                server.account(to_account_id).await?.as_ref(),
+                new_event.size() as u64,
+            )
+            .await?;
         let to_document_id = server
             .store()
             .assign_document_ids(to_account_id, Collection::CalendarEvent, 1)
@@ -1086,7 +1102,7 @@ async fn copy_container(
                     .await
                     .caused_by(trc::location!())?;
                 new_event.names = vec![new_name];
-                required_space += new_event.size as u64;
+                required_space += new_event.size() as u64;
                 new_event
                     .insert(
                         access_token.account_tenant_ids(),

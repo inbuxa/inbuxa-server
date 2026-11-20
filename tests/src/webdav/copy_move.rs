@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::utils::{
@@ -12,7 +14,15 @@ use ahash::AHashSet;
 use dav_proto::Depth;
 use groupware::DavResourceName;
 use hyper::StatusCode;
-use registry::schema::structs::Action;
+use registry::{
+    schema::{
+        enums::StorageQuota,
+        prelude::{ObjectType, Property},
+        structs::Action,
+    },
+    types::EnumImpl,
+};
+use serde_json::json;
 
 pub async fn test(test: &TestServer, assisted_discovery: bool) {
     let admin = test.account("admin@example.com");
@@ -795,6 +805,81 @@ pub async fn test(test: &TestServer, assisted_discovery: bool) {
                     .await
                     .with_status(StatusCode::NO_CONTENT);
             }
+        }
+
+        // inbuxa: Test 20: an event or card copied or moved one at a time into
+        // another account counts against that account's quota (and its
+        // tenant's), as a whole calendar or address book does
+        if resource_type != DavResourceName::File {
+            let support = test.account("support@example.com").id();
+            let used = test
+                .server
+                .get_used_quota_account(support.document_id())
+                .await
+                .unwrap()
+                .max(0);
+            admin
+                .registry_update_object(
+                    ObjectType::Account,
+                    support,
+                    json!({
+                        Property::Quotas: { StorageQuota::MaxDiskQuota.as_str(): used + 2048 }
+                    }),
+                )
+                .await;
+            let src = format!("{user_base_path}/quota-src/");
+            let dst = format!("{group_base_path}/quota-dst/");
+            for path in [&src, &dst] {
+                client
+                    .mkcol("MKCOL", path, [], [])
+                    .await
+                    .with_status(StatusCode::CREATED);
+            }
+            let (mut copied, mut refused) = (Vec::new(), false);
+            for i in 0..200 {
+                let item = format!("{src}item{i}");
+                client
+                    .request_with_headers("PUT", &item, [], &resource_type.generate())
+                    .await
+                    .with_status(StatusCode::CREATED);
+                // An item moved away before it's indexed can leave its
+                // search entries behind; that race isn't what this checks
+                test.wait_for_tasks().await;
+                let method = if i % 2 == 0 { "COPY" } else { "MOVE" };
+                let to = format!("{dst}item{i}");
+                let response = client
+                    .request_with_headers(method, &item, [("destination", to.as_str())], "")
+                    .await;
+                match response.status {
+                    StatusCode::CREATED => copied.push(to),
+                    StatusCode::PRECONDITION_FAILED | StatusCode::INSUFFICIENT_STORAGE => {
+                        refused = true;
+                        break;
+                    }
+                    status => panic!("Test 20: {method} gave {status:?}"),
+                }
+            }
+            assert!(
+                refused && !copied.is_empty(),
+                "Test 20: {} copied into a 2 KiB quota and none refused",
+                copied.len()
+            );
+            // The copies are indexed in the background; let that finish
+            // before they go, or the index outlives them
+            test.wait_for_tasks().await;
+            for path in [&src, &dst] {
+                client
+                    .request("DELETE", path, "")
+                    .await
+                    .with_status(StatusCode::NO_CONTENT);
+            }
+            admin
+                .registry_update_object(
+                    ObjectType::Account,
+                    support,
+                    json!({ Property::Quotas: {} }),
+                )
+                .await;
         }
     }
 

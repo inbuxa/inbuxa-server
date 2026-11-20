@@ -530,6 +530,14 @@ async fn copy_card(
             name: new_name.to_string(),
             parent_id: to_addressbook_id,
         }];
+        // inbuxa: into another account, it counts against that account's
+        // quota and its tenant's, as a whole calendar or address book does
+        server
+            .has_available_quota(
+                server.account(to_account_id).await?.as_ref(),
+                new_card.size() as u64,
+            )
+            .await?;
         let to_document_id = server
             .store()
             .assign_document_ids(to_account_id, Collection::ContactCard, 1)
@@ -692,6 +700,14 @@ async fn move_card(
             )
             .caused_by(trc::location!())?;
 
+        // inbuxa: into another account, it counts against that account's
+        // quota and its tenant's, as a whole calendar or address book does
+        server
+            .has_available_quota(
+                server.account(to_account_id).await?.as_ref(),
+                new_card.size() as u64,
+            )
+            .await?;
         let to_document_id = server
             .store()
             .assign_document_ids(to_account_id, Collection::ContactCard, 1)
@@ -1007,7 +1023,7 @@ async fn copy_container(
                     .await
                     .caused_by(trc::location!())?;
                 new_card.names = vec![new_name];
-                required_space += new_card.size as u64;
+                required_space += new_card.size() as u64;
                 new_card
                     .insert(
                         access_token.account_tenant_ids(),

@@ -214,7 +214,8 @@ pub async fn used(data: &Store, tenant_id: u32) -> trc::Result<i64> {
 }
 
 /// Recomputes a tenant's storage usage from its members' own usage
-/// (MT-21). Safe on a live server: the stored figure is corrected by the
+/// (MT-21), deleted members still kept (UD-15) included: their data stays
+/// until they're destroyed, which takes it off then. Safe on a live server: the stored figure is corrected by the
 /// difference, so deliveries counted while this runs aren't lost. One that
 /// lands between reading the members and reading the total can leave the
 /// figure off by that message until the next run.
@@ -228,11 +229,17 @@ pub async fn recalculate(
         .await
         .caused_by(trc::location!())?;
 
+    let kept = crate::undelete::data::kept_accounts(data)
+        .await?
+        .into_iter()
+        .filter(|(_, kept)| kept.member_tenant_id == Some(tenant_id as u64))
+        .map(|(account_id, _)| account_id);
+
     let mut total = 0i64;
-    for member in members {
+    for member in members.into_iter().map(|id| id.document_id()).chain(kept) {
         total += data
             .get_counter(ValueKey {
-                account_id: member.document_id(),
+                account_id: member,
                 collection: 0,
                 document_id: 0,
                 class: ValueClass::Quota,
