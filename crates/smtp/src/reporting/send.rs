@@ -86,10 +86,14 @@ impl MtaReportSend for Server {
         if !deliver_now {
             #[cfg(not(feature = "test_mode"))]
             {
+                use crate::queue::with_planned_hold;
                 use common::config::smtp::queue::QueueExpiry;
                 use rand::RngExt;
 
                 let delivery_time = rand::rng().random_range(0u64..10800u64);
+                // inbuxa (#517): recorded, so delivery time counts from the
+                // end of the hold rather than from now
+                message.message.flags = with_planned_hold(message.message.flags, delivery_time);
                 for rcpt in &mut message.message.recipients {
                     rcpt.retry.due += delivery_time;
                     rcpt.notify.due += delivery_time;

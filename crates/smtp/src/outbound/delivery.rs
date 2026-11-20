@@ -22,7 +22,7 @@ use crate::queue::spool::{DSN_RETRY, SmtpSpool};
 use crate::queue::throttle::IsAllowed;
 use crate::queue::{
     Error, FROM_REPORT, HostResponse, MessageWrapper, Metadata, QueueEnvelope, QueuedMessage,
-    RCPT_RELAYED, Status,
+    RCPT_RELAYED, Status, delivery_time,
 };
 use crate::reporting::send::MtaReportSend;
 use crate::{queue::ErrorDetails, reporting::tls::TlsRptOptions};
@@ -192,7 +192,9 @@ impl QueuedMessage {
                 trc::event!(
                     Delivery(DeliveryEvent::Completed),
                     SpanId = span_id,
-                    Elapsed = trc::Value::Duration((now() - message.message.created) * 1000)
+                    Elapsed = trc::Value::Duration(
+                        delivery_time(message.message.created, message.message.flags, now()) * 1000
+                    )
                 );
 
                 // All message recipients expired, do not re-queue.
@@ -1636,7 +1638,9 @@ impl QueuedMessage {
             trc::event!(
                 Delivery(DeliveryEvent::Completed),
                 SpanId = span_id,
-                Elapsed = trc::Value::Duration((now() - message.message.created) * 1000)
+                Elapsed = trc::Value::Duration(
+                    delivery_time(message.message.created, message.message.flags, now()) * 1000
+                )
             );
 
             // Delete message from queue
