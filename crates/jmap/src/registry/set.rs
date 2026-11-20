@@ -1424,6 +1424,12 @@ pub(crate) fn map_write_error(err: RegistryWriteResult) -> SetError<Property> {
         }
         RegistryWriteResult::NotSupported => SetError::forbidden()
             .with_description("The requested action is not supported by the registry store"),
+        // inbuxa: K-S5
+        RegistryWriteResult::ManagedOutside => SetError::forbidden().with_description(
+            "The data store settings are in config.json, which this server can't write: \
+             it's managed outside the server (on Kubernetes, the chart's server.dataStore \
+             value). Change them there.",
+        ),
         RegistryWriteResult::NotFound { .. } => SetError::not_found(),
         RegistryWriteResult::Success(_) => unreachable!(),
     }

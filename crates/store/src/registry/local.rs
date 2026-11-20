@@ -109,7 +109,60 @@ impl RegistryStore {
                 trc::EventType::Registry(trc::RegistryEvent::LocalWriteError)
                     .into_err()
                     .caused_by(trc::location!())
+                    .ctx(trc::Key::Path, self.0.local_path.display().to_string())
                     .reason(err)
             })
+    }
+
+    /// inbuxa: K-S5: whether the data store settings file can be written. It
+    /// can't where something outside the server manages it, such as a
+    /// read-only mount on Kubernetes (the chart's server.dataStore).
+    pub async fn data_store_is_writable(&self) -> bool {
+        match tokio::fs::OpenOptions::new()
+            .write(true)
+            .open(&self.0.local_path)
+            .await
+        {
+            Ok(_) => true,
+            Err(err) => !is_read_only(&err),
+        }
+    }
+}
+
+/// inbuxa: K-S5: an error that says the file is managed elsewhere, as
+/// against one worth reporting as a failure
+pub(crate) fn is_read_only(err: &std::io::Error) -> bool {
+    matches!(
+        err.kind(),
+        std::io::ErrorKind::ReadOnlyFilesystem | std::io::ErrorKind::PermissionDenied
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_read_only;
+
+    // inbuxa: K-S5: a read-only config.json is one managed elsewhere, so a
+    // save is refused as that rather than failed
+    #[test]
+    fn a_read_only_file_is_managed_elsewhere() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("inbuxa-ro-config-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        std::fs::write(&path, "{}").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
+        let err = std::fs::OpenOptions::new().write(true).open(&path);
+        // root can write anything; the check only means something otherwise
+        if let Err(err) = err {
+            assert!(is_read_only(&err));
+        }
+        let missing = std::fs::OpenOptions::new()
+            .write(true)
+            .open(dir.join("absent.json"))
+            .unwrap_err();
+        assert!(!is_read_only(&missing));
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

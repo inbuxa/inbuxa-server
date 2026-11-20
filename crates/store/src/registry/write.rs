@@ -55,6 +55,9 @@ pub enum RegistryWriteResult {
         errors: Vec<ValidationError>,
     },
     NotSupported,
+    /// inbuxa: K-S5: the object lives in a file the server can't write,
+    /// because something outside it manages that file
+    ManagedOutside,
 }
 
 pub enum RegistryWrite<'x> {
@@ -211,6 +214,11 @@ impl RegistryStore {
         if let ObjectInner::DataStore(data_store) = &object.inner {
             if generate_id {
                 return Ok(RegistryWriteResult::NotSupported);
+            }
+            // inbuxa: K-S5: a config.json managed outside the server (a
+            // read-only mount) is refused as that, not failed as an error
+            if !self.data_store_is_writable().await {
+                return Ok(RegistryWriteResult::ManagedOutside);
             }
 
             return self
@@ -671,6 +679,9 @@ impl Display for RegistryWriteResult {
                 Ok(())
             }
             RegistryWriteResult::NotSupported => write!(f, "Operation not supported"),
+            RegistryWriteResult::ManagedOutside => {
+                write!(f, "Managed outside the server: the file is read-only")
+            }
         }
     }
 }
