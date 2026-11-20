@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 // Adapted from rustls-acme (https://github.com/FlorianUekermann/rustls-acme), licensed under MIT/Apache-2.0.
@@ -49,8 +51,12 @@ static ALG: &EcdsaSigningAlgorithm = &ECDSA_P256_SHA256_FIXED_SIGNING;
 
 impl AcmeRequestBuilder {
     pub async fn new(provider: AcmeProvider) -> AcmeResult<Self> {
-        let directory =
-            Directory::discover(&provider.directory, provider.max_retries as u32).await?;
+        let directory = Directory::discover(
+            &provider.directory,
+            provider.max_retries as u32,
+            provider.member_tenant_id.is_some(),
+        )
+        .await?;
         let key_pair = EcdsaKeyPair::from_pkcs8(
             ALG,
             &URL_SAFE_NO_PAD
@@ -83,7 +89,14 @@ impl AcmeRequestBuilder {
             url.as_ref(),
             payload,
         )?;
-        let response = https(url.as_ref(), Method::POST, Some(body), self.max_retries).await?;
+        let response = https(
+            url.as_ref(),
+            Method::POST,
+            Some(body),
+            self.max_retries,
+            self.directory.public_only,
+        )
+        .await?;
 
         Ok(AcmeResponse {
             location: get_header(&response, "Location").ok(),
@@ -188,19 +201,31 @@ impl AcmeRequestBuilder {
 }
 
 impl Directory {
-    pub async fn discover(url: impl AsRef<str>, max_retries: u32) -> AcmeResult<Self> {
-        serde_json::from_str(
-            &https(url, Method::GET, None, max_retries)
+    pub async fn discover(
+        url: impl AsRef<str>,
+        max_retries: u32,
+        public_only: bool,
+    ) -> AcmeResult<Self> {
+        let mut directory: Self = serde_json::from_str(
+            &https(url, Method::GET, None, max_retries, public_only)
                 .await?
                 .text()
                 .await?,
-        )
-        .map_err(Into::into)
+        )?;
+        directory.public_only = public_only;
+        Ok(directory)
     }
 
     pub async fn nonce(&self, max_retries: u32) -> AcmeResult<String> {
         get_header(
-            &https(&self.new_nonce.as_str(), Method::HEAD, None, max_retries).await?,
+            &https(
+                &self.new_nonce.as_str(),
+                Method::HEAD,
+                None,
+                max_retries,
+                self.public_only,
+            )
+            .await?,
             "replay-nonce",
         )
     }
@@ -210,9 +235,11 @@ impl<L, T: DeserializeOwned> AcmeResponse<L, T> {
     pub fn parse(input: AcmeResponse<L, String>) -> AcmeResult<AcmeResponse<L, T>> {
         serde_json::from_str(&input.body)
             .map_err(|err| {
+                // inbuxa: a bounded excerpt, not the whole body (see http.rs)
                 AcmeError::Invalid(format!(
-                    "ACME response parsing error: {}, body: {}",
-                    err, input.body
+                    "ACME response parsing error: {}, body starts: {:?}",
+                    err,
+                    input.body.chars().take(120).collect::<String>()
                 ))
             })
             .map(|body| AcmeResponse {

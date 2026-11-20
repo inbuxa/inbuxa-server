@@ -25,6 +25,9 @@ pub struct OidcConfig {
     pub claim_groups: Option<String>,
     pub default_domain: Option<String>,
     pub opaque_tokens: OpaqueTokens,
+    /// inbuxa: a tenant's own directory, which may only reach public HTTPS
+    /// addresses (see `config::check_tenant_url`).
+    pub public_only: bool,
 }
 
 /// inbuxa: http-directory-services-13: what a bearer token that isn't a

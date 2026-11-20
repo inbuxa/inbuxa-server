@@ -13,10 +13,7 @@
 //! [`has_public_host`] before sending.
 
 use super::is_global_ip;
-use reqwest::{
-    ClientBuilder, Url,
-    dns::{Addrs, Name, Resolve, Resolving},
-};
+use reqwest::{ClientBuilder, Url};
 use std::net::IpAddr;
 
 pub trait PublicOnly {
@@ -27,26 +24,7 @@ pub trait PublicOnly {
 
 impl PublicOnly for ClientBuilder {
     fn public_only(self) -> Self {
-        self.no_proxy().dns_resolver(PublicResolver)
-    }
-}
-
-struct PublicResolver;
-
-impl Resolve for PublicResolver {
-    fn resolve(&self, name: Name) -> Resolving {
-        Box::pin(async move {
-            let addrs = tokio::net::lookup_host((name.as_str(), 0))
-                .await?
-                .filter(|addr| is_global_ip(&addr.ip()))
-                .collect::<Vec<_>>();
-
-            if !addrs.is_empty() {
-                Ok(Box::new(addrs.into_iter()) as Addrs)
-            } else {
-                Err(format!("{} has no public address", name.as_str()).into())
-            }
-        })
+        utils::public_ip::public_only(self)
     }
 }
 
