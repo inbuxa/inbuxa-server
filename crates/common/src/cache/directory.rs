@@ -248,14 +248,20 @@ impl Server {
                     ..Default::default()
                 }));
 
-                // inbuxa: DIR-15
-                self.check_tenant_limits(&account).await?;
-                match self
-                    .registry()
-                    .write(RegistryWrite::insert(&account))
-                    .await
-                    .caused_by(trc::location!())?
-                {
+                // inbuxa: DIR-15, MT-17: checked and saved under the tenant's lock
+                let tenant_lock = self.lock_for_tenant_limits(&account).await?;
+                let written = match self.check_tenant_limits(&account).await {
+                    Ok(()) => self
+                        .registry()
+                        .write(RegistryWrite::insert(&account))
+                        .await
+                        .caused_by(trc::location!()),
+                    Err(err) => Err(err),
+                };
+                if let Some(tenant_id) = tenant_lock {
+                    self.unlock_tenant_writes(tenant_id).await;
+                }
+                match written? {
                     RegistryWriteResult::Success(id) => {
                         let mut invalidator = CacheInvalidationBuilder::default();
                         invalidator.process_create(&account);
@@ -420,14 +426,20 @@ impl Server {
                     ..Default::default()
                 }));
 
-                // inbuxa: DIR-15
-                self.check_tenant_limits(&account).await?;
-                match self
-                    .registry()
-                    .write(RegistryWrite::insert(&account))
-                    .await
-                    .caused_by(trc::location!())?
-                {
+                // inbuxa: DIR-15, MT-17: checked and saved under the tenant's lock
+                let tenant_lock = self.lock_for_tenant_limits(&account).await?;
+                let written = match self.check_tenant_limits(&account).await {
+                    Ok(()) => self
+                        .registry()
+                        .write(RegistryWrite::insert(&account))
+                        .await
+                        .caused_by(trc::location!()),
+                    Err(err) => Err(err),
+                };
+                if let Some(tenant_id) = tenant_lock {
+                    self.unlock_tenant_writes(tenant_id).await;
+                }
+                match written? {
                     RegistryWriteResult::Success(id) => {
                         let mut invalidator = CacheInvalidationBuilder::default();
                         invalidator.process_create(&account);
@@ -477,6 +489,25 @@ impl Server {
 
     /// inbuxa: DIR-15, MT-3, MT-17: an object created from a directory
     /// passes the same tenant checks as one created over JMAP.
+    /// MT-17: takes the lock of the tenant a new directory account joins,
+    /// so parallel sign-ins can't each find room under its limits. Returns
+    /// the tenant to unlock, `None` for an account in no tenant.
+    async fn lock_for_tenant_limits(&self, object: &Object) -> trc::Result<Option<u32>> {
+        let Some(tenant_id) = inbuxa_features::tenancy::writes::locked_tenant(None, object)
+            .map(|tenant_id| tenant_id.document_id())
+        else {
+            return Ok(None);
+        };
+        if self.lock_tenant_writes(tenant_id).await? {
+            Ok(Some(tenant_id))
+        } else {
+            Err(trc::AuthEvent::Error
+                .into_err()
+                .details(crate::tenant_lock::BUSY)
+                .reason("The directory's account can't be created"))
+        }
+    }
+
     async fn check_tenant_limits(&self, object: &Object) -> trc::Result<()> {
         match inbuxa_features::tenancy::writes::check(self.registry(), None, None, object).await? {
             Ok(_) => Ok(()),

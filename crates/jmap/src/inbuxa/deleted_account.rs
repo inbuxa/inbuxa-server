@@ -48,8 +48,6 @@ use trc::AddContext;
 use types::id::Id;
 use utils::snowflake::SnowflakeIdGenerator;
 
-use crate::inbuxa::tenant_disk_lock;
-
 type DValue = Value<'static, P, DeletedAccountValue>;
 
 const ALL: &[P] = &[
@@ -449,20 +447,21 @@ async fn restore_account(
         revision: 0,
     };
 
-    // inbuxa-admin#257: its disk quota must still fit what the tenant has
-    // left to give, checked and saved under the tenant's lock
-    let disk_lock = inbuxa_features::tenancy::writes::disk_quota_tenant(None, &object)
+    // MT-17, inbuxa-admin#257: it must still fit the tenant's count limits
+    // and the disk space it has left to give, checked and saved under the
+    // tenant's lock
+    let tenant_lock = inbuxa_features::tenancy::writes::locked_tenant(None, &object)
         .map(|tenant_id| tenant_id.document_id());
-    if let Some(tenant_id) = disk_lock
-        && !tenant_disk_lock::acquire(server, tenant_id).await?
+    if let Some(tenant_id) = tenant_lock
+        && !server.lock_tenant_writes(tenant_id).await?
     {
         return Ok(Err(
-            SetError::forbidden().with_description(tenant_disk_lock::BUSY)
+            SetError::forbidden().with_description(common::tenant_lock::BUSY)
         ));
     }
     let restored = restore_checked(server, id, kept, object).await;
-    if let Some(tenant_id) = disk_lock {
-        tenant_disk_lock::release(server, tenant_id).await;
+    if let Some(tenant_id) = tenant_lock {
+        server.unlock_tenant_writes(tenant_id).await;
     }
     restored
 }
