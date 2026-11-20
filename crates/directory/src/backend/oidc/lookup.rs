@@ -727,6 +727,7 @@ MCowBQYDK2VwAyEAXNXjqSjw780GFXxFztdFBUMpxRoFqsYWN55FXnvncCE=
                 claim_groups: None,
                 default_domain: None,
                 opaque_tokens,
+                public_only: false,
             },
             discovery: crate::backend::oidc::OidcDiscovery {
                 url: "https://idp.example.org".to_string(),
