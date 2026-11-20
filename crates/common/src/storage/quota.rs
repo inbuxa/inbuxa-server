@@ -92,6 +92,35 @@ impl Server {
         Ok(())
     }
 
+    // inbuxa: the disk space an account can really use, for reporting it to
+    // clients (JMAP Quota, IMAP QUOTA, DAV quota properties). Returns what
+    // the account uses and, when any limit applies, the limit it will
+    // actually meet: its own quota or its tenant's remaining space,
+    // whichever comes first (MT-19). Without this a 50 GB account in a 5 GB
+    // tenant shows 45 GB free while its mail is refused.
+    pub async fn effective_disk_quota(
+        &self,
+        account: &AccountCache,
+    ) -> trc::Result<(u64, Option<u64>)> {
+        let used = self.get_used_quota_account(account.id).await?.max(0) as u64;
+        let mut available =
+            (account.quota_disk > 0).then(|| account.quota_disk.saturating_sub(used));
+
+        if let Some(tenant_id) = account.id_tenant {
+            let tenant = self.tenant(tenant_id).await?;
+            if tenant.quota_disk > 0 {
+                let tenant_used = self.get_used_quota_tenant(tenant_id).await?.max(0) as u64;
+                let tenant_available = tenant.quota_disk.saturating_sub(tenant_used);
+                available = Some(available.map_or(tenant_available, |a| a.min(tenant_available)));
+            }
+        }
+
+        Ok((
+            used,
+            available.map(|available| used.saturating_add(available)),
+        ))
+    }
+
     // inbuxa: checks an item against the account's quota and, when it fits,
     // counts it towards the rest of the request
     pub async fn reserve_quota(&self, budget: &mut QuotaBudget, item_size: u64) -> trc::Result<()> {

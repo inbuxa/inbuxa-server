@@ -670,6 +670,19 @@ impl RegistrySet for Server {
                         }
                     };
 
+                    // inbuxa: inbuxa-admin#257: an account's disk quota fits
+                    // within its tenant's
+                    if let Err(err) = inbuxa_features::tenancy::writes::check_disk_quota(
+                        self.registry(),
+                        stored,
+                        &new_object,
+                    )
+                    .await?
+                    {
+                        set.failed(modification, err);
+                        continue 'outer;
+                    }
+
                     // inbuxa: BT-3, BT-15, BT-22: logos and templates follow their rules
                     let before = match &modification {
                         Modification::Update { object, .. }
