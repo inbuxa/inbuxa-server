@@ -93,11 +93,35 @@ pub async fn count(
     if let Some(kind) = kind {
         query = query.equal(Property::Type, kind);
     }
-    registry
+    let ids = registry
         .query::<Vec<Id>>(query)
         .await
-        .map(|ids| ids.len() as u64)
-        .caused_by(trc::location!())
+        .caused_by(trc::location!())?;
+
+    // MT-24: every name a tenant's domains answer to counts, aliases too
+    if quota == TenantStorageQuota::MaxDomains {
+        let mut total = 0u64;
+        for id in ids {
+            if let Some(object) = registry
+                .get(ObjectId::new(ObjectType::Domain, id))
+                .await
+                .caused_by(trc::location!())?
+            {
+                total += domain_names(&object.inner);
+            }
+        }
+        return Ok(total);
+    }
+    Ok(ids.len() as u64)
+}
+
+/// How many names a domain counts as against maxDomains (MT-24): its own
+/// and each alias. 1 for anything else.
+pub fn domain_names(object: &ObjectInner) -> u64 {
+    match object {
+        ObjectInner::Domain(domain) => 1 + domain.aliases.len() as u64,
+        _ => 1,
+    }
 }
 
 /// An account's own disk quota, `None` when it has none (0 is none too).

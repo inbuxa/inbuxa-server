@@ -19883,8 +19883,9 @@ impl RegistryJsonPropertyPatch for DnsServerYandexCloud {
 
 impl ObjectImpl for Domain {
     const FLAGS: u64 = OBJ_FILTER_TENANT | OBJ_SEQ_ID;
-    // inbuxa: 2: logoDark (branding BT-27); 3: passkeysAllowed (passkeys)
-    const VERSION: u8 = 3;
+    // inbuxa: 2: logoDark (branding BT-27); 3: passkeysAllowed (passkeys);
+    // 4: unverifiedNames, verificationToken (MT-24)
+    const VERSION: u8 = 4;
     const OBJECT: ObjectType = ObjectType::Domain;
 
     fn validate(&self, errors: &mut Vec<ValidationError>) -> bool {
@@ -19946,6 +19947,11 @@ impl ObjectImpl for Domain {
                 errors.push(ValidationError::required(Property::ReportAddressUri));
             }
         }
+        for value in self.unverified_names.iter() {
+            if value.is_empty() {
+                errors.push(ValidationError::required(Property::UnverifiedNames));
+            }
+        }
         errors.len() == neb
     }
 
@@ -19991,6 +19997,8 @@ impl Pickle for Domain {
         self.allow_scim_provisioning.pickle(out);
         self.logo_dark.pickle(out);
         self.passkeys_allowed.pickle(out);
+        self.unverified_names.pickle(out);
+        self.verification_token.pickle(out);
     }
 
     fn unpickle(stream: &mut crate::pickle::PickledStream<'_>) -> Option<Self> {
@@ -20021,6 +20029,11 @@ impl Pickle for Domain {
         if stream.version() >= 3 {
             this.passkeys_allowed = Pickle::unpickle(stream)?;
         }
+        // inbuxa: MT-24, stored from version 4; names saved before are trusted
+        if stream.version() >= 4 {
+            this.unverified_names = Pickle::unpickle(stream)?;
+            this.verification_token = Pickle::unpickle(stream)?;
+        }
         Some(this)
     }
 }
@@ -20036,6 +20049,8 @@ impl Default for Domain {
             logo: Default::default(),
             logo_dark: Default::default(),
             passkeys_allowed: true,
+            unverified_names: Default::default(),
+            verification_token: None,
             certificate_management: Default::default(),
             dkim_management: Default::default(),
             dns_management: Default::default(),
@@ -20052,7 +20067,7 @@ impl Default for Domain {
 
 impl IntoValue for Domain {
     fn into_value(self) -> JmapValue<'static> {
-        let mut map = jmap_tools::Map::with_capacity(18);
+        let mut map = jmap_tools::Map::with_capacity(20);
         map.insert_unchecked(Property::Name, self.name.into_value());
         map.insert_unchecked(Property::Aliases, self.aliases.into_value());
         map.insert_unchecked(Property::IsEnabled, self.is_enabled.into_value());
@@ -20085,6 +20100,14 @@ impl IntoValue for Domain {
         map.insert_unchecked(
             Property::AllowScimProvisioning,
             self.allow_scim_provisioning.into_value(),
+        );
+        map.insert_unchecked(
+            Property::UnverifiedNames,
+            self.unverified_names.into_value(),
+        );
+        map.insert_unchecked(
+            Property::VerificationToken,
+            self.verification_token.into_value(),
         );
         JmapValue::Object(map)
     }
@@ -20130,6 +20153,11 @@ impl RegistryJsonPropertyPatch for Domain {
             Some(Property::AllowScimProvisioning) => {
                 self.allow_scim_provisioning.patch(pointer, value)
             }
+            // inbuxa: MT-24: what a tenant may change here is checked on save
+            Some(Property::UnverifiedNames) => self
+                .unverified_names
+                .patch(pointer.with_validators(&[StringValidator::Domain]), value),
+            Some(Property::VerificationToken) => pointer.assert_server_set(),
             Some(Property::Type) => Ok(MaybeUnpatched::Unpatched {
                 property: Property::Type,
                 value,
