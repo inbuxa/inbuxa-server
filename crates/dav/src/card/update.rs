@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use super::assert_is_unique_uid;
@@ -185,20 +187,21 @@ impl CardUpdateRequestHandler for Server {
                 }
             }
 
-            // Validate quota
-            let extra_bytes =
-                (bytes.len() as u64).saturating_sub(u32::from(card.inner.size) as u64);
-            if extra_bytes > 0 {
-                self.has_available_quota(self.account(account_id).await?.as_ref(), extra_bytes)
-                    .await?;
-            }
-
             // Build node
             let mut new_card = card
                 .deserialize::<ContactCard>()
                 .caused_by(trc::location!())?;
             new_card.size = bytes.len() as u32;
             new_card.card = vcard;
+
+            // Validate quota
+            // inbuxa: against what the card is charged (its names and
+            // properties too), not the bare vCard length
+            let extra_bytes = (new_card.size() as u64).saturating_sub(card.inner.size() as u64);
+            if extra_bytes > 0 {
+                self.has_available_quota(self.account(account_id).await?.as_ref(), extra_bytes)
+                    .await?;
+            }
 
             // Prepare write batch
             let mut batch = BatchBuilder::new();
@@ -258,15 +261,6 @@ impl CardUpdateRequestHandler for Server {
             )
             .await?;
 
-            // Validate quota
-            if !bytes.is_empty() {
-                self.has_available_quota(
-                    self.account(account_id).await?.as_ref(),
-                    bytes.len() as u64,
-                )
-                .await?;
-            }
-
             // Build node
             let card = ContactCard {
                 names: vec![DavName {
@@ -277,6 +271,12 @@ impl CardUpdateRequestHandler for Server {
                 size: bytes.len() as u32,
                 ..Default::default()
             };
+
+            // Validate quota
+            // inbuxa: against what the card is charged, not the bare vCard
+            // length, which let a PUT run past the limit
+            self.has_available_quota(self.account(account_id).await?.as_ref(), card.size() as u64)
+                .await?;
 
             // Prepare write batch
             let mut batch = BatchBuilder::new();

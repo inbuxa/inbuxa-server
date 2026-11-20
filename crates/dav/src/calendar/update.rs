@@ -330,8 +330,9 @@ impl CalendarUpdateRequestHandler for Server {
             }
 
             // Validate quota
-            let extra_bytes =
-                (bytes.len() as u64).saturating_sub(u32::from(event.inner.size) as u64);
+            // inbuxa: against what the event is charged (its names and
+            // properties too), not the bare iCalendar length
+            let extra_bytes = (new_event.size() as u64).saturating_sub(event.inner.size() as u64);
             if extra_bytes > 0 {
                 self.has_available_quota(self.account(account_id).await?.as_ref(), extra_bytes)
                     .await?;
@@ -481,13 +482,13 @@ impl CalendarUpdateRequestHandler for Server {
             }
 
             // Validate quota
-            if !bytes.is_empty() {
-                self.has_available_quota(
-                    self.account(account_id).await?.as_ref(),
-                    bytes.len() as u64,
-                )
-                .await?;
-            }
+            // inbuxa: against what the event is charged, not the bare
+            // iCalendar length, which let a PUT run past the limit
+            self.has_available_quota(
+                self.account(account_id).await?.as_ref(),
+                event.size() as u64,
+            )
+            .await?;
 
             // Prepare write batch
             let mut batch = BatchBuilder::new();
