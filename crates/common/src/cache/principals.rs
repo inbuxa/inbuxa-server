@@ -66,7 +66,8 @@ impl Server {
                 // Domain no longer exists, remove from name cache
                 domain_names.remove(domain);
             }
-            Ok(result)
+            // inbuxa: MT-24: an unproven name is no local domain
+            Ok(result.filter(|cached| cached.serves(domain)))
         } else {
             let domain_names_negative = &self.inner.cache.domain_names_negative;
             if domain_names_negative.get(domain).is_none() {
@@ -91,17 +92,18 @@ impl Server {
                         .caused_by(trc::location!())?;
                 }
 
-                if let Some(domain) = object {
+                if let Some(object) = object {
                     // Cache positive result
-                    let domain_id = domain.id().document_id();
-                    let domain = self.domain_by_id(domain_id).await?;
-                    if let Some(domain) = &domain {
-                        for name in domain.names.iter() {
+                    let domain_id = object.id().document_id();
+                    let found = self.domain_by_id(domain_id).await?;
+                    if let Some(found) = &found {
+                        for name in found.names.iter() {
                             domain_names.insert(name.clone(), domain_id);
                         }
                     }
 
-                    Ok(domain)
+                    // inbuxa: MT-24: an unproven name is no local domain
+                    Ok(found.filter(|cached| cached.serves(domain)))
                 } else {
                     // Cache negative result
                     domain_names_negative.insert(
@@ -153,7 +155,8 @@ impl Server {
                     Key = domain_id,
                     Collection = "domainId",
                 );
-                let Some(domain) = self.registry().object::<Domain>(domain_id.into()).await? else {
+                let Some(mut domain) = self.registry().object::<Domain>(domain_id.into()).await?
+                else {
                     return Ok(None);
                 };
                 let mut flags = 0;
@@ -165,6 +168,11 @@ impl Server {
                 if domain.allow_scim_provisioning {
                     flags |= crate::auth::DOMAIN_FLAG_SCIM;
                 }
+                // inbuxa: MT-24: names a tenant hasn't proven it owns
+                if domain.unverified_names.contains(&domain.name) {
+                    flags |= crate::auth::DOMAIN_FLAG_UNVERIFIED;
+                }
+                let unverified = std::mem::take(&mut domain.unverified_names);
 
                 let sub_addressing_custom = match domain.sub_addressing {
                     SubAddressing::Enabled => {
@@ -195,6 +203,7 @@ impl Server {
                             domain
                                 .aliases
                                 .into_iter()
+                                .filter(|alias| !unverified.contains(alias))
                                 .map(|alias| alias.into_boxed_str()),
                         )
                         .collect(),
@@ -700,7 +709,10 @@ impl Server {
         let mut addresses =
             Vec::with_capacity(account.id_member_of.len() + account.addresses.len());
         for address in account.addresses.iter() {
-            if let Some(domain) = self.domain_by_id(address.domain_id).await? {
+            // inbuxa: MT-24: no addresses on a domain nobody has proven
+            if let Some(domain) = self.domain_by_id(address.domain_id).await?
+                && domain.is_verified()
+            {
                 for name in domain.names.iter() {
                     let mut addr = String::with_capacity(name.len() + address.local_part.len() + 1);
                     addr.push_str(address.local_part.as_ref());
@@ -714,7 +726,9 @@ impl Server {
         for &group_id in &account.id_member_of {
             if let Some(group) = self.try_account(group_id).await? {
                 for address in group.addresses.iter() {
-                    if let Some(domain) = self.domain_by_id(address.domain_id).await? {
+                    if let Some(domain) = self.domain_by_id(address.domain_id).await?
+                        && domain.is_verified()
+                    {
                         for name in domain.names.iter() {
                             let mut addr =
                                 String::with_capacity(name.len() + address.local_part.len() + 1);

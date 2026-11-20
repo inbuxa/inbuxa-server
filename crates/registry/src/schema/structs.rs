@@ -2737,6 +2737,12 @@ pub struct Domain {
     pub description: Option<String>,
     #[serde(rename = "logo")]
     pub logo: Option<String>,
+    // inbuxa: MT-24: names a tenant added that nobody has proven it owns
+    // yet, and the token its TXT records must carry
+    #[serde(rename = "unverifiedNames")]
+    pub unverified_names: Map<String>,
+    #[serde(rename = "verificationToken")]
+    pub verification_token: Option<String>,
     #[serde(rename = "certificateManagement")]
     pub certificate_management: CertificateManagement,
     #[serde(rename = "dkimManagement")]

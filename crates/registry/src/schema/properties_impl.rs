@@ -1314,6 +1314,7 @@ impl EnumImpl for Property {
             b"tsigAlgorithm" => Property::TsigAlgorithm,
             b"ttl" => Property::Ttl,
             b"unpackDirectory" => Property::UnpackDirectory,
+            b"unverifiedNames" => Property::UnverifiedNames,
             b"updateRecords" => Property::UpdateRecords,
             b"uploadQuota" => Property::UploadQuota,
             b"uploadTtl" => Property::UploadTtl,
@@ -1334,6 +1335,7 @@ impl EnumImpl for Property {
             b"validateDomain" => Property::ValidateDomain,
             b"value" => Property::Value,
             b"variableName" => Property::VariableName,
+            b"verificationToken" => Property::VerificationToken,
             b"verifyAfterWrite" => Property::VerifyAfterWrite,
             b"version" => Property::Version,
             b"viewName" => Property::ViewName,
@@ -2258,6 +2260,8 @@ impl EnumImpl for Property {
             Property::TsigAlgorithm => "tsigAlgorithm",
             Property::Ttl => "ttl",
             Property::UnpackDirectory => "unpackDirectory",
+            Property::UnverifiedNames => "unverifiedNames",
+            Property::VerificationToken => "verificationToken",
             Property::UpdateRecords => "updateRecords",
             Property::UploadQuota => "uploadQuota",
             Property::UploadTtl => "uploadTtl",
@@ -3033,6 +3037,8 @@ impl EnumImpl for Property {
             936 => Some(Property::IntrospectionUrl),
             937 => Some(Property::IntrospectionClientId),
             938 => Some(Property::IntrospectionClientSecret),
+            948 => Some(Property::UnverifiedNames),
+            949 => Some(Property::VerificationToken),
             615 => Some(Property::RequireClientRegistration),
             608 => Some(Property::RequireScopes),
             525 => Some(Property::RequireTls),
@@ -3244,7 +3250,7 @@ impl EnumImpl for Property {
         }
     }
 
-    const COUNT: usize = 939;
+    const COUNT: usize = 950;
 }
 
 impl serde::Serialize for Property {

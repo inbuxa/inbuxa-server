@@ -65,6 +65,14 @@ pub(crate) async fn validate_domain(
             .with_description(err)));
     }
 
+    // inbuxa: MT-24: a tenant proves the names it adds
+    if let Err(err) =
+        crate::inbuxa::domain_verification::check(set.server, set.access_token, domain, old_domain)
+            .await?
+    {
+        return Ok(Err(err));
+    }
+
     // Validate that names and aliases do not collide with another domain
     let registry = set.server.registry();
     if old_domain.is_none_or(|old| old.name != domain.name)
