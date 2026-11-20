@@ -790,13 +790,14 @@ async fn delete_email_metadata(
 
             // inbuxa: UD-1, UD-4: a message noted at deletion is archived
             let root = metadata.contents.first().and_then(|c| c.parts.first());
-            inbuxa_features::undelete::email::archive(
+            let blob_hash = BlobHash::from(&metadata.blob_hash);
+            let archived = inbuxa_features::undelete::email::archive(
                 &server.core.storage.data,
                 server.registry(),
                 account_id,
                 document_id,
                 inbuxa_features::undelete::email::Summary {
-                    blob_hash: BlobHash::from(&metadata.blob_hash),
+                    blob_hash: blob_hash.clone(),
                     from: root.and_then(|part| part.from()),
                     subject: root.and_then(|part| part.subject()),
                     received_at: metadata.rcvd_attach.to_native() & MESSAGE_RECEIVED_MASK,
@@ -804,6 +805,16 @@ async fn delete_email_metadata(
             )
             .await
             .caused_by(trc::location!())?;
+            // inbuxa: UD-14a: with no archived copy, its spam-sample holds end
+            if !archived {
+                inbuxa_features::undelete::samples::release(
+                    &server.core.storage.data,
+                    account_id,
+                    &blob_hash,
+                )
+                .await
+                .caused_by(trc::location!())?;
+            }
         }
         None => {
             trc::event!(

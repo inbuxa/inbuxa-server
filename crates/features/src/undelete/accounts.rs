@@ -139,7 +139,8 @@ pub async fn forget(data: &Store, registry: &RegistryStore, account_id: u32) -> 
             .caused_by(trc::location!())?;
     }
     for (id, item) in records::of_account(data, registry, account_id).await? {
-        records::remove(data, registry, id, &item).await?;
+        // Its usage goes with the account, so the counters stay as they are
+        records::discard(data, registry, id, &item).await?;
     }
     data::clear_account(data, account_id).await
 }

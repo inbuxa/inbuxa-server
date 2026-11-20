@@ -146,8 +146,9 @@ Task type `RestoreArchivedItem`, carrying the `accountId`, the
   (observed 5). The restored item is a new item with a new id, and JMAP
   `/changes` reports it as created.
 - **UD-10.** A restore still counts against quota. It's refused if it would
-  take the account, or its tenant, past a limit. The item stays archived, and
-  the task records why.
+  take the account, or its tenant, past a limit, less what the archived copy
+  already counts (UD-14), so restoring a counted item is never refused just
+  for being counted. The item stays archived, and the task records why.
 - **UD-11.** Restoring is idempotent: asking twice, or asking while a restore
   task is already running, restores once.
 
@@ -163,10 +164,25 @@ Task type `RestoreArchivedItem`, carrying the `accountId`, the
 
 ### Storage
 
-- **UD-14.** Archived copies don't count toward the account's or tenant's
-  quota while archived, as upstream (observed 7). Counting them would make deleting mail to
-  free space fail. They do count in server storage reporting, and ihasmail's
-  admin dashboard shows the archive's total size per account.
+- **UD-14.** Archived copies count toward the account's and its tenant's
+  quota while they're kept, and come off when they go: restored (the restored
+  item counts as itself from then on), destroyed or expired. This changed in
+  27.1 (inbuxa-admin#257). Upstream doesn't count them (observed 7), and
+  neither did we at first, so that deleting would free space. But a member
+  could then fill the account, delete, and fill it again, storing the limit's
+  worth once more every cycle for the whole retention period, past both the
+  account's quota and the tenant's. Deleting never fails because of this: it
+  just doesn't free space until the item goes, and an account that's full
+  stops taking new mail. A user who needs the space back destroys the
+  archived items (UD-12). Items archived before 27.1 weren't counted, so
+  nothing is taken off when they go. A deleted account's archive stays
+  counted with the account (UD-15), and goes with it.
+- **UD-14a.** A spam-training sample's hold on a message's blob ends with
+  the account's own copy: when the message's data is removed with nothing
+  archiving it, or when its archived copy goes other than by restore. Held
+  longer, the blob was stored with nobody counting it, for
+  `holdSamplesFor` (90 days by default). The classifier drops a sample whose
+  blob is gone from its replay pool; what it learned from the sample stays.
 
 ### Deleted accounts
 
@@ -257,7 +273,9 @@ Stalwart-facing (SPEC.md §5).
 11. Retention lowered from 30 to 7 days: existing deadlines don't move
     (UD-5).
 12. Past `archivedUntil`: not restorable, and gone after clean-up (UD-13).
-13. Archive size doesn't count toward quota (UD-14).
+13. Archive size counts toward the account's and the tenant's quota while
+    kept, comes off when it goes, and a counted item restores in a full
+    account (UD-14, UD-10).
 14. Deleted account: can't sign in, mail refused, name reserved, restorable
     by an admin with its data intact (UD-15 to UD-17).
 15. A user can't see another user's archive. A tenant admin sees only its

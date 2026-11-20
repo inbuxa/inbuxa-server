@@ -18,4 +18,5 @@ pub mod data;
 pub mod email;
 pub mod groupware;
 pub mod records;
+pub mod samples;
 pub mod settings;

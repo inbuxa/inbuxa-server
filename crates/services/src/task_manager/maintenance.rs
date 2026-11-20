@@ -236,6 +236,10 @@ async fn store_maintenance(
             )
             .await
             .caused_by(trc::location!())?;
+            // inbuxa: UD-14a: and notes of spam-sample holds that have ended
+            inbuxa_features::undelete::samples::purge_ended(&server.core.storage.data)
+                .await
+                .caused_by(trc::location!())?;
 
             use common::telemetry::metrics::store::MetricsStore;
             // inbuxa: MON-17, MON-38: history past its retention goes; a
@@ -550,6 +554,10 @@ async fn recalculate_quota(server: &Server, account_id: u32) -> trc::Result<()> 
             .await
             .caused_by(trc::location!())?;
     }
+
+    // inbuxa: UD-14: kept deleted items count too
+    quota += inbuxa_features::undelete::data::counted_total(&server.core.storage.data, account_id)
+        .await? as i64;
 
     let mut batch = BatchBuilder::new();
     batch

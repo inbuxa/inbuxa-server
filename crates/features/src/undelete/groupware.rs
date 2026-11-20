@@ -238,11 +238,21 @@ pub async fn archive(
                 .details("Not a groupware item"));
         }
     };
-    records::insert(data, registry, &item, &note.extra).await
+    let size = kept_size(&note);
+    records::insert(data, registry, &item, &note.extra, size).await
 }
 
 /// The names a restored item tries, in order: the original, then with
 /// ` (restored)`, then numbered (UD-8).
+/// The bytes a kept file, event or contact counts while it's archived
+/// (UD-14): a file's size, or the event's or contact's text.
+fn kept_size(note: &Note) -> u64 {
+    match &note.extra {
+        Extra::FileNode { size, .. } if *size > 0 => *size as u64,
+        _ => note.content.as_ref().map_or(0, |text| text.len() as u64),
+    }
+}
+
 pub fn candidates(name: &str) -> impl Iterator<Item = String> + '_ {
     let (stem, ext) = match name.rsplit_once('.') {
         Some((stem, ext)) if !stem.is_empty() => (stem, format!(".{ext}")),
@@ -301,6 +311,7 @@ pub async fn archive_sieve(
     retention: u64,
 ) -> trc::Result<Id> {
     let archived_at = now();
+    let size = content.len() as u64;
     let item = ArchivedItem::SieveScript(registry::schema::structs::ArchivedSieveScript {
         name: name.to_string(),
         created_at: UTCDateTime::from_timestamp(archived_at as i64),
@@ -317,6 +328,7 @@ pub async fn archive_sieve(
         &Extra::SieveScript {
             name: name.to_string(),
         },
+        size,
     )
     .await
 }

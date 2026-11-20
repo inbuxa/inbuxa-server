@@ -152,9 +152,14 @@ impl EmailIngest for Server {
         let tenant_id = params.access_token.tenant_id();
         let mut raw_message_len = params.raw_message.len() as u64;
         let account = self.account(account_id).await.caused_by(trc::location!())?;
-        self.has_available_quota(&account, raw_message_len)
-            .await
-            .caused_by(trc::location!())?;
+        // inbuxa: UD-14: a restore checks for itself, crediting what its kept
+        // copy already counts
+        if params.source != IngestSource::Restore {
+            self.has_available_quota(&account, raw_message_len)
+                .await
+                .caused_by(trc::location!())?;
+        }
+        let checked_len = raw_message_len;
 
         // Parse message
         let mut raw_message = Cow::from(params.raw_message);
@@ -562,6 +567,16 @@ impl EmailIngest for Server {
             false
         };
 
+        // inbuxa: the size stored is the message after encryption, with the
+        // headers added on delivery; check that when it's more than was
+        // checked at the start
+        let stored_len = (message.raw_message.len() + extra_headers.len()) as u64;
+        if stored_len > checked_len && params.source != IngestSource::Restore {
+            self.has_available_quota(&account, stored_len)
+                .await
+                .caused_by(trc::location!())?;
+        }
+
         // Store blob
         let (blob_hash, blob_hold) = if !is_encrypted && let Some(blob_hash) = params.blob_hash {
             (blob_hash.clone(), None)
@@ -945,6 +960,13 @@ impl EmailIngest for Server {
                 subject,
             }
             .to_pickled_vec();
+
+            // inbuxa: UD-14a: a held sample is noted, so its hold can end
+            // with the account's own copy of the message
+            if hold_sample {
+                let linked_to = batch.last_account_id().unwrap_or(account_id);
+                inbuxa_features::undelete::samples::note(batch, linked_to, &hash, until);
+            }
 
             let object_id = ObjectType::SpamTrainingSample.to_id();
             let item_id = SnowflakeIdGenerator::global_id().unwrap_or_default();
