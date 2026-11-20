@@ -109,20 +109,20 @@ impl<T: SessionStream> SessionData<T> {
             .account(account_id)
             .await
             .imap_ctx(&arguments.tag, trc::location!())?;
-        let used_quota = self
+        // inbuxa: the limit the account will really meet, its own quota or
+        // its tenant's remaining space (inbuxa-admin#257)
+        let (used_quota, disk_limit) = self
             .server
-            .get_used_quota_account(account_id)
+            .effective_disk_quota(&account)
             .await
             .imap_ctx(&arguments.tag, trc::location!())?;
+        let disk_limit = disk_limit.unwrap_or_default();
 
         trc::event!(
             Imap(trc::ImapEvent::GetQuota),
             SpanId = self.session_id,
             Id = arguments.name.clone(),
-            Details = vec![
-                trc::Value::from(used_quota),
-                trc::Value::from(account.disk_quota())
-            ],
+            Details = vec![trc::Value::from(used_quota), trc::Value::from(disk_limit)],
             Elapsed = op_start.elapsed()
         );
 
@@ -131,11 +131,11 @@ impl<T: SessionStream> SessionData<T> {
             quota_root_items: vec![],
             quota_items: vec![QuotaItem {
                 name: arguments.name,
-                resources: if account.disk_quota() > 0 {
+                resources: if disk_limit > 0 {
                     vec![QuotaResource {
                         resource: QuotaResourceName::Storage,
-                        total: account.disk_quota(),
-                        used: used_quota as u64,
+                        total: disk_limit,
+                        used: used_quota,
                     }]
                 } else {
                     vec![]
@@ -173,20 +173,20 @@ impl<T: SessionStream> SessionData<T> {
             .account(account_id)
             .await
             .imap_ctx(&arguments.tag, trc::location!())?;
-        let used_quota = self
+        // inbuxa: the limit the account will really meet, its own quota or
+        // its tenant's remaining space (inbuxa-admin#257)
+        let (used_quota, disk_limit) = self
             .server
-            .get_used_quota_account(account_id)
+            .effective_disk_quota(&account)
             .await
             .imap_ctx(&arguments.tag, trc::location!())?;
+        let disk_limit = disk_limit.unwrap_or_default();
 
         trc::event!(
             Imap(trc::ImapEvent::GetQuota),
             SpanId = self.session_id,
             MailboxName = arguments.name.clone(),
-            Details = vec![
-                trc::Value::from(used_quota),
-                trc::Value::from(account.disk_quota())
-            ],
+            Details = vec![trc::Value::from(used_quota), trc::Value::from(disk_limit)],
             Elapsed = op_start.elapsed()
         );
 
@@ -195,11 +195,11 @@ impl<T: SessionStream> SessionData<T> {
             quota_root_items: vec![arguments.name, format!("#{account_id}")],
             quota_items: vec![QuotaItem {
                 name: format!("#{account_id}"),
-                resources: if account.disk_quota() > 0 {
+                resources: if disk_limit > 0 {
                     vec![QuotaResource {
                         resource: QuotaResourceName::Storage,
-                        total: account.disk_quota(),
-                        used: used_quota as u64,
+                        total: disk_limit,
+                        used: used_quota,
                     }]
                 } else {
                     vec![]

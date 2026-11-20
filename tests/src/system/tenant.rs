@@ -23,7 +23,8 @@ use jmap_proto::error::set::SetErrorType;
 use registry::{
     schema::{
         enums::{
-            Permission, TaskStoreMaintenanceType, TaskTenantMaintenanceType, TenantStorageQuota,
+            Permission, StorageQuota, TaskStoreMaintenanceType, TaskTenantMaintenanceType,
+            TenantStorageQuota,
         },
         prelude::{ObjectType, Property},
         structs::{
@@ -849,17 +850,20 @@ pub async fn test(test: &mut TestServer) {
     // Acceptance test 13: the tenant's disk limit bounds all its members
     // together (MT-19, MT-20)
     let d_id = admin.create_tenant("Tenant D").await;
-    admin
+    let d_domain = admin
         .create_tenant_domain("d.example.org", Some(d_id))
         .await;
     let d_admin = admin
         .create_user_account("dadmin@d.example.org", SECRET_D, "D admin", &[], vec![])
         .await;
     admin.make_tenant_admin(d_admin.id()).await;
+    let mut d_users = Vec::new();
     for name in ["d1@d.example.org", "d2@d.example.org", "d3@d.example.org"] {
-        admin
-            .create_user_account(name, SECRET_D, "D user", &[], vec![])
-            .await;
+        d_users.push(
+            admin
+                .create_user_account(name, SECRET_D, "D user", &[], vec![])
+                .await,
+        );
     }
     let message = concat!(
         "From: someone@remote.example.org\r\n",
@@ -957,6 +961,76 @@ pub async fn test(test: &mut TestServer) {
     admin
         .registry_destroy(ObjectType::QueuedMessage, queued)
         .await;
+
+    // inbuxa-admin#257: an account's disk quota can't exceed its tenant's,
+    // whoever sets it
+    let d_limit = (two + one / 2) as u64;
+    let with_quota = |name: &str, quota: u64| {
+        structs::Account::User(structs::UserAccount {
+            name: name.to_string(),
+            domain_id: d_domain,
+            quotas: VecMap::from_iter([(StorageQuota::MaxDiskQuota, quota)]),
+            ..Default::default()
+        })
+    };
+    for writer in [&d_admin, &admin] {
+        writer
+            .registry_create_object_expect_err(with_quota("d4", d_limit * 10))
+            .await
+            .assert_type(SetErrorType::InvalidProperties)
+            .assert_description_contains("maxDiskQuota");
+    }
+    let d4 = d_admin
+        .registry_create_object(with_quota("d4", d_limit))
+        .await;
+    d_admin
+        .registry_update_object_expect_err(
+            ObjectType::Account,
+            d4,
+            json!({ Property::Quotas: VecMap::from_iter([(StorageQuota::MaxDiskQuota, d_limit + 1)]) }),
+        )
+        .await
+        .assert_type(SetErrorType::InvalidProperties);
+    // Lowering the tenant's limit leaves the account's quota alone, and
+    // other changes to it still save (MT-18)
+    admin
+        .set_tenant_quota(d_id, TenantStorageQuota::MaxDiskQuota, d_limit - 1)
+        .await;
+    d_admin
+        .registry_update_object(
+            ObjectType::Account,
+            d4,
+            json!({ Property::Description: "still here" }),
+        )
+        .await;
+    admin
+        .set_tenant_quota(d_id, TenantStorageQuota::MaxDiskQuota, d_limit)
+        .await;
+    admin
+        .registry_destroy(ObjectType::Account, [d4])
+        .await
+        .assert_destroyed(&[d4]);
+    test.wait_for_tasks().await;
+    // A member with no quota of its own sees the tenant's remaining space
+    // as its limit, the limit it would really meet
+    let response = d_users[0]
+        .jmap_method_call(
+            "Quota/get",
+            json!({ "accountId": d_users[0].id_string(), "ids": null }),
+        )
+        .await
+        .to_string();
+    let d1_used = test
+        .server
+        .get_used_quota_account(d_users[0].id().document_id())
+        .await
+        .unwrap()
+        .max(0) as u64;
+    let expected = d1_used + d_limit.saturating_sub(two as u64);
+    assert!(
+        response.contains(&format!("\"hardLimit\":{expected}")),
+        "inbuxa-admin#257: Quota/get {response}"
+    );
 
     // Acceptance test 14: recalculateQuota restores a corrupted figure (MT-21)
     test.corrupt_tenant_usage(d_id, 123_456).await;

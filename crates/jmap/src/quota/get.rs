@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use common::{Server, auth::AccessToken};
@@ -44,7 +46,13 @@ impl QuotaGet for Server {
         ]);
         let account_id = request.account_id.document_id();
         let account = self.account(account_id).await.caused_by(trc::location!())?;
-        let quota_ids = if account.disk_quota() > 0 {
+        // inbuxa: report the limit the account will really meet, its own
+        // quota or its tenant's remaining space (inbuxa-admin#257)
+        let (used, hard_limit) = self
+            .effective_disk_quota(&account)
+            .await
+            .caused_by(trc::location!())?;
+        let quota_ids = if hard_limit.is_some() {
             vec![0u32]
         } else {
             vec![]
@@ -80,10 +88,8 @@ impl QuotaGet for Server {
                 let value = match property {
                     QuotaProperty::Id => Value::Element(id.into()),
                     QuotaProperty::ResourceType => "octets".to_string().into(),
-                    QuotaProperty::Used => {
-                        (self.get_used_quota_account(account_id).await?.max(0) as u64).into()
-                    }
-                    QuotaProperty::HardLimit => account.as_ref().disk_quota().into(),
+                    QuotaProperty::Used => used.into(),
+                    QuotaProperty::HardLimit => hard_limit.unwrap_or_default().into(),
                     QuotaProperty::Scope => "account".to_string().into(),
                     QuotaProperty::Name => account.as_ref().name().to_string().into(),
                     QuotaProperty::Description => account

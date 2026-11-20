@@ -13,6 +13,8 @@
 //! - MT-17: creating an object, or moving a domain in, stays within the
 //!   tenant's count limits, and the server emits `limit.tenant-quota` when
 //!   it doesn't.
+//! - An account's disk quota fits within its tenant's (inbuxa-admin#257),
+//!   checked by `check_disk_quota` on JMAP and SCIM writes.
 
 use crate::tenancy::{
     domain_move::{self, Move, Refusal},
@@ -23,7 +25,7 @@ use ahash::AHashSet;
 use jmap_proto::error::set::{SetError, SetErrorType};
 use registry::{
     schema::{
-        enums::TenantStorageQuota,
+        enums::{StorageQuota, TenantStorageQuota},
         prelude::{Object, ObjectInner, Property},
         structs::{Account, DkimManagement, Domain, Tenant},
     },
@@ -61,6 +63,19 @@ pub async fn default_tenant(registry: &RegistryStore, object: &mut Object) -> tr
         object.inner.set_member_tenant_id(tenant_id);
     }
     Ok(())
+}
+
+/// An account's own disk quota, `None` when it has none (0 is none too).
+fn account_disk_quota(object: &ObjectInner) -> Option<u64> {
+    let quotas = match object {
+        ObjectInner::Account(Account::User(obj)) => &obj.quotas,
+        ObjectInner::Account(Account::Group(obj)) => &obj.quotas,
+        _ => return None,
+    };
+    quotas
+        .get(&StorageQuota::MaxDiskQuota)
+        .copied()
+        .filter(|quota| *quota > 0)
 }
 
 /// A tenant's count limit, `None` when it has none.
@@ -146,6 +161,35 @@ pub async fn check(
     Ok(Ok(after))
 }
 
+/// inbuxa-admin#257: an account's disk quota fits within its tenant's, so no
+/// member gets more space than the whole tenant has. Run on a JMAP or SCIM
+/// write, after `check`. Checked when the quota is set or changed, or the
+/// account changes tenant; an account already over a lowered tenant limit
+/// keeps its quota until someone changes it, like the count limits (MT-18).
+/// No quota at all is fine: the account shares the tenant's space. Not run
+/// for accounts a directory creates at sign-in or for a restored account,
+/// which would otherwise be refused for a setting nobody can edit first.
+pub async fn check_disk_quota(
+    registry: &RegistryStore,
+    old: Option<&Object>,
+    new: &Object,
+) -> trc::Result<Result<(), SetError<Property>>> {
+    let tenant = new.inner.member_tenant_id();
+    if let Some(tenant_id) = tenant
+        && let Some(quota) = account_disk_quota(&new.inner)
+        && old.is_none_or(|old| {
+            account_disk_quota(&old.inner) != Some(quota) || old.inner.member_tenant_id() != tenant
+        })
+        && let Some(tenant_quota) =
+            (limits(registry, tenant_id).await?)(TenantStorageQuota::MaxDiskQuota)
+                .filter(|limit| *limit > 0)
+        && quota > tenant_quota
+    {
+        return Ok(Err(over_tenant_disk_quota(quota, tenant_quota)));
+    }
+    Ok(Ok(()))
+}
+
 /// Finishes a checked write once it's saved. Returns each other object it
 /// changed, as it was and as it is now, for cache invalidation.
 pub async fn after_save(
@@ -194,6 +238,59 @@ fn over_quota(reached: LimitReached, tenant_id: Id) -> SetError<Property> {
         "The tenant's {name} limit of {} is reached.",
         reached.limit
     ))
+}
+
+/// Refuses an account disk quota bigger than its tenant's (inbuxa-admin#257).
+fn over_tenant_disk_quota(quota: u64, tenant_quota: u64) -> SetError<Property> {
+    SetError::invalid_properties()
+        .with_property(Property::Quotas)
+        .with_description(format!(
+            "The account's disk quota of {quota} bytes ({}) is more than its tenant's \
+             maxDiskQuota of {tenant_quota} bytes ({}). Set it to {tenant_quota} or less, \
+             or leave it empty to share the tenant's space.",
+            readable_size(quota),
+            readable_size(tenant_quota),
+        ))
+}
+
+/// A byte count in binary units, for people reading an error: "50 GiB".
+fn readable_size(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["bytes", "KiB", "MiB", "GiB", "TiB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 || value.fract() == 0.0 {
+        format!("{value:.0} {}", UNITS[unit])
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
+#[cfg(test)]
+mod disk_quota_tests {
+    use super::*;
+
+    #[test]
+    fn readable_sizes() {
+        assert_eq!(readable_size(512), "512 bytes");
+        assert_eq!(readable_size(5 * 1024 * 1024 * 1024), "5 GiB");
+        assert_eq!(readable_size(1536 * 1024 * 1024), "1.5 GiB");
+    }
+
+    #[test]
+    fn zero_quota_is_no_quota() {
+        let user = |quota: u64| {
+            ObjectInner::Account(Account::User(registry::schema::structs::UserAccount {
+                quotas: [(StorageQuota::MaxDiskQuota, quota)].into_iter().collect(),
+                ..Default::default()
+            }))
+        };
+        assert_eq!(account_disk_quota(&user(0)), None);
+        assert_eq!(account_disk_quota(&user(10)), Some(10));
+    }
 }
 
 fn refused_move(refusal: Refusal, tenant: Option<Id>) -> SetError<Property> {

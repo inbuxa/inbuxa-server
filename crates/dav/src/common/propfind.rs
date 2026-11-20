@@ -1194,32 +1194,15 @@ impl PropFindRequestHandler for Server {
 
     async fn dav_quota(&self, account_id: u32) -> trc::Result<PropFindAccountQuota> {
         let account = self.account(account_id).await.caused_by(trc::location!())?;
-        let used = self
-            .get_used_quota_account(account_id)
+        let (used, limit) = self
+            .effective_disk_quota(&account)
             .await
-            .caused_by(trc::location!())?
-            .max(0) as u64;
-        let mut available =
-            (account.quota_disk > 0).then(|| account.quota_disk.saturating_sub(used));
+            .caused_by(trc::location!())?;
 
-        if let Some(tenant_id) = account.id_tenant {
-            let tenant = self.tenant(tenant_id).await.caused_by(trc::location!())?;
-
-            if tenant.quota_disk > 0 {
-                let tenant_used = self
-                    .get_used_quota_tenant(tenant_id)
-                    .await
-                    .caused_by(trc::location!())?
-                    .max(0) as u64;
-                let tenant_available = tenant.quota_disk.saturating_sub(tenant_used);
-
-                available = Some(available.map_or(tenant_available, |available| {
-                    available.min(tenant_available)
-                }));
-            }
-        }
-
-        Ok(PropFindAccountQuota { used, available })
+        Ok(PropFindAccountQuota {
+            used,
+            available: limit.map(|limit| limit.saturating_sub(used)),
+        })
     }
 }
 #[allow(clippy::too_many_arguments)]
