@@ -15,6 +15,62 @@ https://github.com/inbuxa/inbuxa-server/security/advisories.
 Every version PR adds that version's entry here. CI refuses a version this
 file has no entry for (`tools/release/version.py --changelog`).
 
+## [27.1-rc.34] - 2026-11-20
+
+Tenants can no longer hand out more disk space than they have, listeners
+that can't open are retried and reported, backups straight to S3, metrics
+and alerts for Kubernetes, and signed images with SBOMs.
+
+### Added
+- Release images are signed with cosign, keyless, on the registry and on
+  the GHCR copy, with an SPDX SBOM per architecture and build provenance
+  attested on GitHub. The SBOMs list the Rust crates in the binaries, not
+  only the image's system packages. (#492, #493)
+- `--export s3://bucket/prefix` streams an export into S3 (or any
+  S3-compatible store) without touching local disk, and
+  `--import s3://bucket/prefix[/<name>]` restores one, the newest finished
+  export when no name is given. The bucket and keys come from
+  `INBUXA_EXPORT_S3_*` variables. `--store-check quick|full` runs a store
+  check to its end and exits with its result. (#491)
+- Metrics can be turned on from the environment: a password-protected
+  `/metrics/prometheus` (`INBUXA_METRICS_PROMETHEUS_USERNAME` and
+  `INBUXA_METRICS_PROMETHEUS_SECRET_FILE`), and OTLP from the standard
+  `OTEL_` variables when the store sets none (`INBUXA_OTLP_HEADERS_FILE`
+  reads the headers, such as a collector token, from a file). Three new
+  gauges for alerts:
+  `queue.oldest-message`, `cluster.lease-renewed` and
+  `tls.earliest-expiry`. (#488)
+- A listener whose port is in use is retried for 30 seconds. Until it
+  opens, `/healthz/ready` answers 503 naming it, and the console's cluster
+  view lists it. `INBUXA_LISTENER_FAILURE=exit` stops the server instead
+  when a listener still can't open. (#487, fixes #485)
+
+### Fixed
+- A tenant administrator could give an account a bigger disk quota than
+  the whole tenant has. The account's mail was refused as over quota while
+  the webmail still showed most of its space free. Such a quota is now
+  refused, whoever sets it, and JMAP and IMAP report the space the account
+  can really use: its own quota or what's left in the tenant. Accounts
+  already set too high keep their quota until it's edited. Thanks to
+  BulTester. (#494, fixes inbuxa-admin#257)
+- An import into a fresh store refused to run, from a directory too, since
+  27.1-rc.16. (#491)
+- An import put blobs into the data store even when the imported settings
+  name S3, so the restored server couldn't find them. (#491)
+- A live export could list blobs it didn't contain. (#491)
+- An S3 export or import could hang for good on a machine or pod limited
+  to one CPU. (#491)
+- `/healthz/live` went through the anonymous request limit, so with the
+  data store down the probe timed out and an orchestrator could restart
+  every node at once. (#488)
+- Metrics: counters still at zero were left out of the scrape, gauges
+  could wrap below zero, and in a cluster `queue.count` could read low.
+  (#488)
+
+### Upgrading
+- Nothing special: 27.1-rc.33 to 27.1-rc.34 rolls like any update, with no
+  store layout step.
+
 ## [27.1-rc.33] - 2026-11-19
 
 Passkeys that work on upgraded installs, a Passkeys link in the console's
