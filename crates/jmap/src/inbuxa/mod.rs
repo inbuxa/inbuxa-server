@@ -18,6 +18,7 @@ pub mod deleted_account;
 pub mod deliverability; // inbuxa: the deliverability check
 pub mod directory_test;
 pub mod dlp_settings;
+pub mod domain_verification; // inbuxa: MT-24
 pub mod explanation;
 pub mod fastmail;
 pub mod front_ends;

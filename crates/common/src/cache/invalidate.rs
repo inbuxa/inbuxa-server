@@ -125,11 +125,16 @@ impl CacheInvalidationBuilder {
                     // so turning SCIM's authority on or off has to take effect
                     // without a restart
                     || (current.allow_scim_provisioning != new.allow_scim_provisioning)
+                    // inbuxa: MT-24, a name proven or put back to unproven
+                    || (current.unverified_names != new.unverified_names)
                 {
                     self.invalidate(CacheInvalidation::Domain(id));
                 }
 
-                if (current.name != new.name) || (current.aliases != new.aliases) {
+                if (current.name != new.name)
+                    || (current.aliases != new.aliases)
+                    || (current.unverified_names != new.unverified_names)
+                {
                     self.invalidate(CacheInvalidation::DomainNegative);
                 }
 

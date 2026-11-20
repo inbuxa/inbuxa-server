@@ -121,8 +121,15 @@ pub async fn check(
         && let Some(quota) = quota::limit_for(&new.inner)
     {
         let limit = limits(registry, tenant_id).await?;
-        if let Err(reached) =
-            quota::check(registry, tenant_id.document_id(), quota, limit(quota), 1).await?
+        let adding = quota::domain_names(&new.inner);
+        if let Err(reached) = quota::check(
+            registry,
+            tenant_id.document_id(),
+            quota,
+            limit(quota),
+            adding,
+        )
+        .await?
         {
             return Ok(Err(over_quota(reached, tenant_id)));
         }
@@ -137,6 +144,29 @@ pub async fn check(
             let keys = dkim.algorithms.iter().count() as u64;
             if let Err(reached) =
                 quota::check(registry, tenant_id.document_id(), quota, limit(quota), keys).await?
+            {
+                return Ok(Err(over_quota(reached, tenant_id)));
+            }
+        }
+    }
+
+    // MT-24: a domain given more aliases counts each one against maxDomains
+    if let (Some(old), Some(tenant_id), ObjectInner::Domain(_)) = (old, tenant, &new.inner)
+        && old.inner.member_tenant_id() == tenant
+    {
+        let before = quota::domain_names(&old.inner);
+        let now = quota::domain_names(&new.inner);
+        if now > before {
+            let quota = TenantStorageQuota::MaxDomains;
+            let limit = limits(registry, tenant_id).await?;
+            if let Err(reached) = quota::check(
+                registry,
+                tenant_id.document_id(),
+                quota,
+                limit(quota),
+                now - before,
+            )
+            .await?
             {
                 return Ok(Err(over_quota(reached, tenant_id)));
             }

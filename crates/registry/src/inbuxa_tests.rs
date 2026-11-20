@@ -11,8 +11,9 @@ use crate::{
     schema::{
         enums::OidcOpaqueTokens,
         prelude::{ObjectImpl, ObjectInner, ObjectType},
-        structs::{Bootstrap, Directory, DirectoryBootstrap, OidcDirectory},
+        structs::{Bootstrap, Directory, DirectoryBootstrap, Domain, OidcDirectory},
     },
+    types::map::Map,
 };
 
 /// An OIDC directory as it was stored before the opaque-token fields.
@@ -107,4 +108,41 @@ fn oidc_directories_saved_before_the_opaque_token_policy_keep_userinfo() {
             ObjectInner::Bootstrap(bootstrap)
         );
     }
+}
+
+// MT-24: a domain saved before verification (version 1) reads back with every
+// name trusted. Saved now it's version 4, laid out as 27.1 stores it: 27.1's
+// logoDark and passkeysAllowed at their defaults, then the verification fields
+#[test]
+fn domains_saved_before_verification_trust_their_names() {
+    let domain = Domain {
+        name: "example.org".to_string(),
+        aliases: Map::new(vec!["example.net".to_string()]),
+        allow_scim_provisioning: true,
+        ..Default::default()
+    };
+    let mut tail = Vec::new();
+    None::<String>.pickle(&mut tail);
+    true.pickle(&mut tail);
+    Map::<String>::default().pickle(&mut tail);
+    None::<String>.pickle(&mut tail);
+    let mut bytes = domain.to_pickled_vec();
+    assert_eq!(bytes[0], 4);
+    assert!(bytes.ends_with(&tail));
+    bytes.truncate(bytes.len() - tail.len());
+    bytes[0] = 1;
+    assert_eq!(
+        read(ObjectType::Domain, &bytes),
+        ObjectInner::Domain(domain.clone())
+    );
+
+    let domain = Domain {
+        unverified_names: Map::new(vec!["example.net".to_string()]),
+        verification_token: Some("token".to_string()),
+        ..domain
+    };
+    assert_eq!(
+        read(ObjectType::Domain, &domain.to_pickled_vec()),
+        ObjectInner::Domain(domain)
+    );
 }

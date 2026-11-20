@@ -830,7 +830,7 @@ pub async fn test(test: &mut TestServer) {
     // Acceptance test 13: the tenant's disk limit bounds all its members
     // together (MT-19, MT-20)
     let d_id = admin.create_tenant("Tenant D").await;
-    admin
+    let d_domain = admin
         .create_tenant_domain("d.example.org", Some(d_id))
         .await;
     let d_admin = admin
@@ -962,6 +962,156 @@ pub async fn test(test: &mut TestServer) {
         .await;
     test.wait_for_tasks().await;
     assert_eq!(admin.tenant_usage(d_id).await, two, "test 14");
+
+    // MT-24: a tenant proves the domain names it adds, and every name counts
+    // against maxDomains
+    admin
+        .set_tenant_quota(d_id, TenantStorageQuota::MaxDomains, 3)
+        .await;
+    let claimed = "claimed.example.net";
+    d_admin
+        .registry_update_object(
+            ObjectType::Domain,
+            d_domain,
+            json!({ Property::Aliases: { claimed: true } }),
+        )
+        .await;
+    let stored = admin.registry_get::<Domain>(d_domain).await;
+    assert_eq!(stored.unverified_names.as_slice(), [claimed.to_string()]);
+    let token = stored.verification_token.clone().expect("MT-24: a token");
+    assert!(
+        test.server.domain(claimed).await.unwrap().is_none(),
+        "MT-24: an unproven alias takes no mail"
+    );
+    assert!(test.server.domain("d.example.org").await.unwrap().is_some());
+    // Taking it off the list without the record is refused, naming it
+    d_admin
+        .registry_update_object_expect_err(
+            ObjectType::Domain,
+            d_domain,
+            json!({ Property::UnverifiedNames: {} }),
+        )
+        .await
+        .assert_type(SetErrorType::InvalidProperties)
+        .assert_description_contains("_inbuxa-verification.claimed.example.net");
+    // A record with another token doesn't do either
+    ::jmap::inbuxa::domain_verification::TEST_RECORDS
+        .lock()
+        .unwrap()
+        .insert(
+            format!("_inbuxa-verification.{claimed}"),
+            "inbuxa-verification=someone-else".to_string(),
+        );
+    d_admin
+        .registry_update_object_expect_err(
+            ObjectType::Domain,
+            d_domain,
+            json!({ Property::UnverifiedNames: {} }),
+        )
+        .await
+        .assert_type(SetErrorType::InvalidProperties);
+    // With the record, it's proven and takes mail
+    ::jmap::inbuxa::domain_verification::TEST_RECORDS
+        .lock()
+        .unwrap()
+        .insert(
+            format!("_inbuxa-verification.{claimed}"),
+            format!("inbuxa-verification={token}"),
+        );
+    d_admin
+        .registry_update_object(
+            ObjectType::Domain,
+            d_domain,
+            json!({ Property::UnverifiedNames: {} }),
+        )
+        .await;
+    assert!(
+        test.server.domain(claimed).await.unwrap().is_some(),
+        "MT-24: a proven alias takes mail"
+    );
+    // The token can't be set by anyone
+    d_admin
+        .registry_update_object_expect_err(
+            ObjectType::Domain,
+            d_domain,
+            json!({ Property::VerificationToken: "mine" }),
+        )
+        .await;
+    // Two names in use of three: two more aliases don't fit
+    d_admin
+        .registry_update_object_expect_err(
+            ObjectType::Domain,
+            d_domain,
+            json!({ Property::Aliases: { claimed: true, "a1.example.net": true, "a2.example.net": true } }),
+        )
+        .await
+        .assert_type(SetErrorType::OverQuota)
+        .assert_description_contains("maxDomains");
+    // A domain the tenant creates is unproven as a whole
+    let created = d_admin
+        .registry_create_object(Domain {
+            name: "new.example.net".to_string(),
+            is_enabled: true,
+            certificate_management: CertificateManagement::Manual,
+            dns_management: DnsManagement::Manual,
+            dkim_management: DkimManagement::Manual,
+            ..Default::default()
+        })
+        .await;
+    assert!(
+        test.server
+            .domain("new.example.net")
+            .await
+            .unwrap()
+            .is_none(),
+        "MT-24: an unproven domain takes no mail"
+    );
+    assert_eq!(
+        admin
+            .registry_get::<Domain>(created)
+            .await
+            .unverified_names
+            .as_slice(),
+        ["new.example.net".to_string()]
+    );
+    // An alias the server administrator adds is trusted, and so is clearing
+    // the list for the tenant
+    admin
+        .registry_update_object(
+            ObjectType::Domain,
+            created,
+            json!({ Property::UnverifiedNames: {} }),
+        )
+        .await;
+    assert!(
+        test.server
+            .domain("new.example.net")
+            .await
+            .unwrap()
+            .is_some()
+    );
+    admin
+        .registry_destroy(ObjectType::Domain, [created])
+        .await
+        .assert_destroyed(&[created]);
+    admin
+        .registry_update_object(
+            ObjectType::Domain,
+            d_domain,
+            json!({ Property::Aliases: { claimed: true, "by-admin.example.net": true } }),
+        )
+        .await;
+    assert!(
+        test.server
+            .domain("by-admin.example.net")
+            .await
+            .unwrap()
+            .is_some()
+    );
+    ::jmap::inbuxa::domain_verification::TEST_RECORDS
+        .lock()
+        .unwrap()
+        .clear();
 
     // Clean up, leaving the server as the other tests expect it
     for account in [
