@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use types::collection::Collection;
@@ -296,6 +298,10 @@ pub async fn test(test: &TestServer) {
             .with_status(StatusCode::CREATED);
         let mut num_success = 0;
         let mut did_fail = false;
+        // inbuxa: deleted items stay counted while they're kept, so each
+        // type gets 1024 bytes on top of what's already used
+        let limit = mike_used(test).await + 1024;
+        set_mike_quota(test, limit).await;
 
         for i in 0..100 {
             let content = resource_type.generate();
@@ -304,9 +310,11 @@ pub async fn test(test: &TestServer) {
             let response = mike_noquota
                 .request_with_headers("PUT", &format!("{path}file{i}"), [], &content)
                 .await;
-            if available > content.len() as u64 {
+            // inbuxa: an item is charged a little more than its body (its
+            // name and properties too), so one that fits by body length
+            // alone can still be refused; what matters is it never goes past
+            if response.status == StatusCode::CREATED && available > content.len() as u64 {
                 num_success += 1;
-                response.with_status(StatusCode::CREATED);
             } else {
                 response
                     .with_status(StatusCode::PRECONDITION_FAILED)
@@ -314,6 +322,10 @@ pub async fn test(test: &TestServer) {
                 did_fail = true;
                 break;
             }
+            assert!(
+                mike_used(test).await <= limit,
+                "Quota test failed: {resource_type:?} PUT {i} went past the quota"
+            );
         }
         if !did_fail {
             panic!("Quota test failed: {} files created", num_success);
@@ -321,6 +333,24 @@ pub async fn test(test: &TestServer) {
         if num_success == 0 {
             panic!("Quota test failed: no files created");
         }
+
+        // inbuxa: with room for the body but not for what the item is
+        // charged, a new item is refused rather than taking the account
+        // past its quota
+        let content = resource_type.generate();
+        let used = mike_used(test).await;
+        set_mike_quota(test, used + content.len() as u64).await;
+        mike_noquota
+            .request_with_headers("PUT", &format!("{path}edge"), [], &content)
+            .await
+            .with_status(StatusCode::PRECONDITION_FAILED)
+            .with_failed_precondition("D:quota-not-exceeded", "");
+        assert_eq!(
+            mike_used(test).await,
+            used,
+            "Quota test failed: {resource_type:?} PUT that only fit by body length was counted"
+        );
+        set_mike_quota(test, 1024).await;
 
         mike_noquota
             .request("DELETE", &path, "")
@@ -631,4 +661,22 @@ END:VCALENDAR
     client.delete_default_containers().await;
     mike_noquota.delete_default_containers().await;
     test.assert_is_empty().await;
+}
+
+async fn mike_used(test: &TestServer) -> u64 {
+    test.server
+        .get_used_quota_account(test.account("mike@example.com").id().document_id())
+        .await
+        .unwrap()
+        .max(0) as u64
+}
+
+async fn set_mike_quota(test: &TestServer, quota: u64) {
+    test.account("admin@example.com")
+        .registry_update_object(
+            ObjectType::Account,
+            test.account("mike@example.com").id(),
+            json!({ Property::Quotas: { StorageQuota::MaxDiskQuota.as_str(): quota } }),
+        )
+        .await;
 }

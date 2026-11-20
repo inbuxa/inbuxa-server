@@ -164,9 +164,21 @@ impl FileUpdateRequestHandler for Server {
                 return Err(DavError::Code(StatusCode::METHOD_NOT_ALLOWED));
             }
 
+            // Build node
+            let mut new_node = node.deserialize::<FileNode>().caused_by(trc::location!())?;
+            let new_file = new_node.file.as_mut().unwrap();
+            new_file.media_type = headers
+                .content_type
+                .filter(|ct| !ct.is_empty() && *ct != "application/octet-stream")
+                .map(|v| v.to_string());
+            new_file.size = bytes.len() as u32;
+            new_node.modified = now() as i64;
+
             // Validate quota
-            let extra_bytes = (bytes.len() as u64)
-                .saturating_sub(u32::from(node.inner.file.as_ref().unwrap().size) as u64);
+            // inbuxa: against what the file is charged (its name and
+            // properties too), not the bare content length; checked before
+            // the blob is written, so a refused PUT stores nothing
+            let extra_bytes = (new_node.size() as u64).saturating_sub(node.inner.size() as u64);
             if extra_bytes > 0 {
                 self.has_available_quota(self.account(account_id).await?.as_ref(), extra_bytes)
                     .await?;
@@ -177,17 +189,7 @@ impl FileUpdateRequestHandler for Server {
                 .put_temporary_blob(account_id, &bytes, 60)
                 .await
                 .caused_by(trc::location!())?;
-
-            // Build node
-            let mut new_node = node.deserialize::<FileNode>().caused_by(trc::location!())?;
-            let new_file = new_node.file.as_mut().unwrap();
-            new_file.blob_hash = blob_hash;
-            new_file.media_type = headers
-                .content_type
-                .filter(|ct| !ct.is_empty() && *ct != "application/octet-stream")
-                .map(|v| v.to_string());
-            new_file.size = bytes.len() as u32;
-            new_node.modified = now() as i64;
+            new_node.file.as_mut().unwrap().blob_hash = blob_hash;
 
             // Prepare write batch
             let mut batch = BatchBuilder::new();
@@ -243,29 +245,14 @@ impl FileUpdateRequestHandler for Server {
             )
             .await?;
 
-            // Validate quota
-            if !bytes.is_empty() {
-                self.has_available_quota(
-                    self.account(account_id).await?.as_ref(),
-                    bytes.len() as u64,
-                )
-                .await?;
-            }
-
-            // Write blob
-            let (blob_hash, blob_hold) = self
-                .put_temporary_blob(account_id, &bytes, 60)
-                .await
-                .caused_by(trc::location!())?;
-
             // Build node
             let now = now();
-            let node = FileNode {
+            let mut node = FileNode {
                 parent_id,
                 name: resource_name.to_string(),
                 display_name: None,
                 file: Some(FileProperties {
-                    blob_hash,
+                    blob_hash: Default::default(),
                     size: bytes.len() as u32,
                     media_type: headers.content_type.map(|v| v.to_string()),
                     executable: false,
@@ -279,6 +266,20 @@ impl FileUpdateRequestHandler for Server {
                     .map(|acls| acls.to_vec())
                     .unwrap_or_default(),
             };
+
+            // Validate quota
+            // inbuxa: against what the file is charged, not the bare content
+            // length, which let a PUT run past the limit; checked before the
+            // blob is written, so a refused PUT stores nothing
+            self.has_available_quota(self.account(account_id).await?.as_ref(), node.size() as u64)
+                .await?;
+
+            // Write blob
+            let (blob_hash, blob_hold) = self
+                .put_temporary_blob(account_id, &bytes, 60)
+                .await
+                .caused_by(trc::location!())?;
+            node.file.as_mut().unwrap().blob_hash = blob_hash;
 
             // Prepare write batch
             let mut batch = BatchBuilder::new();
