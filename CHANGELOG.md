@@ -15,6 +15,54 @@ https://github.com/inbuxa/inbuxa-server/security/advisories.
 Every version PR adds that version's entry here. CI refuses a version this
 file has no entry for (`tools/release/version.py --changelog`).
 
+## [27.1-rc.35] - 2026-11-20
+
+Tenant limits hold across many accounts and parallel writes, tenants
+verify the domain names they add, and a read-only config.json is reported
+clearly.
+
+### Changed
+- Multi-tenancy: a domain name a tenant administrator adds, as a new
+  domain, a rename or an alias, has to be verified before the server uses
+  it. The tenant publishes a TXT record at `_inbuxa-verification.<name>`
+  with `inbuxa-verification=<token>` (the domain's `verificationToken`),
+  then takes the name off the domain's `unverifiedNames`. Until then the
+  name takes no mail and gives no addresses to send as. Names a server
+  administrator adds need no record. Every name, aliases included, counts
+  toward the tenant's `maxDomains`. (#503)
+- Items kept for undelete count toward their account's and tenant's disk
+  usage until they're destroyed, expire or are restored; deleting still
+  never fails. A held spam-training sample lets go of its message once the
+  account's own copy is gone. (#502, fixes #500)
+
+### Fixed
+- The accounts in a tenant could together be given more disk quota than
+  the tenant has; four 5 GB accounts fitted in a 5 GB tenant. The total is
+  now checked (accounts with no quota of their own share what's left), on
+  restores and on domain moves into a tenant too. Thanks to BulTester.
+  (#497, inbuxa-admin#257)
+- Parallel writes could each pass a tenant's count limits (accounts,
+  domains and the rest) and together go over them. Count and disk limits
+  are now checked under one lock per tenant. An object moved into a tenant
+  by an update now counts against its limits, and DKIM keys a domain adds
+  later count toward `maxDkimKeys`. (#501, fixes #498)
+- Encrypted mail was checked against quota before encryption, invitations
+  without the notification they store, and a bigger vacation reply not at
+  all. (#502, fixes #500)
+- Saving the data store settings when config.json is read-only (such as a
+  Kubernetes mount) failed the whole request. That object is now refused
+  with `forbidden`, saying the settings are managed outside the server and
+  where. (#496)
+
+### Upgrading
+- Domain names saved before this version are kept as they are, verified.
+  If tenant administrators can manage domains on your server, review the
+  domains and aliases your tenants have added.
+- Items deleted before this version aren't counted while they're kept;
+  items deleted from now on are.
+- 27.1-rc.34 to 27.1-rc.35 rolls like any update, with no store layout
+  step.
+
 ## [27.1-rc.34] - 2026-11-20
 
 Tenants can no longer hand out more disk space than they have, listeners
