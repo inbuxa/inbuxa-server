@@ -17,6 +17,7 @@ pub mod cron;
 pub mod glob;
 pub mod http;
 pub mod map;
+pub mod public_ip; // inbuxa
 pub mod snowflake;
 pub mod template;
 pub mod tls;
