@@ -82,6 +82,7 @@ pub mod scripts;
 pub mod sharing;
 pub mod storage;
 pub mod telemetry;
+pub mod tenant_lock; // inbuxa: MT-17, inbuxa-admin#257
 
 pub use psl;
 

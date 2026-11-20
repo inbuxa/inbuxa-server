@@ -379,12 +379,12 @@ impl RegistrySet for Server {
 
                 // Process modifications
                 let mut cache_invalidator = CacheInvalidationBuilder::default();
-                // inbuxa: inbuxa-admin#257: the tenant disk-quota lock the last
-                // write took, released once it's saved or refused
-                let mut disk_lock: Option<u32> = None;
+                // inbuxa: MT-17, inbuxa-admin#257: the tenant write lock the
+                // last write took, released once it's saved or refused
+                let mut tenant_lock: Option<u32> = None;
                 'outer: for (modification, mut value, mut new_object) in modifications {
-                    if let Some(tenant_id) = disk_lock.take() {
-                        crate::inbuxa::tenant_disk_lock::release(self, tenant_id).await;
+                    if let Some(tenant_id) = tenant_lock.take() {
+                        self.unlock_tenant_writes(tenant_id).await;
                     }
                     // Initial validations
                     let is_create = matches!(modification, Modification::Create { .. });
@@ -662,21 +662,20 @@ impl RegistrySet for Server {
                         Modification::Create { .. } => (None, None),
                     };
 
-                    // inbuxa: inbuxa-admin#257: a write that could grow the
-                    // tenant's allocated disk space holds its lock until saved
+                    // inbuxa: MT-17, inbuxa-admin#257: a write that could grow the
+                    // tenant's counted totals holds its lock until saved
                     if let Some(tenant_id) =
-                        inbuxa_features::tenancy::writes::disk_quota_tenant(stored, &new_object)
+                        inbuxa_features::tenancy::writes::locked_tenant(stored, &new_object)
                     {
                         let tenant_id = tenant_id.document_id();
-                        if !crate::inbuxa::tenant_disk_lock::acquire(self, tenant_id).await? {
+                        if !self.lock_tenant_writes(tenant_id).await? {
                             set.failed(
                                 modification,
-                                SetError::forbidden()
-                                    .with_description(crate::inbuxa::tenant_disk_lock::BUSY),
+                                SetError::forbidden().with_description(common::tenant_lock::BUSY),
                             );
                             continue 'outer;
                         }
-                        disk_lock = Some(tenant_id);
+                        tenant_lock = Some(tenant_id);
                     }
                     let after_save = match inbuxa_features::tenancy::writes::check(
                         self.registry(),
@@ -972,8 +971,8 @@ impl RegistrySet for Server {
                         set.server.notify_task_queue();
                     }
                 }
-                if let Some(tenant_id) = disk_lock.take() {
-                    crate::inbuxa::tenant_disk_lock::release(self, tenant_id).await;
+                if let Some(tenant_id) = tenant_lock.take() {
+                    self.unlock_tenant_writes(tenant_id).await;
                 }
 
                 // Process destroy

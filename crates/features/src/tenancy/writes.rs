@@ -10,14 +10,15 @@
 //! - MT-7: a principal created without a tenant takes its domain's.
 //! - MT-8: a domain moves only through no tenant, taking its principals and
 //!   keys in with it, and only when its people let it out.
-//! - MT-17: creating an object, or moving a domain in, stays within the
-//!   tenant's count limits, and the server emits `limit.tenant-quota` when
-//!   it doesn't.
+//! - MT-17: creating an object, moving one in, or moving a domain in stays
+//!   within the tenant's count limits, a domain's DKIM keys included (MT-9),
+//!   and the server emits `limit.tenant-quota` when it doesn't.
 //! - A tenant's accounts' disk quotas add up to no more than the tenant's
 //!   (inbuxa-admin#257), checked by `check_disk_quota` on JMAP and SCIM
-//!   writes and on a restore, and by the domain-move plan. A write that
-//!   could grow the total holds the tenant's disk-quota lock
-//!   (`disk_quota_tenant`) from the check until it's saved.
+//!   writes and on a restore, and by the domain-move plan.
+//! - A write that could grow a tenant's counted totals, its objects or its
+//!   allocated disk space, holds the tenant's write lock (`locked_tenant`)
+//!   from its checks until it's saved.
 
 use crate::tenancy::{
     domain_move::{self, Move, Refusal},
@@ -120,10 +121,12 @@ pub async fn check(
         return Ok(Err(foreign_key(foreign)));
     }
 
-    // MT-17: count limits on a new object
-    if old.is_none()
-        && let Some(tenant_id) = tenant
+    // MT-17: count limits on an object joining the tenant: a new one, or one
+    // whose tenant changes. A domain's move is counted by its plan (MT-8).
+    if let Some(tenant_id) = tenant
         && let Some(quota) = quota::limit_for(&new.inner)
+        && joins_tenant(old, new)
+        && !matches!(new.inner, ObjectInner::Domain(_) if old.is_some())
     {
         let limit = limits(registry, tenant_id).await?;
         if let Err(reached) =
@@ -131,33 +134,85 @@ pub async fn check(
         {
             return Ok(Err(over_quota(reached, tenant_id)));
         }
+    }
 
-        // A new domain's generated DKIM keys, one per algorithm, count too (MT-9)
-        if let ObjectInner::Domain(Domain {
-            dkim_management: DkimManagement::Automatic(dkim),
-            ..
-        }) = &new.inner
+    // MT-9: a domain's generated DKIM keys, one per algorithm, count too:
+    // all of them on a new domain, and those it adds on an update, which the
+    // DKIM task then generates. Rotation, which replaces a key with a new one,
+    // isn't counted again.
+    if let Some(tenant_id) = tenant
+        && let Some(keys) = added_dkim_keys(old, new)
+        && keys > 0
+    {
+        let limit = limits(registry, tenant_id).await?;
+        let quota = TenantStorageQuota::MaxDkimKeys;
+        if let Err(reached) =
+            quota::check(registry, tenant_id.document_id(), quota, limit(quota), keys).await?
         {
-            let quota = TenantStorageQuota::MaxDkimKeys;
-            let keys = dkim.algorithms.iter().count() as u64;
-            if let Err(reached) =
-                quota::check(registry, tenant_id.document_id(), quota, limit(quota), keys).await?
-            {
-                return Ok(Err(over_quota(reached, tenant_id)));
-            }
+            return Ok(Err(over_quota(reached, tenant_id)));
         }
     }
 
     Ok(Ok(after))
 }
 
+/// Whether `new` joins its tenant with this write: it's new, or its tenant
+/// changes.
+fn joins_tenant(old: Option<&Object>, new: &Object) -> bool {
+    old.is_none_or(|old| old.inner.member_tenant_id() != new.inner.member_tenant_id())
+}
+
+/// How many DKIM keys a write to a domain makes the DKIM task generate: one
+/// per algorithm on a new automatic domain, or per algorithm an update adds
+/// (an update into automatic mode adds them all). `None` for anything else.
+fn added_dkim_keys(old: Option<&Object>, new: &Object) -> Option<u64> {
+    let ObjectInner::Domain(Domain {
+        dkim_management: DkimManagement::Automatic(dkim),
+        ..
+    }) = &new.inner
+    else {
+        return None;
+    };
+    let before = match old.map(|old| &old.inner) {
+        Some(ObjectInner::Domain(Domain {
+            dkim_management: DkimManagement::Automatic(before),
+            ..
+        })) => Some(&before.algorithms),
+        _ => None,
+    };
+    Some(
+        dkim.algorithms
+            .iter()
+            .filter(|algorithm| before.is_none_or(|before| !before.contains(algorithm)))
+            .count() as u64,
+    )
+}
+
+/// The tenant whose counted totals this write could grow, if any: an
+/// object joining a tenant whose kind it limits (MT-17), a domain adding
+/// DKIM keys (MT-9), or a write that could grow its allocated disk space
+/// (`disk_quota_tenant`). Such a write takes the tenant's write lock
+/// (common's `lock_tenant_writes`) before its tenancy checks and keeps it
+/// until it's saved, so two writes at once can't each find room for one
+/// more and together pass the limit.
+pub fn locked_tenant(old: Option<&Object>, new: &Object) -> Option<Id> {
+    let tenant = new.inner.member_tenant_id()?;
+    let counted = quota::limit_for(&new.inner).is_some() && joins_tenant(old, new);
+    let dkim = added_dkim_keys(old, new).is_some_and(|keys| keys > 0);
+    if counted || dkim {
+        Some(tenant)
+    } else {
+        disk_quota_tenant(old, new)
+    }
+}
+
 /// The tenant whose allocated disk space this write could grow, if any
 /// (inbuxa-admin#257): an account given a disk quota, or a bigger one, or
 /// joining a tenant with one; or a domain moving into a tenant, which brings
-/// its accounts. Such a write takes the tenant's disk-quota lock before its
-/// checks and keeps it until it's saved, so two writes at once can't each
-/// fit the space left and together pass it. Lowering or clearing a quota,
-/// or any other change, needs no lock.
+/// its accounts. Such a write takes the tenant's write lock (`locked_tenant`)
+/// before its checks and keeps it until it's saved, so two writes at once
+/// can't each fit the space left and together pass it. Lowering or clearing
+/// a quota, or any other change, needs no lock.
 pub fn disk_quota_tenant(old: Option<&Object>, new: &Object) -> Option<Id> {
     let tenant = new.inner.member_tenant_id()?;
     let moved_in = old.is_none_or(|old| old.inner.member_tenant_id() != Some(tenant));
@@ -178,7 +233,7 @@ pub fn disk_quota_tenant(old: Option<&Object>, new: &Object) -> Option<Id> {
 /// inbuxa-admin#257: a tenant's accounts' disk quotas add up to no more than
 /// the tenant's own, so it can't give out more space than it has, in one
 /// account or across many. Run on a JMAP or SCIM write and on a restore,
-/// after `check`, holding the lock `disk_quota_tenant` names. `id` is the
+/// after `check`, holding the lock `locked_tenant` names. `id` is the
 /// account on an update; `restoring` words the refusal for a restore,
 /// whose quota can't be edited first. Only a write that grows the total is checked, so a
 /// tenant already over a lowered limit can still edit its accounts and
@@ -332,9 +387,12 @@ fn readable_size(bytes: u64) -> String {
 #[cfg(test)]
 mod disk_quota_tests {
     use super::*;
-    use registry::schema::{
-        enums::StorageQuota,
-        structs::{Domain, UserAccount},
+    use registry::{
+        schema::{
+            enums::{DkimSignatureType, StorageQuota},
+            structs::{DkimManagementProperties, Domain, UserAccount},
+        },
+        types::map::Map,
     };
 
     fn account(tenant: Option<u64>, quota: u64) -> Object {
@@ -389,6 +447,62 @@ mod disk_quota_tests {
             disk_quota_tenant(Some(&domain(Some(7))), &domain(None)),
             None
         );
+    }
+
+    fn dkim_domain(tenant: Option<u64>, algorithms: &[DkimSignatureType]) -> Object {
+        Object::from(Domain {
+            member_tenant_id: tenant.map(Id::from),
+            dkim_management: DkimManagement::Automatic(DkimManagementProperties {
+                algorithms: Map::new(algorithms.to_vec()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn writes_that_grow_a_tenants_counts_take_its_lock() {
+        use DkimSignatureType::*;
+        let tenant = Some(Id::from(7u64));
+        // A new counted object in a tenant, and one in none
+        assert_eq!(locked_tenant(None, &account(Some(7), 0)), tenant);
+        assert_eq!(locked_tenant(None, &account(None, 0)), None);
+        assert_eq!(locked_tenant(None, &domain(Some(7))), tenant);
+        // An edit that doesn't join or add keys takes none
+        let staying = account(Some(7), 0);
+        assert_eq!(locked_tenant(Some(&staying), &staying), None);
+        // Joining from no tenant or another
+        assert_eq!(locked_tenant(Some(&account(None, 0)), &staying), tenant);
+        assert_eq!(
+            locked_tenant(Some(&domain(Some(8))), &domain(Some(7))),
+            tenant
+        );
+        // A domain adding DKIM algorithms, or not
+        let one = dkim_domain(Some(7), &[Dkim1RsaSha256]);
+        let two = dkim_domain(Some(7), &[Dkim1RsaSha256, Dkim1Ed25519Sha256]);
+        assert_eq!(locked_tenant(Some(&one), &two), tenant);
+        assert_eq!(locked_tenant(Some(&two), &one), None);
+        assert_eq!(locked_tenant(Some(&two), &two), None);
+        // Disk quota growth still locks
+        assert_eq!(locked_tenant(Some(&staying), &account(Some(7), 10)), tenant);
+    }
+
+    #[test]
+    fn added_dkim_keys_counts_new_algorithms_only() {
+        use DkimSignatureType::*;
+        let one = dkim_domain(Some(7), &[Dkim1RsaSha256]);
+        let two = dkim_domain(Some(7), &[Dkim1RsaSha256, Dkim2Ed25519Sha256]);
+        assert_eq!(added_dkim_keys(None, &two), Some(2));
+        assert_eq!(added_dkim_keys(Some(&one), &two), Some(1));
+        assert_eq!(added_dkim_keys(Some(&two), &one), Some(0));
+        // Manual to automatic adds them all; manual adds none
+        let manual = Object::from(Domain {
+            member_tenant_id: Some(Id::from(7u64)),
+            dkim_management: DkimManagement::Manual,
+            ..Default::default()
+        });
+        assert_eq!(added_dkim_keys(Some(&manual), &two), Some(2));
+        assert_eq!(added_dkim_keys(Some(&two), &manual), None);
     }
 
     #[test]

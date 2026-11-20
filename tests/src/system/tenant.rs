@@ -846,6 +846,48 @@ pub async fn test(test: &mut TestServer) {
         .await
         .assert_type(SetErrorType::OverQuota)
         .assert_description_contains("maxDkimKeys");
+    // ... and so do the keys an update makes the DKIM task generate
+    admin
+        .registry_update_object_expect_err(
+            ObjectType::Domain,
+            q_domain,
+            json!({ Property::DkimManagement: Domain::default().dkim_management }),
+        )
+        .await
+        .assert_type(SetErrorType::OverQuota)
+        .assert_description_contains("maxDkimKeys");
+    // An object moving into the tenant counts like a new one, not only a
+    // domain's (MT-17)
+    let q_roles = admin
+        .registry_query_ids(
+            ObjectType::Role,
+            [(Property::MemberTenantId, q_id.to_string())],
+            Vec::<&str>::new(),
+        )
+        .await
+        .len() as u64;
+    admin
+        .set_tenant_quota(q_id, TenantStorageQuota::MaxRoles, q_roles)
+        .await;
+    let loose_role = admin
+        .registry_create_object(structs::Role {
+            description: "joins tenant Q".to_string(),
+            ..Default::default()
+        })
+        .await;
+    admin
+        .registry_update_object_expect_err(
+            ObjectType::Role,
+            loose_role,
+            json!({ Property::MemberTenantId: q_id }),
+        )
+        .await
+        .assert_type(SetErrorType::OverQuota)
+        .assert_description_contains("maxRoles");
+    admin
+        .registry_destroy(ObjectType::Role, [loose_role])
+        .await
+        .assert_destroyed(&[loose_role]);
 
     // Acceptance test 13: the tenant's disk limit bounds all its members
     // together (MT-19, MT-20)
