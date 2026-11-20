@@ -35,7 +35,9 @@ and alerts for Kubernetes, and signed images with SBOMs.
 - Metrics can be turned on from the environment: a password-protected
   `/metrics/prometheus` (`INBUXA_METRICS_PROMETHEUS_USERNAME` and
   `INBUXA_METRICS_PROMETHEUS_SECRET_FILE`), and OTLP from the standard
-  `OTEL_` variables when the store sets none. Three new gauges for alerts:
+  `OTEL_` variables when the store sets none (`INBUXA_OTLP_HEADERS_FILE`
+  reads the headers, such as a collector token, from a file). Three new
+  gauges for alerts:
   `queue.oldest-message`, `cluster.lease-renewed` and
   `tls.earliest-expiry`. (#488)
 - A listener whose port is in use is retried for 30 seconds. Until it
@@ -56,6 +58,8 @@ and alerts for Kubernetes, and signed images with SBOMs.
 - An import put blobs into the data store even when the imported settings
   name S3, so the restored server couldn't find them. (#491)
 - A live export could list blobs it didn't contain. (#491)
+- An S3 export or import could hang for good on a machine or pod limited
+  to one CPU. (#491)
 - `/healthz/live` went through the anonymous request limit, so with the
   data store down the probe timed out and an orchestrator could restart
   every node at once. (#488)
