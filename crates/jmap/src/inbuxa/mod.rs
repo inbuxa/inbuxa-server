@@ -44,6 +44,7 @@ pub mod sharing_policy;
 pub mod store_check; // inbuxa: checking the store's blobs
 pub mod store_snapshot; // inbuxa: a snapshot of the store
 pub mod telemetry;
+pub mod tenant_disk_lock; // inbuxa: inbuxa-admin#257
 pub mod tenant_protocol_policy;
 pub mod undelete;
 pub mod webhook_test;

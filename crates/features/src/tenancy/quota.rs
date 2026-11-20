@@ -5,11 +5,13 @@
  */
 
 //! Tenant limits: how many of each kind of object a tenant may hold
-//! (MT-17, MT-18) and how much storage its members use (MT-20, MT-21).
+//! (MT-17, MT-18), how much storage its members use (MT-20, MT-21), and how
+//! much disk space its accounts are given (inbuxa-admin#257).
 
+use ahash::AHashSet;
 use registry::{
     schema::{
-        enums::TenantStorageQuota,
+        enums::{StorageQuota, TenantStorageQuota},
         prelude::{ObjectInner, ObjectType, Property},
         structs::Account,
     },
@@ -96,6 +98,50 @@ pub async fn count(
         .await
         .map(|ids| ids.len() as u64)
         .caused_by(trc::location!())
+}
+
+/// An account's own disk quota, `None` when it has none (0 is none too).
+/// Users and groups both have one.
+pub fn account_disk_quota(object: &ObjectInner) -> Option<u64> {
+    let quotas = match object {
+        ObjectInner::Account(Account::User(obj)) => &obj.quotas,
+        ObjectInner::Account(Account::Group(obj)) => &obj.quotas,
+        _ => return None,
+    };
+    quotas
+        .get(&StorageQuota::MaxDiskQuota)
+        .copied()
+        .filter(|quota| *quota > 0)
+}
+
+/// The disk space a tenant has given its accounts: the sum of their own
+/// disk quotas, leaving out `except` (inbuxa-admin#257). Accounts with no
+/// quota share what's left and add nothing.
+pub async fn allocated_disk(
+    registry: &RegistryStore,
+    tenant_id: u32,
+    except: &AHashSet<Id>,
+) -> trc::Result<u64> {
+    let members = registry
+        .query::<Vec<Id>>(RegistryQuery::new(ObjectType::Account).with_tenant(Some(tenant_id)))
+        .await
+        .caused_by(trc::location!())?;
+
+    let mut total = 0u64;
+    for member in members {
+        if except.contains(&member) {
+            continue;
+        }
+        if let Some(object) = registry
+            .get(ObjectId::new(ObjectType::Account, member))
+            .await
+            .caused_by(trc::location!())?
+            && let Some(quota) = account_disk_quota(&object.inner)
+        {
+            total = total.saturating_add(quota);
+        }
+    }
+    Ok(total)
 }
 
 /// A count limit that adding objects would cross.

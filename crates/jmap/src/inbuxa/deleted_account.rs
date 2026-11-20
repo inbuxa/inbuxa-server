@@ -48,6 +48,8 @@ use trc::AddContext;
 use types::id::Id;
 use utils::snowflake::SnowflakeIdGenerator;
 
+use crate::inbuxa::tenant_disk_lock;
+
 type DValue = Value<'static, P, DeletedAccountValue>;
 
 const ALL: &[P] = &[
@@ -391,7 +393,6 @@ async fn restore_account(
     kept: KeptAccount,
     password: Option<String>,
 ) -> trc::Result<Result<(), SetError<P>>> {
-    let account_id = id.document_id();
     let Some(ObjectInner::Account(mut account)) = PickledStream::new(&kept.record)
         .and_then(|mut stream| ObjectInner::unpickle(ObjectType::Account, &mut stream))
     else {
@@ -447,8 +448,47 @@ async fn restore_account(
         inner: ObjectInner::Account(account),
         revision: 0,
     };
+
+    // inbuxa-admin#257: its disk quota must still fit what the tenant has
+    // left to give, checked and saved under the tenant's lock
+    let disk_lock = inbuxa_features::tenancy::writes::disk_quota_tenant(None, &object)
+        .map(|tenant_id| tenant_id.document_id());
+    if let Some(tenant_id) = disk_lock
+        && !tenant_disk_lock::acquire(server, tenant_id).await?
+    {
+        return Ok(Err(
+            SetError::forbidden().with_description(tenant_disk_lock::BUSY)
+        ));
+    }
+    let restored = restore_checked(server, id, kept, object).await;
+    if let Some(tenant_id) = disk_lock {
+        tenant_disk_lock::release(server, tenant_id).await;
+    }
+    restored
+}
+
+/// The rest of a restore, once the account is rebuilt: the tenancy checks,
+/// then the save.
+async fn restore_checked(
+    server: &Server,
+    id: Id,
+    kept: KeptAccount,
+    object: Object,
+) -> trc::Result<Result<(), SetError<P>>> {
+    let account_id = id.document_id();
     if let Err(err) =
         inbuxa_features::tenancy::writes::check(server.registry(), None, None, &object).await?
+    {
+        return Ok(Err(failed(err)));
+    }
+    if let Err(err) = inbuxa_features::tenancy::writes::check_disk_quota(
+        server.registry(),
+        None,
+        None,
+        &object,
+        true,
+    )
+    .await?
     {
         return Ok(Err(failed(err)));
     }

@@ -8,7 +8,8 @@
 //!
 //! A domain moves into a tenant only from no tenant, and out of one only back
 //! to no tenant. Moving in, its principals (accounts, groups, mailing lists)
-//! and DKIM keys move with it, after the tenant's limits are checked. Moving
+//! and DKIM keys move with it, after the tenant's limits are checked, its
+//! accounts' disk quotas included (inbuxa-admin#257). Moving
 //! out is refused while any principal on it is in the tenant; with none, its
 //! DKIM keys move out with it. A principal on it in a third tenant blocks
 //! either move, and so does any link the move would carry across a tenant
@@ -44,6 +45,16 @@ pub enum Refusal {
     ForeignLink(ObjectId),
     /// The destination tenant's limit would be crossed.
     Limit(LimitReached),
+    /// The accounts moving in have more disk quota between them than the
+    /// destination has left to give (inbuxa-admin#257).
+    DiskQuota {
+        /// Already given to the tenant's accounts.
+        allocated: u64,
+        /// The moving accounts' quotas together.
+        adding: u64,
+        /// The tenant's maxDiskQuota.
+        limit: u64,
+    },
 }
 
 /// A move that passed every check, ready to apply once the domain itself is
@@ -88,6 +99,7 @@ pub async fn plan(
     // Sort out what links to the domain
     let mut carried = Vec::new();
     let mut adding: AHashMap<TenantStorageQuota, u64> = AHashMap::new();
+    let mut adding_disk = 0u64;
     let mut blocking = Vec::new();
     let mut seen = AHashSet::new();
     for referrer in registry.linked_objects(domain).await? {
@@ -116,6 +128,9 @@ pub async fn plan(
                 };
                 if let Some(quota) = quota::limit_for_id(referrer, kind) {
                     *adding.entry(quota).or_default() += 1;
+                }
+                if let Some(disk) = quota::account_disk_quota(&object.inner) {
+                    adding_disk = adding_disk.saturating_add(disk);
                 }
                 carried.push(referrer);
             }
@@ -166,6 +181,21 @@ pub async fn plan(
             .await?
             {
                 return Ok(Err(Refusal::Limit(reached)));
+            }
+        }
+
+        // inbuxa-admin#257: and the disk space its accounts were given
+        if adding_disk > 0
+            && let Some(limit) = limit(TenantStorageQuota::MaxDiskQuota).filter(|limit| *limit > 0)
+        {
+            let allocated =
+                quota::allocated_disk(registry, tenant_id.document_id(), &AHashSet::new()).await?;
+            if allocated.saturating_add(adding_disk) > limit {
+                return Ok(Err(Refusal::DiskQuota {
+                    allocated,
+                    adding: adding_disk,
+                    limit,
+                }));
             }
         }
     }
