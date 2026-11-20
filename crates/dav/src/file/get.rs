@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
@@ -127,6 +129,7 @@ impl FileGetRequestHandler for Server {
             Some(Some(range)) => Some(range.start as usize..range.end as usize),
             Some(None) => {
                 return Ok(HttpResponse::new(StatusCode::RANGE_NOT_SATISFIABLE)
+                    .with_header(hyper::header::CONTENT_SECURITY_POLICY, FILE_CSP)
                     .with_accept_ranges()
                     .with_etag(etag)
                     .with_content_range(format!("bytes */{size}")));
@@ -134,11 +137,15 @@ impl FileGetRequestHandler for Server {
             None => None,
         };
 
-        let response = HttpResponse::new(StatusCode::OK)
-            .with_content_type(content_type.unwrap_or("application/octet-stream"))
-            .with_etag(etag)
-            .with_last_modified(last_modified)
-            .with_accept_ranges();
+        let content_type = content_type.unwrap_or("application/octet-stream");
+        let response = user_content_policy(
+            HttpResponse::new(StatusCode::OK)
+                .with_content_type(content_type)
+                .with_etag(etag)
+                .with_last_modified(last_modified)
+                .with_accept_ranges(),
+            content_type,
+        );
 
         if is_head {
             return Ok(response.with_content_length(size));
@@ -164,5 +171,88 @@ impl FileGetRequestHandler for Server {
             None => response,
         }
         .with_binary_body(contents))
+    }
+}
+
+/// inbuxa: a stored file is whatever its uploader sent, under the type they
+/// claimed, and it is served on the same origin as the sign-in page, JMAP and
+/// the console's API. Opened in a browser, an uploaded HTML or SVG page would
+/// run as this server. So every file answer carries a sandbox policy, which
+/// gives the document an opaque origin and no scripts, and only types that
+/// can't hold active content are offered for display; everything else is a
+/// download. WebDAV clients ignore both headers.
+/// `frame-ancestors` is here so the default HTML headers don't add a second
+/// policy of their own (security_headers.rs).
+const FILE_CSP: &str = "default-src 'none'; frame-ancestors 'none'; sandbox";
+
+fn user_content_policy(response: HttpResponse, content_type: &str) -> HttpResponse {
+    let response = response
+        .with_header(hyper::header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+        .with_header(hyper::header::CONTENT_SECURITY_POLICY, FILE_CSP);
+    if shown_inline(content_type) {
+        response
+    } else {
+        response.with_content_disposition("attachment")
+    }
+}
+
+/// Types a browser shows without running anything: raster images, audio,
+/// video and plain text. SVG, HTML, XML, PDF and anything unknown download.
+fn shown_inline(content_type: &str) -> bool {
+    let essence = content_type
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    matches!(
+        essence.as_str(),
+        "image/png"
+            | "image/jpeg"
+            | "image/gif"
+            | "image/webp"
+            | "image/avif"
+            | "image/bmp"
+            | "text/plain"
+    ) || ((essence.starts_with("audio/") || essence.starts_with("video/"))
+        && !essence.contains("xml"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::shown_inline;
+
+    #[test]
+    fn active_types_download() {
+        for ty in [
+            "text/html",
+            "TEXT/HTML; charset=utf-8",
+            "application/xhtml+xml",
+            "image/svg+xml",
+            "text/xml",
+            "application/xml",
+            "application/pdf",
+            "text/javascript",
+            "application/octet-stream",
+            "",
+            "garbage",
+            " text/html ",
+        ] {
+            assert!(!shown_inline(ty), "{ty:?} must download");
+        }
+    }
+
+    #[test]
+    fn passive_types_show() {
+        for ty in [
+            "image/png",
+            "image/jpeg",
+            "IMAGE/WEBP",
+            "text/plain; charset=utf-8",
+            "audio/mpeg",
+            "video/mp4",
+        ] {
+            assert!(shown_inline(ty), "{ty:?} should show inline");
+        }
     }
 }
