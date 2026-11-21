@@ -22,7 +22,7 @@ use std::{
     path::{Path, PathBuf},
 };
 use store::{
-    BlobStore, IterateParams, SUBSPACE_BLOBS, SUBSPACE_COUNTER, SUBSPACE_INDEXES,
+    BlobStore, IterateParams, SUBSPACE_BLOBS, SUBSPACE_COUNTER, SUBSPACE_INBUXA, SUBSPACE_INDEXES,
     SUBSPACE_PROPERTY, SUBSPACE_QUOTA, SUBSPACE_REGISTRY_PK, SUBSPACE_TELEMETRY_SPAN, Store,
     U32_LEN,
     write::{
@@ -55,6 +55,14 @@ impl Core {
         let mut conflicts = Vec::new();
         for path in &paths {
             let subspace = KeyValueReader::new(path).subspace;
+            // inbuxa: every start writes the fork's own subspace, this
+            // import's too: where the blob store is (W), the permission
+            // grants (P), the log files' setting (T). Its records are keyed
+            // values, which an import sets over, never duplicates; a store in
+            // use still has data in the other subspaces, which are checked.
+            if subspace == SUBSPACE_INBUXA {
+                continue;
+            }
             if subspace_has_data(&self.storage.data, subspace).await {
                 conflicts.push(path.clone());
             }
@@ -80,20 +88,74 @@ impl Core {
         imported.sort_unstable();
         imported.dedup();
 
+        // inbuxa: the blobs last, into the blob store the imported settings
+        // name. This process started on an empty store, whose blob store is
+        // the data store; a server started on the imported one reads blobs
+        // from wherever its x:BlobStore says (S3, say), so blobs written to
+        // the data store would be missing there.
+        let (blobs, rest): (Vec<_>, Vec<_>) = paths
+            .into_iter()
+            .partition(|path| KeyValueReader::new(path).subspace == SUBSPACE_BLOBS);
+
         let mut tasks = Vec::new();
-        for path in paths {
+        for path in rest {
             let storage = self.storage.clone();
             let blob_store = self.storage.blob.clone();
             tasks.push(tokio::spawn(async move {
                 restore_file(storage.data, blob_store, &path).await;
             }));
         }
-
         for task in tasks {
             task.await.failed("Failed to wait for task");
         }
 
+        if !blobs.is_empty() {
+            let blob_store = self.imported_blob_store().await;
+            let mut tasks = Vec::new();
+            for path in blobs {
+                let storage = self.storage.clone();
+                let blob_store = blob_store.clone();
+                tasks.push(tokio::spawn(async move {
+                    restore_file(storage.data, blob_store, &path).await;
+                }));
+            }
+            for task in tasks {
+                task.await.failed("Failed to wait for task");
+            }
+        }
+
         imported
+    }
+
+    /// inbuxa: the blob store the store's x:BlobStore names now, after the
+    /// import wrote it
+    async fn imported_blob_store(&self) -> BlobStore {
+        use registry::{schema::structs::BlobStore as BlobStoreSetting, types::ObjectImpl};
+        let setting = self
+            .storage
+            .registry
+            .object::<BlobStoreSetting>(BlobStoreSetting::OBJECT.singleton().id())
+            .await
+            .failed("Failed to read the imported blob store setting")
+            .unwrap_or_default();
+        if matches!(setting, BlobStoreSetting::Default) {
+            println!("Importing blobs into the data store, as the export's settings say.");
+            return self.storage.data.clone().into();
+        }
+        let mut warnings = Vec::new();
+        let store = BlobStore::open(setting, &self.storage.data, &mut warnings)
+            .await
+            .unwrap_or_else(|err| {
+                failed(&format!(
+                    "Can't open the blob store the export's settings name, to import the \
+                     blobs into: {err}"
+                ))
+            });
+        for warning in warnings {
+            eprintln!("Blob store: {warning}");
+        }
+        println!("Importing blobs into the blob store the export's settings name.");
+        store
     }
 
     /// inbuxa: an export never carries the full-text index. It is built by

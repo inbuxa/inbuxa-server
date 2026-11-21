@@ -259,6 +259,31 @@ pub async fn test(test: &TestServer) {
         .backup(BackupParams::new(temp_dir.path.clone()))
         .await;
 
+    // inbuxa: K-C11: a record in the fork's subspace, which every start
+    // writes (here whichever one the test server wrote first)
+    let mut startup_key = None;
+    db.iterate(
+        IterateParams::new(
+            AnyKey {
+                subspace: SUBSPACE_INBUXA,
+                key: vec![0u8],
+            },
+            AnyKey {
+                subspace: SUBSPACE_INBUXA,
+                key: vec![u8::MAX; 32],
+            },
+        )
+        .no_values(),
+        |key, _| {
+            startup_key = Some(key.to_vec());
+            Ok(false)
+        },
+    )
+    .await
+    .unwrap();
+    let startup_key =
+        startup_key.expect("the test server's start wrote nothing to the fork's subspace");
+
     // Destroy store
     println!("Destroying store...");
     store_destroy(&db).await;
@@ -273,6 +298,16 @@ pub async fn test(test: &TestServer) {
             .write(0u64)
             .write("localhost")
             .finalize(),
+    );
+    // inbuxa: K-C11: and over what any start writes first, the import's own
+    // too: a record in the fork's subspace, with a value the import has to
+    // set over. Refused as data in the store until rc.34.
+    batch.set(
+        ValueClass::Any(AnyClass {
+            subspace: SUBSPACE_INBUXA,
+            key: startup_key,
+        }),
+        b"written at start-up".to_vec(),
     );
     db.write(batch.build_all()).await.unwrap();
     for (key, _) in &named_blobs {
