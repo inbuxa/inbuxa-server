@@ -15,6 +15,24 @@ https://github.com/inbuxa/inbuxa-server/security/advisories.
 Every version PR adds that version's entry here. CI refuses a version this
 file has no entry for (`tools/release/version.py --changelog`).
 
+## [27.1-rc.38] - 2026-11-20
+
+27.1-rc.37 with one fix.
+
+### Fixed
+- Outbound DMARC and TLS reports wait up to 3 hours before their first
+  delivery attempt, on purpose, so receivers don't get every report at
+  the same moment. That wait was counted as delivery time, so the
+  delivery-time graph and metrics showed hours for reports delivered on
+  the first try. Delivery time now starts at the end of the planned
+  wait. (#517)
+
+### Upgrading
+- Reports already in the queue when you update still count their wait
+  until they go out, at most 3 hours.
+- 27.1-rc.37 to 27.1-rc.38 rolls like any update, with no store layout
+  step.
+
 ## [27.1-rc.37] - 2026-11-20
 
 27.1-rc.36 with 2 security fixes from a private security review (1 high,
