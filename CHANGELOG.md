@@ -15,6 +15,22 @@ https://github.com/inbuxa/inbuxa-server/security/advisories.
 Every version PR adds that version's entry here. CI refuses a version this
 file has no entry for (`tools/release/version.py --changelog`).
 
+## [27.1-rc.39] - 2026-11-21
+
+27.1-rc.38 with one console addition.
+
+### Added
+- The console's Settings › Network › Web links to Front ends, inbuxa
+  Admin's page for `inbuxa:FrontEnds`: where inbuxa Admin and the webmail
+  are served, the webmail's client secret, and other origins allowed to
+  call the server from a browser. Until now only `inbuxa join` or the
+  server's environment could set these. The page needs inbuxa Admin
+  27.1-rc.23; an older console hides the link. (#522)
+
+### Upgrading
+- 27.1-rc.38 to 27.1-rc.39 rolls like any update, with no store layout
+  step.
+
 ## [27.1-rc.38] - 2026-11-20
 
 27.1-rc.37 with one fix.
