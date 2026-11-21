@@ -11,6 +11,23 @@ https://github.com/inbuxa/inbuxa-server/security/advisories.
 Every version PR adds that version's entry here. CI refuses a version this
 file has no entry for (`tools/release/changelog-check.py`).
 
+## [2026.11.20.2] - 2026-11-20
+
+2026.11.20.1 with two fixes to restoring a store export. The same fixes
+are in 27.1-rc.34.
+
+### Fixed
+- An import into a fresh store refused to run, since 2026.11.9.1: the
+  import took the records every start writes for data already in the
+  store. (#520)
+- An import put blobs into the data store even when the imported settings
+  name another blob store (S3, say), so the restored server couldn't find
+  them. Blobs now go into the blob store the imported settings name.
+  (#520)
+
+### Upgrading
+- 2026.11.20.1 to 2026.11.20.2 updates like any 2026.x patch.
+
 ## [2026.11.20.1] - 2026-11-20
 
 2026.11.20 with 2 security fixes from a private security review (1 high,
