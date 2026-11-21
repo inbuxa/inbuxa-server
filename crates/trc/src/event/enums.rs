@@ -16,12 +16,13 @@
 // 650 to 659 are inbuxa Relay's (relay spec, RL-23, RL-T23); 660 is
 // store.blob-read-through; 661 is smtp.directory-no-answer (#364); 662 is
 // spam.result (#397); 663 is queue.message-subject (inbuxa-admin #228);
-// 664 is auth.passkey-counter (passkeys spec, PK-18). Metrics 369 to 371
+// 664 is auth.passkey-counter (passkeys spec, PK-18); 665 and 666 are
+// cluster.singleton-lease-taken and -lost (#437). Metrics 369 to 371
 // are gauges for Kubernetes alerts (K-C10): queue.oldest-message,
 // cluster.lease-renewed, tls.earliest-expiry.
 // TOTAL_EVENT_COUNT sizes the collector's per-event tables, so it is one
 // more than the highest id; the test below holds it to the variant list
-pub const TOTAL_EVENT_COUNT: usize = 665;
+pub const TOTAL_EVENT_COUNT: usize = 667;
 pub const TOTAL_METRIC_COUNT: usize = 372;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -170,6 +171,9 @@ pub enum ClusterEvent {
     CoordinatorConnected = 644,
     CoordinatorDisconnected = 645,
     CoordinatorError = 646,
+    // inbuxa: #437, the singleton role leases
+    SingletonLeaseTaken = 665,
+    SingletonLeaseLost = 666,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

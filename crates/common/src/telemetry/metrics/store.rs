@@ -197,7 +197,9 @@ impl Server {
         if store.is_none() {
             return;
         }
-        let samples = sample(self.core.network.roles.metrics_calculate);
+        // inbuxa: #437: the cluster-wide gauges from the node that sets them
+        let samples =
+            sample(self.runs_singleton(crate::manager::singleton_lease::SingletonRole::Metrics));
         let count = samples.len();
         let started = std::time::Instant::now();
         match store.write_metrics(samples, now()).await {

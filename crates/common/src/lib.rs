@@ -208,6 +208,9 @@ pub struct Data {
     // inbuxa: the relays outbound mail goes through, and this node's links
     // to them (relay spec, RL-20, RL-24)
     pub relay_senders: inbuxa_features::relay::outbound::Senders,
+
+    // inbuxa: #437, the singleton role leases this node holds
+    pub singleton_leases: manager::singleton_lease::SingletonLeases,
 }
 
 #[derive(Clone)]

@@ -162,6 +162,9 @@ async fn main() -> std::io::Result<()> {
     // inbuxa: hand back the task locks this node holds, so other nodes can
     // run those tasks now rather than when the locks expire
     services::task_manager::lock::release_task_locks(&inner.build_server()).await;
+    // inbuxa: #437: and its singleton role leases, so another node (or this
+    // one, restarted) takes those roles over at once
+    common::manager::singleton_lease::release_singleton_leases(&inner.build_server()).await;
 
     // Shutdown collector
     Collector::shutdown();

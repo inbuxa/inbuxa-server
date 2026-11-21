@@ -25,7 +25,11 @@ use registry::{
     types::{id::ObjectId, list::List},
 };
 use std::sync::Mutex;
-use store::registry::{RegistryQuery, bootstrap::Bootstrap};
+use store::{
+    Deserialize, SUBSPACE_INBUXA, Store, ValueKey,
+    registry::{RegistryQuery, bootstrap::Bootstrap},
+    write::{AnyClass, BatchBuilder, ValueClass},
+};
 use trc::{Collector, MetricType, TelemetryEvent};
 use types::id::Id;
 
@@ -37,9 +41,70 @@ pub struct AlertMessage {
     pub body: Vec<u8>,
 }
 
-/// The alerts whose condition held at the last evaluation (MON-26). In
-/// memory, so a restart while a condition holds fires once more.
+/// The alerts whose condition held at the last evaluation (MON-26). Kept
+/// in the store as well (#437), so the node that takes over alerts from
+/// another carries on from it instead of firing them all again.
 static FIRING: Mutex<Option<AHashSet<u64>>> = Mutex::new(None);
+
+/// Under `X` (cluster-wide singletons) in `_`, beside the singleton role
+/// leases: the ids
+/// of the alerts firing at the last evaluation.
+pub const FIRING_KEY: &[u8] = b"Xa";
+
+fn firing_class() -> ValueClass {
+    ValueClass::Any(AnyClass {
+        subspace: SUBSPACE_INBUXA,
+        key: FIRING_KEY.to_vec(),
+    })
+}
+
+struct FiringIds(AHashSet<u64>);
+
+impl Deserialize for FiringIds {
+    fn deserialize(bytes: &[u8]) -> trc::Result<Self> {
+        Ok(FiringIds(
+            bytes
+                .as_chunks::<8>()
+                .0
+                .iter()
+                .map(|id| u64::from_be_bytes(*id))
+                .collect(),
+        ))
+    }
+}
+
+fn firing_bytes(ids: &AHashSet<u64>) -> Vec<u8> {
+    let mut ids = ids.iter().copied().collect::<Vec<_>>();
+    ids.sort_unstable();
+    ids.into_iter().flat_map(u64::to_be_bytes).collect()
+}
+
+/// Takes up the alerts the store says are firing, as the node that takes
+/// over evaluating them (#437). With none stored, the next evaluation is
+/// a first one (MON-26).
+pub async fn load_firing(store: &Store) {
+    match store
+        .get_value::<FiringIds>(ValueKey::from(firing_class()))
+        .await
+    {
+        Ok(stored) => *FIRING.lock().unwrap() = stored.map(|FiringIds(ids)| ids),
+        Err(err) => {
+            trc::error!(err.details("Failed to read the firing alerts"));
+        }
+    }
+}
+
+/// Stores the firing alerts when they changed since the last evaluation.
+async fn store_firing(store: &Store, previous: Option<&AHashSet<u64>>, holding: &AHashSet<u64>) {
+    if previous == Some(holding) {
+        return;
+    }
+    let mut batch = BatchBuilder::new();
+    batch.set(firing_class(), firing_bytes(holding));
+    if let Err(err) = store.write(batch.build_all()).await {
+        trc::error!(err.details("Failed to store the firing alerts"));
+    }
+}
 
 fn is_ident_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_'
@@ -237,7 +302,8 @@ impl Server {
                 messages.push(build_email(email));
             }
         }
-        *FIRING.lock().unwrap() = Some(holding);
+        let previous = FIRING.lock().unwrap().replace(holding.clone());
+        store_firing(self.store(), previous.as_ref(), &holding).await;
         Ok(messages)
     }
 }
@@ -245,6 +311,20 @@ impl Server {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn firing_alerts_read_back() {
+        let ids = AHashSet::from_iter([3u64, 1 << 40, 7]);
+        let FiringIds(read) = FiringIds::deserialize(&firing_bytes(&ids)).unwrap();
+        assert_eq!(read, ids);
+        // Stored in order, so an unchanged set writes the same bytes
+        assert_eq!(
+            firing_bytes(&ids),
+            firing_bytes(&AHashSet::from_iter([7u64, 3, 1 << 40]))
+        );
+        let FiringIds(none) = FiringIds::deserialize(&[]).unwrap();
+        assert!(none.is_empty());
+    }
 
     #[test]
     fn rewrites_underscore_names() {
