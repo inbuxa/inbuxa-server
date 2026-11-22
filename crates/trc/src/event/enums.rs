@@ -19,11 +19,12 @@
 // 664 is auth.passkey-counter (passkeys spec, PK-18); 665 and 666 are
 // cluster.singleton-lease-taken and -lost (#437). Metrics 369 to 371
 // are gauges for Kubernetes alerts (K-C10): queue.oldest-message,
-// cluster.lease-renewed, tls.earliest-expiry.
+// cluster.lease-renewed, tls.earliest-expiry; 372 is
+// cluster.singleton-metrics (#437).
 // TOTAL_EVENT_COUNT sizes the collector's per-event tables, so it is one
 // more than the highest id; the test below holds it to the variant list
 pub const TOTAL_EVENT_COUNT: usize = 667;
-pub const TOTAL_METRIC_COUNT: usize = 372;
+pub const TOTAL_METRIC_COUNT: usize = 373;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EventType {
@@ -1089,6 +1090,7 @@ pub enum MetricType {
     QueueOldestMessage = 369,
     ClusterLeaseRenewed = 370,
     TlsEarliestExpiry = 371,
+    ClusterSingletonMetrics = 372,
     DkimPublicKeyFetch = 355,
     DkimPublicKeyMissing = 356,
     DkimPublicKeyMultiple = 357,

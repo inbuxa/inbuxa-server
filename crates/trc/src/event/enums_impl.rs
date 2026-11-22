@@ -5518,6 +5518,7 @@ impl MetricType {
             b"queue.oldest-message" => MetricType::QueueOldestMessage,
             b"cluster.lease-renewed" => MetricType::ClusterLeaseRenewed,
             b"tls.earliest-expiry" => MetricType::TlsEarliestExpiry,
+            b"cluster.singleton-metrics" => MetricType::ClusterSingletonMetrics,
         }
         .copied()
     }
@@ -5908,6 +5909,7 @@ impl MetricType {
             MetricType::QueueOldestMessage => "queue.oldest-message",
             MetricType::ClusterLeaseRenewed => "cluster.lease-renewed",
             MetricType::TlsEarliestExpiry => "tls.earliest-expiry",
+            MetricType::ClusterSingletonMetrics => "cluster.singleton-metrics",
         }
     }
 
@@ -6285,6 +6287,7 @@ impl MetricType {
             MetricType::QueueOldestMessage => 369,
             MetricType::ClusterLeaseRenewed => 370,
             MetricType::TlsEarliestExpiry => 371,
+            MetricType::ClusterSingletonMetrics => 372,
         }
     }
 
@@ -6662,6 +6665,7 @@ impl MetricType {
             369 => Some(MetricType::QueueOldestMessage),
             370 => Some(MetricType::ClusterLeaseRenewed),
             371 => Some(MetricType::TlsEarliestExpiry),
+            372 => Some(MetricType::ClusterSingletonMetrics),
             _ => None,
         }
     }
@@ -7406,6 +7410,9 @@ impl MetricType {
             MetricType::TlsEarliestExpiry => {
                 "When the first certificate in use expires, as a Unix time (0: none)"
             }
+            MetricType::ClusterSingletonMetrics => {
+                "1 when this node calculates the cluster-wide gauges and evaluates alerts, else 0"
+            }
         }
     }
 
@@ -7783,6 +7790,7 @@ impl MetricType {
             MetricType::QueueOldestMessage
             | MetricType::ClusterLeaseRenewed
             | MetricType::TlsEarliestExpiry => "seconds",
+            MetricType::ClusterSingletonMetrics => "1",
         }
     }
 
@@ -8160,6 +8168,7 @@ impl MetricType {
             MetricType::QueueOldestMessage,
             MetricType::ClusterLeaseRenewed,
             MetricType::TlsEarliestExpiry,
+            MetricType::ClusterSingletonMetrics,
         ]
     }
 }

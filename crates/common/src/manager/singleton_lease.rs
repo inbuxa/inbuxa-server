@@ -33,7 +33,7 @@ use store::{
     rand::{RngExt, rng},
     write::{AnyClass, BatchBuilder, ValueClass, assert::AssertValue, now},
 };
-use trc::{AddContext, ClusterEvent};
+use trc::{AddContext, ClusterEvent, Collector, MetricType};
 
 /// How long a lease lasts unless renewed.
 pub const LEASE_SECONDS: u64 = 180;
@@ -338,7 +338,23 @@ async fn round(server: &Server, role: SingletonRole) {
     }
 }
 
+/// A node that stopped doing the metrics work drops the cluster-wide queue
+/// gauges it set, so only the holder shows them (#437). Prometheus reads
+/// every node: `cluster.singleton-metrics` says which one holds the role.
+pub fn clear_cluster_gauges() {
+    for metric in [
+        MetricType::ClusterSingletonMetrics,
+        MetricType::QueueCount,
+        MetricType::QueueOldestMessage,
+    ] {
+        Collector::update_gauge(metric, 0);
+    }
+}
+
 fn lost(role: SingletonRole, why: &'static str) {
+    if role == SingletonRole::Metrics {
+        clear_cluster_gauges();
+    }
     trc::event!(
         Cluster(ClusterEvent::SingletonLeaseLost),
         Type = role.name(),
@@ -360,6 +376,25 @@ mod tests {
         assert_eq!(Lease::from_bytes(&lease.to_bytes()), Some(lease));
         // A value that can't be read counts as no lease
         assert_eq!(Lease::from_bytes(b"short"), None);
+    }
+
+    #[test]
+    fn a_node_that_stops_calculating_drops_the_queue_gauges() {
+        Collector::update_gauge(MetricType::QueueCount, 12);
+        Collector::update_gauge(MetricType::QueueOldestMessage, 1_234);
+        Collector::update_gauge(MetricType::ClusterSingletonMetrics, 1);
+        lost(SingletonRole::Metrics, "test");
+        for metric in [
+            MetricType::QueueCount,
+            MetricType::QueueOldestMessage,
+            MetricType::ClusterSingletonMetrics,
+        ] {
+            assert_eq!(Collector::read_metric(metric), 0.0, "{metric:?}");
+        }
+        assert_eq!(
+            MetricType::parse("cluster.singleton-metrics"),
+            Some(MetricType::ClusterSingletonMetrics)
+        );
     }
 
     #[test]
