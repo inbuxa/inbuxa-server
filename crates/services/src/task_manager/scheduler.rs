@@ -77,10 +77,13 @@ async fn calculate_cluster_metrics(server: &Server, others: bool) {
     // inbuxa: MON-7: the queue gauge from the queue itself, so it's right
     // after a restart
     match server.total_queued_messages().await {
-        Ok((total, oldest)) => {
+        // #437: unless the role passed to another node while counting
+        Ok((total, oldest)) if server.runs_singleton(SingletonRole::Metrics) => {
             Collector::update_gauge(MetricType::QueueCount, total);
             Collector::update_gauge(MetricType::QueueOldestMessage, oldest.unwrap_or_default());
+            Collector::update_gauge(MetricType::ClusterSingletonMetrics, 1);
         }
+        Ok(_) => {}
         Err(err) => {
             trc::error!(err.details("Failed to count queued messages"));
         }
@@ -223,6 +226,11 @@ pub fn spawn_task_scheduler(inner: Arc<Inner>) {
                 .then(BatchBuilder::new);
             let calculates = server.runs_singleton(SingletonRole::Metrics);
             if !calculates {
+                // In a cluster the holder's gauges are the queue's: this
+                // node's would be stale from when it last held the role
+                if server.core.storage.has_coordinator() {
+                    common::manager::singleton_lease::clear_cluster_gauges();
+                }
                 calculated = false;
                 // Counted again at once if this node takes the role on
                 next_metric_update = Instant::now();

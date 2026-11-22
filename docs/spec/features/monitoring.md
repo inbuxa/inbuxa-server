@@ -368,6 +368,11 @@ unchanged.
   the gauges before its first alert evaluation. A node without a cluster
   coordinator needs no lease: the role alone decides. Taking and losing a
   lease log `cluster.singleton-lease-taken` and `cluster.singleton-lease-lost`.
+  In a cluster only the `metricsCalculate` holder shows `queue.count` and
+  `queue.oldest-message`; every other node shows 0, and a node that stops
+  holding the role drops them to 0. The gauge `cluster.singleton-metrics` is
+  1 on the node whose cluster-wide gauges are current and 0 elsewhere, so a
+  reader of every node can pick that one.
 - **MON-27.** **Placeholders.** In `eventMessage`, `subject` and `body`,
   `%{metric.name}%` (the dotted name) is replaced by the value used in that
   evaluation. Whole numbers print without decimals ("3", not "3.0"); others
