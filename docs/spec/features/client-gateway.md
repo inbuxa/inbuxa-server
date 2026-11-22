@@ -1,9 +1,10 @@
 # Feature spec: client access through inbuxa-relay
 
 Status: design note, 2026-11-19, revised 2026-11-21 to cover both modes.
-Not approved, not scheduled. inbuxa-server #484 (milestone 27.7),
-discussed on the forum (t/340). It builds on `features/relay.md` and
-doesn't change any of that spec's rules.
+Open questions answered 2026-11-21 (all as recommended). Still a
+suggestion: not approved, not planned, not scheduled. inbuxa-server #484
+(milestone 27.7), discussed on the forum (t/340). It builds on
+`features/relay.md` and doesn't change any of that spec's rules.
 
 ## Provenance
 
@@ -536,9 +537,11 @@ Terminating:
 - **CG-T17.** A worker that crashes mid-request takes down only its own
   connection, and is reported in a `RelayEvent`.
 
-## Open questions
+## Questions
 
-For John. A recommended answer is given for each.
+Answered by John on 2026-11-21: all as recommended below. That settles the
+shape of the proposal; it doesn't schedule the work, which stays a
+suggestion open for discussion on the forum (t/340).
 
 1. **Both modes, chosen per port, pass-through by default?** Recommended:
    yes, pass-through built first, terminating second.
