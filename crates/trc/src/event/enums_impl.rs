@@ -95,6 +95,8 @@ impl EventType {
             b"cluster.message-invalid" => EventType::Cluster(ClusterEvent::MessageInvalid),
             b"cluster.node-id-renewed" => EventType::Cluster(ClusterEvent::NodeIdRenewed),
             b"cluster.node-id-reassigned" => EventType::Cluster(ClusterEvent::NodeIdReassigned),
+            b"cluster.singleton-lease-taken" => EventType::Cluster(ClusterEvent::SingletonLeaseTaken),
+            b"cluster.singleton-lease-lost" => EventType::Cluster(ClusterEvent::SingletonLeaseLost),
             // inbuxa: coordinator connection
             b"cluster.coordinator-connected" => EventType::Cluster(ClusterEvent::CoordinatorConnected),
             b"cluster.coordinator-disconnected" => EventType::Cluster(ClusterEvent::CoordinatorDisconnected),
@@ -784,6 +786,10 @@ impl EventType {
             EventType::Cluster(ClusterEvent::MessageInvalid) => "cluster.message-invalid",
             EventType::Cluster(ClusterEvent::NodeIdRenewed) => "cluster.node-id-renewed",
             EventType::Cluster(ClusterEvent::NodeIdReassigned) => "cluster.node-id-reassigned",
+            EventType::Cluster(ClusterEvent::SingletonLeaseTaken) => {
+                "cluster.singleton-lease-taken"
+            }
+            EventType::Cluster(ClusterEvent::SingletonLeaseLost) => "cluster.singleton-lease-lost",
             // inbuxa: coordinator connection
             EventType::Cluster(ClusterEvent::CoordinatorConnected) => {
                 "cluster.coordinator-connected"
@@ -1598,6 +1604,8 @@ impl EventType {
             EventType::Cluster(ClusterEvent::MessageInvalid) => 49,
             EventType::Cluster(ClusterEvent::NodeIdRenewed) => 275,
             EventType::Cluster(ClusterEvent::NodeIdReassigned) => 649,
+            EventType::Cluster(ClusterEvent::SingletonLeaseTaken) => 665,
+            EventType::Cluster(ClusterEvent::SingletonLeaseLost) => 666,
             // inbuxa: coordinator connection
             EventType::Cluster(ClusterEvent::CoordinatorConnected) => 644,
             EventType::Cluster(ClusterEvent::CoordinatorDisconnected) => 645,
@@ -2278,6 +2286,8 @@ impl EventType {
             49 => Some(EventType::Cluster(ClusterEvent::MessageInvalid)),
             275 => Some(EventType::Cluster(ClusterEvent::NodeIdRenewed)),
             649 => Some(EventType::Cluster(ClusterEvent::NodeIdReassigned)),
+            665 => Some(EventType::Cluster(ClusterEvent::SingletonLeaseTaken)),
+            666 => Some(EventType::Cluster(ClusterEvent::SingletonLeaseLost)),
             // inbuxa: coordinator connection
             644 => Some(EventType::Cluster(ClusterEvent::CoordinatorConnected)),
             645 => Some(EventType::Cluster(ClusterEvent::CoordinatorDisconnected)),
@@ -3256,6 +3266,8 @@ impl EventType {
             EventType::Cluster(ClusterEvent::CoordinatorConnected) => Level::Info,
             EventType::Cluster(ClusterEvent::CoordinatorDisconnected) => Level::Warn,
             EventType::Cluster(ClusterEvent::CoordinatorError) => Level::Warn,
+            EventType::Cluster(ClusterEvent::SingletonLeaseTaken) => Level::Info,
+            EventType::Cluster(ClusterEvent::SingletonLeaseLost) => Level::Info,
             EventType::Delivery(DeliveryEvent::MissingOutboundHostname) => Level::Warn,
             EventType::Delivery(DeliveryEvent::ConcurrencyLimitExceeded) => Level::Warn,
             EventType::Delivery(DeliveryEvent::RateLimitExceeded) => Level::Warn,
@@ -3407,6 +3419,8 @@ impl EventType {
             EventType::Cluster(ClusterEvent::CoordinatorConnected) => "Coordinator connected",
             EventType::Cluster(ClusterEvent::CoordinatorDisconnected) => "Coordinator unavailable",
             EventType::Cluster(ClusterEvent::CoordinatorError) => "Coordinator error",
+            EventType::Cluster(ClusterEvent::SingletonLeaseTaken) => "Singleton role lease taken",
+            EventType::Cluster(ClusterEvent::SingletonLeaseLost) => "Singleton role lease lost",
             EventType::Dane(DaneEvent::AuthenticationSuccess) => "DANE authentication successful",
             EventType::Dane(DaneEvent::AuthenticationFailure) => "DANE authentication failed",
             EventType::Dane(DaneEvent::NoCertificatesFound) => "No certificates found for DANE",
@@ -4529,6 +4543,8 @@ impl EventType {
             EventType::Cluster(ClusterEvent::CoordinatorConnected),
             EventType::Cluster(ClusterEvent::CoordinatorDisconnected),
             EventType::Cluster(ClusterEvent::CoordinatorError),
+            EventType::Cluster(ClusterEvent::SingletonLeaseTaken),
+            EventType::Cluster(ClusterEvent::SingletonLeaseLost),
             EventType::Dane(DaneEvent::AuthenticationSuccess),
             EventType::Dane(DaneEvent::AuthenticationFailure),
             EventType::Dane(DaneEvent::NoCertificatesFound),

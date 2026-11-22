@@ -28,6 +28,7 @@ pub mod first_party;
 pub mod granted_permissions; // inbuxa: permissions added after roles were stored
 pub mod listener_ports; // inbuxa: K-S1, default listener ports from the environment
 pub mod restore;
+pub mod singleton_lease; // inbuxa: #437, one node at a time does the singleton roles' work
 pub mod spam_rules; // inbuxa: rules bundled with the server
 #[cfg(target_os = "linux")]
 pub mod systemd;

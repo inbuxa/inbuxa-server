@@ -336,9 +336,11 @@ unchanged.
 ### Alerts
 
 - **MON-25.** **Evaluation.** Each enabled alert's condition is evaluated
-  every 60 seconds (**Decision**) on every node that holds the
-  `metricsCalculate` task role, against that node's current values. A
-  one-node install always holds it. The condition language is the server's
+  every 60 seconds (**Decision**) on the node that does the
+  `metricsCalculate` task role's work, against that node's current values. A
+  one-node install always holds it. In a cluster several nodes can have the
+  role; the one holding its lease in the store does the work (#437, see
+  "Singleton roles" below). The condition language is the server's
   expression language, and a metric is read two ways, both accepted:
   - `metric('queue.count')`, which the AGPL expression code already supports;
   - the name with dots and hyphens as underscores (`queue_count`), as
@@ -350,9 +352,22 @@ unchanged.
   true, including the first evaluation after start. While it stays true it
   doesn't fire again. Once false, it can fire again. **Decision**: upstream's
   docs say email goes out "each time the condition becomes true". State is in
-  memory, so a restart while the condition holds fires once more. A condition
+  memory, and in a cluster in the store too (`Xa` in `_`), so a node that
+  takes the role over from another carries on from it; a node without a
+  coordinator that restarts while the condition holds fires once more. A condition
   that fails to evaluate (a metric name that doesn't exist, a type error) is
   rejected when the alert is saved, and never fires.
+- **Singleton roles (#437).** `taskScheduler` (queuing the scheduled
+  maintenance tasks, and the daily check of each domain's DKIM and ACME
+  tasks) and `metricsCalculate` (the cluster-wide gauges, alert evaluation
+  and their emails) each have a lease in the store (`Xs`, `Xm` in `_`).
+  Every node with the role tries for it each minute; the holder renews it
+  and does the work. A lease lasts 3 minutes, and its holder stops acting
+  15 seconds before it runs out, so when the holder stops another node with
+  the role takes over within about 4 minutes. A node that takes over sets
+  the gauges before its first alert evaluation. A node without a cluster
+  coordinator needs no lease: the role alone decides. Taking and losing a
+  lease log `cluster.singleton-lease-taken` and `cluster.singleton-lease-lost`.
 - **MON-27.** **Placeholders.** In `eventMessage`, `subject` and `body`,
   `%{metric.name}%` (the dotted name) is replaced by the value used in that
   evaluation. Whole numbers print without decimals ("3", not "3.0"); others

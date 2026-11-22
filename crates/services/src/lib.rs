@@ -110,6 +110,8 @@ impl SpawnServices for IpcReceivers {
             inbuxa_scheduled_reports::spawn_scheduled_reports(inner.clone());
 
             // Spawn task scheduler
+            // inbuxa: #437, before the scheduler, which asks it who acts
+            common::manager::singleton_lease::spawn_singleton_leases(inner.clone());
             spawn_task_scheduler(inner);
         }
     }

@@ -24,6 +24,7 @@ pub mod replica_mysql; // inbuxa: read replicas on MySQL
 pub mod scaleout; // inbuxa: scale-out storage
 #[cfg(feature = "postgres")]
 pub mod search_gin; // inbuxa: GIN indexes without a pending list
+pub mod singleton_lease; // inbuxa: #437, one node at a time does the singleton roles' work
 #[cfg(any(feature = "postgres", feature = "mysql"))]
 pub mod sql_timeout;
 pub mod task_locks; // inbuxa: task locks across nodes

@@ -113,6 +113,7 @@ pub const OWNERS: &[(u8, Owner)] = &[
         b'W',
         Owner::Stays("blob store changes and the sharing policy"),
     ),
+    (b'X', Owner::Stays("cluster singleton role leases")),
 ];
 
 /// Step 2 -> 3. Returns how many rows moved.

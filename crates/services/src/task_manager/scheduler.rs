@@ -14,8 +14,9 @@ use std::{
 };
 
 use common::{
-    BuildServer, Inner, LONG_1D_SLUMBER,
+    BuildServer, Inner, LONG_1D_SLUMBER, Server,
     config::{mailstore::spamfilter, telemetry::OtelMetrics},
+    manager::singleton_lease::SingletonRole,
 };
 use registry::{
     schema::{
@@ -68,6 +69,37 @@ async fn metrics_collection_delay(server: &common::Server) -> Duration {
             .metrics_collection_interval,
     )
     .time_to_next()
+}
+
+/// The cluster-wide gauges, on the node that does the metrics work: the
+/// queue every time, accounts and domains when `others` (once a day).
+async fn calculate_cluster_metrics(server: &Server, others: bool) {
+    // inbuxa: MON-7: the queue gauge from the queue itself, so it's right
+    // after a restart
+    match server.total_queued_messages().await {
+        Ok((total, oldest)) => {
+            Collector::update_gauge(MetricType::QueueCount, total);
+            Collector::update_gauge(MetricType::QueueOldestMessage, oldest.unwrap_or_default());
+        }
+        Err(err) => {
+            trc::error!(err.details("Failed to count queued messages"));
+        }
+    }
+
+    if others {
+        match server.total_accounts().await {
+            Ok(total) => Collector::update_gauge(MetricType::UserCount, total as u64),
+            Err(err) => {
+                trc::error!(err.details("Failed to obtain account count"));
+            }
+        }
+        match server.total_domains().await {
+            Ok(total) => Collector::update_gauge(MetricType::DomainCount, total as u64),
+            Err(err) => {
+                trc::error!(err.details("Failed to obtain domain count"));
+            }
+        }
+    }
 }
 
 #[derive(Default)]
@@ -174,13 +206,27 @@ pub fn spawn_task_scheduler(inner: Arc<Inner>) {
         }
 
         let mut next_metric_update = Instant::now();
+        // inbuxa: #437: whether this node calculated the cluster-wide gauges
+        // since it last took on the metrics role, so a node that just took
+        // over doesn't evaluate alerts against gauges it never set
+        let mut calculated = false;
 
         loop {
             tokio::time::sleep(queue.wake_up_time()).await;
 
             let server = inner.build_server();
             let roles = &server.core.network.roles;
-            let mut batch = (roles.task_scheduler).then(BatchBuilder::new);
+            // inbuxa: #437: in a cluster, only the node holding the role's
+            // lease queues the scheduled tasks and does the metrics work
+            let mut batch = server
+                .runs_singleton(SingletonRole::TaskScheduler)
+                .then(BatchBuilder::new);
+            let calculates = server.runs_singleton(SingletonRole::Metrics);
+            if !calculates {
+                calculated = false;
+                // Counted again at once if this node takes the role on
+                next_metric_update = Instant::now();
+            }
 
             while let Some(event) = queue.pop() {
                 match event.event {
@@ -299,61 +345,18 @@ pub fn spawn_task_scheduler(inner: Arc<Inner>) {
                             Event::CalculateMetrics,
                         );
 
-                        let update_other_metrics = if Instant::now() >= next_metric_update {
+                        let update_other_metrics =
+                            calculates && Instant::now() >= next_metric_update;
+                        if update_other_metrics {
                             next_metric_update = Instant::now() + Duration::from_secs(86400);
-                            true
-                        } else {
-                            false
-                        };
+                        }
+                        calculated |= calculates;
 
                         let server = server.clone();
                         tokio::spawn(async move {
                             let elapsed = Instant::now();
-                            if server.core.network.roles.metrics_calculate {
-                                // inbuxa: MON-7: the queue gauge from the queue itself,
-                                // so it's right after a restart
-                                match server.total_queued_messages().await {
-                                    Ok((total, oldest)) => {
-                                        Collector::update_gauge(MetricType::QueueCount, total);
-                                        Collector::update_gauge(
-                                            MetricType::QueueOldestMessage,
-                                            oldest.unwrap_or_default(),
-                                        );
-                                    }
-                                    Err(err) => {
-                                        trc::error!(err.details("Failed to count queued messages"));
-                                    }
-                                }
-
-                                if update_other_metrics {
-                                    match server.total_accounts().await {
-                                        Ok(total) => {
-                                            Collector::update_gauge(
-                                                MetricType::UserCount,
-                                                total as u64,
-                                            );
-                                        }
-                                        Err(err) => {
-                                            trc::error!(
-                                                err.details("Failed to obtain account count")
-                                            );
-                                        }
-                                    }
-
-                                    match server.total_domains().await {
-                                        Ok(total) => {
-                                            Collector::update_gauge(
-                                                MetricType::DomainCount,
-                                                total as u64,
-                                            );
-                                        }
-                                        Err(err) => {
-                                            trc::error!(
-                                                err.details("Failed to obtain domain count")
-                                            );
-                                        }
-                                    }
-                                }
+                            if calculates {
+                                calculate_cluster_metrics(&server, update_other_metrics).await;
                             }
 
                             match tokio::task::spawn_blocking(memory_stats::memory_stats).await {
@@ -387,9 +390,19 @@ pub fn spawn_task_scheduler(inner: Arc<Inner>) {
                             Instant::now() + Duration::from_secs(60),
                             Event::EvaluateAlerts,
                         );
-                        if server.core.network.roles.metrics_calculate {
+                        if calculates {
+                            // #437: a node that just took over sets the gauges
+                            // first, so no alert reads one it never set
+                            let first = !calculated;
+                            if first {
+                                calculated = true;
+                                next_metric_update = Instant::now() + Duration::from_secs(86400);
+                            }
                             let server = server.clone();
                             tokio::spawn(async move {
+                                if first {
+                                    calculate_cluster_metrics(&server, true).await;
+                                }
                                 match server.process_alerts().await {
                                     Ok(messages) => {
                                         use smtp::reporting::send::MtaReportSend;
@@ -434,7 +447,7 @@ pub fn spawn_task_scheduler(inner: Arc<Inner>) {
                             Instant::now() + DOMAIN_TASK_CHECK_INTERVAL,
                             Event::CheckDomainTasks,
                         );
-                        if roles.task_scheduler {
+                        if batch.is_some() {
                             let server = server.clone();
                             tokio::spawn(async move {
                                 if let Err(err) =
