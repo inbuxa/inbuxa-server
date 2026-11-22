@@ -1,9 +1,9 @@
 # Feature spec: client access through inbuxa-relay
 
 Status: design note, 2026-11-19, revised 2026-11-21 to cover both modes.
-Not approved, not scheduled. inbuxa-server #484 (After 27.1), discussed on
-the forum (t/340). It builds on `features/relay.md` and doesn't change any
-of that spec's rules.
+Not approved, not scheduled. inbuxa-server #484 (milestone 27.7),
+discussed on the forum (t/340). It builds on `features/relay.md` and
+doesn't change any of that spec's rules.
 
 ## Provenance
 
@@ -570,5 +570,5 @@ For John. A recommended answer is given for each.
     domains whose DNS the server manages, with the inside-network note.
 12. **The docs recipe first?** Recommended: yes, for pass-through only, and
     decide on building after seeing who uses it.
-13. **Milestone.** Recommended: stays in After 27.1, unscheduled until 12
+13. **Milestone.** Recommended: stays in 27.7, unscheduled until 12
     has an answer.
