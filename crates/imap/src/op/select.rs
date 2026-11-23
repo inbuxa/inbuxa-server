@@ -24,17 +24,33 @@ use types::{acl::Acl, id::Id};
 
 impl<T: SessionStream> Session<T> {
     pub async fn handle_select(&mut self, request: Request<Command>) -> trc::Result<()> {
+        let op_start = Instant::now();
+        let is_select = request.command == Command::Select;
+        let command = request.command;
+        let arguments = request.parse_select(self.is_utf8)?;
+
+        // inbuxa: the selected mailbox is closed before anything that can
+        // fail, so a SELECT or EXAMINE that fails leaves none selected
+        // (RFC 9051 6.3.2, RFC 3501 6.3.1)
+        if self.state.close_mailbox() {
+            self.state = State::Authenticated {
+                data: self.state.session_data(),
+            };
+            self.write_bytes(
+                StatusResponse::ok("Closed previous mailbox")
+                    .with_code(ResponseCode::Closed)
+                    .into_bytes(),
+            )
+            .await?;
+        }
+
         // Validate access
-        self.assert_has_permission(if request.command == Command::Select {
+        self.assert_has_permission(if is_select {
             Permission::ImapSelect
         } else {
             Permission::ImapExamine
         })?;
 
-        let op_start = Instant::now();
-        let is_select = request.command == Command::Select;
-        let command = request.command;
-        let arguments = request.parse_select(self.is_utf8)?;
         let data = self.state.session_data();
 
         // Activate OBJECTID+ when the OBJECTID parameter is supplied
@@ -93,8 +109,6 @@ impl<T: SessionStream> Session<T> {
                 .imap_ctx(&arguments.tag, trc::location!())?
                 .unwrap();
 
-            // Synchronize messages
-            let closed_previous = self.state.close_mailbox();
             let is_condstore = self.is_condstore || arguments.condstore;
 
             // Build new state
@@ -184,7 +198,7 @@ impl<T: SessionStream> Session<T> {
                 unseen_seq: 0,
                 uid_validity: mailbox_state.uid_validity as u32,
                 uid_next: mailbox_state.uid_next as u32,
-                closed_previous,
+                closed_previous: false,
                 is_rev2,
                 is_utf8,
                 highest_modseq,

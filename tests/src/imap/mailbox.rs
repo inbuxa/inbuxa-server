@@ -488,3 +488,51 @@ fn mailbox_matches_pattern() {
         assert_eq!(matched_mailboxes, expected_match, "for pattern {}", pattern);
     }
 }
+
+// inbuxa: SELECT and EXAMINE close the selected mailbox before they can
+// fail, so after a failed one no mailbox is selected (RFC 9051 6.3.2) and a
+// CLOSE meant for nothing can't expunge the old mailbox.
+pub async fn test_failed_select(imap: &mut ImapConnection) {
+    println!("Running failed SELECT tests...");
+
+    imap.send_ok("CREATE Gruyere").await;
+    imap.append(
+        "Gruyere",
+        "From: test@domain.com\nSubject: Kept\n\nTest message\n",
+    )
+    .await;
+
+    // A mailbox that does not exist
+    imap.send_ok("SELECT Gruyere").await;
+    imap.send_ok("STORE 1 +FLAGS (\\Deleted)").await;
+    imap.send("SELECT \"Gruyere Missing\"").await;
+    imap.assert_read(Type::Tagged, ResponseType::No)
+        .await
+        .assert_contains("* OK [CLOSED]")
+        .assert_response_code("NONEXISTENT");
+    imap.send("CLOSE").await;
+    imap.assert_read(Type::Tagged, ResponseType::Bad).await;
+    imap.send("STATUS Gruyere (MESSAGES)").await;
+    imap.assert_read(Type::Tagged, ResponseType::Ok)
+        .await
+        .assert_contains("MESSAGES 1");
+
+    // QRESYNC arguments without ENABLE QRESYNC
+    imap.send_ok("EXAMINE Gruyere").await;
+    imap.send("EXAMINE Gruyere (QRESYNC (1 1))").await;
+    imap.assert_read(Type::Tagged, ResponseType::No)
+        .await
+        .assert_contains("* OK [CLOSED]");
+    imap.send("FETCH 1 (FLAGS)").await;
+    imap.assert_read(Type::Tagged, ResponseType::Bad).await;
+
+    // A SELECT that works reports CLOSED once
+    imap.send_ok("SELECT Gruyere").await;
+    imap.send("SELECT INBOX").await;
+    imap.assert_read(Type::Tagged, ResponseType::Ok)
+        .await
+        .assert_count("[CLOSED]", 1);
+    imap.send_ok("UNSELECT").await;
+
+    imap.send_ok("DELETE Gruyere").await;
+}
