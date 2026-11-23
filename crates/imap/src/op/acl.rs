@@ -19,8 +19,11 @@ use compact_str::ToCompactString;
 use email::known_accounts::KnownAccounts;
 use imap_proto::{
     Command, ResponseCode, StatusResponse,
-    protocol::acl::{
-        Arguments, GetAclResponse, ListRightsResponse, ModRightsOp, MyRightsResponse, Rights,
+    protocol::{
+        SerializeResponse,
+        acl::{
+            Arguments, GetAclResponse, ListRightsResponse, ModRightsOp, MyRightsResponse, Rights,
+        },
     },
     receiver::Request,
 };
@@ -529,14 +532,38 @@ impl<T: SessionStream> Session<T> {
         .await
     }
 
+    // inbuxa: a command the account may not use is refused with NO [NOPERM]
+    // and the session goes on (RFC 9051 7.1). The denial is wrapped in an
+    // IMAP error, since a security event is neither written nor survived by
+    // the session; the command loop gives it the command's tag.
     pub fn assert_has_permission(&self, permission: Permission) -> trc::Result<bool> {
         match &self.state {
             State::Authenticated { data } | State::Selected { data, .. } => data
                 .access_token
                 .enforce_permission(permission)
-                .map(|_| true),
+                .map(|_| true)
+                .map_err(|err| {
+                    err.wrap(trc::EventType::Imap(trc::ImapEvent::Error))
+                        .details("You do not have permission to use this command.")
+                        .code(ResponseCode::NoPerm)
+                }),
             State::NotAuthenticated { .. } => Ok(false),
         }
+    }
+
+    // inbuxa: refuses every command of a batch (FETCH, STATUS, CREATE or
+    // DELETE commands run together), each with its own tag
+    pub async fn refuse_each(
+        &self,
+        requests: &[Request<Command>],
+        err: trc::Error,
+    ) -> trc::Result<()> {
+        for request in requests {
+            self.write_bytes(err.clone().id(request.tag.clone()).serialize())
+                .await?;
+        }
+        trc::error!(err.span_id(self.session_id));
+        Ok(())
     }
 }
 

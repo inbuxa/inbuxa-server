@@ -288,6 +288,7 @@ pub async fn imap_tests() {
 
     // UIDONLY cannot be disabled once enabled, so it uses its own connection
     uidonly::test(&test).await;
+    acl::test_permissions(&test).await;
 
     // Logout
     for imap in [&mut imap, &mut imap_check] {

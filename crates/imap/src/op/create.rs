@@ -27,7 +27,9 @@ use types::{acl::Acl, collection::Collection, id::Id, special_use::SpecialUse};
 impl<T: SessionStream> Session<T> {
     pub async fn handle_create(&mut self, requests: Vec<Request<Command>>) -> trc::Result<()> {
         // Validate access
-        self.assert_has_permission(Permission::ImapCreate)?;
+        if let Err(err) = self.assert_has_permission(Permission::ImapCreate) {
+            return self.refuse_each(&requests, err).await;
+        }
         let permit = self.op_gate.acquire(OpKind::Write).await;
 
         let data = self.state.session_data();

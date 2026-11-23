@@ -57,7 +57,9 @@ use utils::chained_bytes::{ChainedBytes, SliceRange};
 impl<T: SessionStream> Session<T> {
     pub async fn handle_fetch(&mut self, requests: Vec<Request<Command>>) -> trc::Result<()> {
         // Validate access
-        self.assert_has_permission(Permission::ImapFetch)?;
+        if let Err(err) = self.assert_has_permission(Permission::ImapFetch) {
+            return self.refuse_each(&requests, err).await;
+        }
 
         let (data, mailbox) = self.state.select_data();
         let is_qresync = self.is_qresync;
