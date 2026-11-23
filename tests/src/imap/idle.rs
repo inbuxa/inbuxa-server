@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::utils::smtp::SmtpConnection;
@@ -197,4 +199,63 @@ pub async fn test(
 
     imap_check.send("NOOP").await;
     imap_check.assert_read(Type::Tagged, ResponseType::Ok).await;
+}
+
+// inbuxa: a message that arrives between two commands is announced with
+// EXISTS before the data of the next FETCH or STORE, and changes that were
+// found but not reported yet are sent as soon as IDLE starts.
+pub async fn test_pending_changes(imap: &mut ImapConnection, imap_check: &mut ImapConnection) {
+    println!("Running pending change tests...");
+
+    let message = "From: test@domain.com\nSubject: Pending\n\nTest message\n";
+    imap.send_ok("CREATE Fontina").await;
+    imap.send_ok("SELECT Fontina").await;
+    imap_check.send_ok("SELECT Fontina").await;
+
+    // FETCH announces the new message before its data
+    imap.append("Fontina", message).await;
+    imap_check.send("UID FETCH 1:* (FLAGS)").await;
+    let lines = imap_check.assert_read(Type::Tagged, ResponseType::Ok).await;
+    let exists = lines.iter().position(|line| line == "* 1 EXISTS");
+    let fetch = lines.iter().position(|line| line.starts_with("* 1 FETCH"));
+    assert!(
+        matches!((exists, fetch), (Some(exists), Some(fetch)) if exists < fetch),
+        "expected * 1 EXISTS before the FETCH data: {lines:?}"
+    );
+
+    // STORE announces it before the tagged reply
+    imap.append("Fontina", message).await;
+    imap_check.send("STORE 1 +FLAGS (\\Flagged)").await;
+    imap_check
+        .assert_read(Type::Tagged, ResponseType::Ok)
+        .await
+        .assert_contains("* 2 EXISTS");
+
+    // With an expunge pending, FETCH reports nothing and IDLE sends both
+    imap.send_ok("UID STORE 1 +FLAGS (\\Deleted)").await;
+    imap.send_ok("UID EXPUNGE 1").await;
+    imap.append("Fontina", message).await;
+    imap_check.send("UID FETCH 1:* (FLAGS)").await;
+    imap_check
+        .assert_read(Type::Tagged, ResponseType::Ok)
+        .await
+        .assert_not_contains("EXPUNGE");
+    imap_check.send("IDLE").await;
+    imap_check
+        .assert_read(Type::Continuation, ResponseType::Ok)
+        .await;
+    imap_check
+        .assert_read(Type::Status, ResponseType::Ok)
+        .await
+        .assert_contains("* 1 EXPUNGE");
+    imap_check
+        .assert_read(Type::Status, ResponseType::Ok)
+        .await
+        .assert_contains("* 2 EXISTS");
+    imap_check.send_raw("DONE").await;
+    imap_check.assert_read(Type::Tagged, ResponseType::Ok).await;
+
+    imap_check.send_ok("UNSELECT").await;
+    imap.send_ok("UNSELECT").await;
+    imap.send_ok("DELETE Fontina").await;
 }

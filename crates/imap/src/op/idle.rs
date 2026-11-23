@@ -62,6 +62,21 @@ impl<T: SessionStream> Session<T> {
         self.write_bytes(b"+ Idling, send 'DONE' to stop.\r\n".to_vec())
             .await?;
 
+        // inbuxa: changes found before IDLE started and not reported yet
+        // are sent now rather than after the next change
+        if mailbox.is_some() {
+            data.write_changes(
+                &mailbox,
+                false,
+                true,
+                use_vanished,
+                is_uidonly,
+                is_rev2,
+                is_utf8,
+            )
+            .await?;
+        }
+
         trc::event!(
             Imap(trc::ImapEvent::IdleStart),
             SpanId = self.session_id,

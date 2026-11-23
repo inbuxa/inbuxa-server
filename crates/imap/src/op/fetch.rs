@@ -114,6 +114,15 @@ impl<T: SessionStream> Session<T> {
             for op in ops {
                 match op {
                     Ok((is_uid, enabled_condstore, arguments)) => {
+                        // inbuxa: new messages are announced before their data
+                        if let Err(err) = data
+                            .announce_new_messages(&mailbox)
+                            .await
+                            .imap_ctx(&arguments.tag, trc::location!())
+                        {
+                            data.write_error(err).await?;
+                            continue;
+                        }
                         match data
                             .fetch(
                                 arguments,
