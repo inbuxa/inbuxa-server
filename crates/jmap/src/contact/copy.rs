@@ -158,8 +158,8 @@ impl JmapContactCardCopy for Server {
                 )
                 .await?
             {
-                Ok(document_id) => {
-                    response.created(id, document_id);
+                Ok(card) => {
+                    response.created.append(id, card.into_created());
 
                     // Add to destroy list
                     if on_success_delete {

@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: Apache-2.0 OR MIT
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
@@ -903,20 +905,63 @@ impl VCard {
                     }
                 }
                 VCardProperty::Socialprofile => {
-                    state.map_named_entry(
-                        &mut entry,
-                        &[
-                            VCardParameterName::Type,
-                            VCardParameterName::Pref,
-                            VCardParameterName::PropId,
-                            VCardParameterName::Label,
-                            VCardParameterName::ServiceType,
-                            VCardParameterName::Username,
-                        ],
-                        JSContactProperty::OnlineServices,
-                        JSContactProperty::Uri,
-                        [],
-                    );
+                    // A TEXT value is the user name (RFC 9555, Section 2.7.5). An empty value
+                    // with a USERNAME parameter is how a user-only online service used to be
+                    // written, so its user name is read back as well.
+                    let is_user_name = if entry.entry.is_type(&VCardValueType::Text) {
+                        entry
+                            .entry
+                            .params
+                            .retain(|param| param.name != VCardParameterName::Value);
+                        true
+                    } else if entry
+                        .entry
+                        .values
+                        .iter()
+                        .all(|value| matches!(value, VCardValue::Text(text) if text.is_empty()))
+                        && let Some(pos) = entry
+                            .entry
+                            .params
+                            .iter()
+                            .position(|param| param.name == VCardParameterName::Username)
+                    {
+                        let user_name = entry.entry.params.remove(pos).value.into_text();
+                        entry.entry.values = vec![VCardValue::Text(user_name.into_owned())];
+                        true
+                    } else {
+                        false
+                    };
+
+                    if is_user_name {
+                        state.map_named_entry(
+                            &mut entry,
+                            &[
+                                VCardParameterName::Type,
+                                VCardParameterName::Pref,
+                                VCardParameterName::PropId,
+                                VCardParameterName::Label,
+                                VCardParameterName::ServiceType,
+                            ],
+                            JSContactProperty::OnlineServices,
+                            JSContactProperty::User,
+                            [],
+                        );
+                    } else {
+                        state.map_named_entry(
+                            &mut entry,
+                            &[
+                                VCardParameterName::Type,
+                                VCardParameterName::Pref,
+                                VCardParameterName::PropId,
+                                VCardParameterName::Label,
+                                VCardParameterName::ServiceType,
+                                VCardParameterName::Username,
+                            ],
+                            JSContactProperty::OnlineServices,
+                            JSContactProperty::Uri,
+                            [],
+                        );
+                    }
                 }
                 VCardProperty::Tel => {
                     state.map_named_entry(

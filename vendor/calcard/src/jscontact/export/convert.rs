@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: Apache-2.0 OR MIT
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
@@ -1409,6 +1411,7 @@ where
                     JSContactProperty::OnlineServices => {
                         for (name, value) in value.into_expanded_object() {
                             let mut entry = VCardEntry::new(VCardProperty::Socialprofile);
+                            let mut user_name = None;
 
                             for (sub_property, value) in value.into_expanded_object() {
                                 match sub_property {
@@ -1427,9 +1430,7 @@ where
                                     }
                                     Key::Property(JSContactProperty::User) => {
                                         if let Some(username) = value.into_string() {
-                                            entry.add_param(VCardParameter::username(
-                                                username.into_owned(),
-                                            ));
+                                            user_name = Some(username.into_owned());
                                         }
                                     }
                                     Key::Property(JSContactProperty::Contexts) => {
@@ -1461,6 +1462,17 @@ where
                                             value,
                                         );
                                     }
+                                }
+                            }
+
+                            // Without a URI, the user name is the value, as TEXT (RFC 9555,
+                            // Section 2.7.5); a USERNAME parameter on an empty value was lost.
+                            if let Some(user_name) = user_name {
+                                if entry.values.is_empty() {
+                                    entry.values = vec![VCardValue::Text(user_name)];
+                                    entry.add_param(VCardParameter::value(VCardValueType::Text));
+                                } else {
+                                    entry.add_param(VCardParameter::username(user_name));
                                 }
                             }
 

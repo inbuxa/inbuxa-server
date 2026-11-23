@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::utils::{
@@ -380,8 +382,9 @@ pub async fn test(test: &TestServer) {
             .collect::<AHashSet<_>>()
     );
 
-    // Parse tests
-    account
+    // Parse tests: every vCard in a blob comes back, in order, and a blob with no
+    // vCard in it is not parsable
+    let response = account
         .jmap_method_calls(json!([
          [
           "Blob/upload",
@@ -396,12 +399,28 @@ VERSION:4.0
 KIND:individual
 FN:Jane Doe
 ORG:ABC\, Inc.;North American Division;Marketing
-END:VCARD"#
+END:VCARD
+BEGIN:VCARD
+VERSION:4.0
+FN:John Roe
+END:VCARD
+BEGIN:VCARD
+VERSION:4.0
+FN:Mary Major
+END:VCARD
+"#
               }
             ]
+           },
+            "junk": {
+             "data": [
+              {
+               "data:asText": "This is not a vCard.\r\n"
+              }
+             ]
+            }
            }
-          }
-         },
+          },
          "S4"
         ],
         [
@@ -409,52 +428,74 @@ END:VCARD"#
           {
            "accountId": account.id_string(),
            "blobIds": [
-             "#vcard"
+             "#vcard",
+             "#junk"
            ]
           },
           "G4"
          ]
         ]))
-        .await
+        .await;
+    let parsed = response
         .pointer("/methodResponses/1/1/parsed")
         .unwrap()
         .as_object()
-        .unwrap()
-        .iter()
-        .next()
-        .unwrap()
-        .1
-        .assert_is_equal(json!({
-          "name": {
-            "full": "Jane Doe"
-          },
-          "version": "1.0",
-          "vCard": {
-            "properties": [
-              [
-                "version",
-                {},
-                "unknown",
-                "4.0"
-              ]
-            ]
-          },
-          "organizations": {
-            "k1": {
-              "name": "ABC, Inc.",
-              "units": [
-                {
-                  "name": "North American Division"
-                },
-                {
-                  "name": "Marketing"
-                }
-              ]
+        .unwrap();
+    assert_eq!(parsed.len(), 1, "{response}");
+    let cards = parsed.values().next().unwrap().as_array().unwrap();
+    assert_eq!(cards.len(), 3, "{response}");
+    cards[0].assert_is_equal(json!({
+      "name": {
+        "full": "Jane Doe"
+      },
+      "version": "1.0",
+      "vCard": {
+        "properties": [
+          [
+            "version",
+            {},
+            "unknown",
+            "4.0"
+          ]
+        ]
+      },
+      "organizations": {
+        "k1": {
+          "name": "ABC, Inc.",
+          "units": [
+            {
+              "name": "North American Division"
+            },
+            {
+              "name": "Marketing"
             }
-          },
-          "@type": "Card",
-          "kind": "individual"
-        }));
+          ]
+        }
+      },
+      "@type": "Card",
+      "kind": "individual"
+    }));
+    assert_eq!(
+        cards
+            .iter()
+            .map(|card| card.pointer("/name/full").and_then(|v| v.as_str()))
+            .collect::<Vec<_>>(),
+        [Some("Jane Doe"), Some("John Roe"), Some("Mary Major")],
+        "{response}"
+    );
+    assert_eq!(
+        response
+            .pointer("/methodResponses/1/1/notParsable")
+            .and_then(|v| v.as_array())
+            .map(|v| v.len()),
+        Some(1),
+        "{response}"
+    );
+    assert_eq!(
+        response.pointer("/methodResponses/1/1/notParsable/0"),
+        response.pointer("/methodResponses/0/1/created/junk/id"),
+        "{response}"
+    );
 
     // Deletion tests
     test.wait_for_tasks().await;
@@ -608,6 +649,139 @@ END:VCARD"#
         .into_propfind_response(None)
         .properties(&href_in_book2)
         .with_status(StatusCode::NOT_FOUND);
+
+    // A card created without a uid, or with a null one, gets a urn:uuid uid: it comes
+    // back in created, on a get and as the UID of its vCard
+    let response = account
+        .jmap_create(
+            MethodObject::ContactCard,
+            [
+                json!({
+                    "name": {
+                        "full": "Contact Without Uid",
+                    },
+                    "addressBookIds": {
+                        &book1_id: true
+                    },
+                }),
+                json!({
+                    "uid": null,
+                    "name": {
+                        "full": "Contact With Null Uid",
+                    },
+                    "addressBookIds": {
+                        &book1_id: true
+                    },
+                }),
+            ],
+            Vec::<(&str, &str)>::new(),
+        )
+        .await;
+    let resources = test
+        .server
+        .fetch_dav_resources(account_id, account_id, SyncCollection::AddressBook)
+        .await
+        .unwrap();
+    let mut uids = AHashSet::new();
+    for idx in 0..2 {
+        let created = response.created(idx);
+        let uid = created
+            .get("uid")
+            .and_then(|uid| uid.as_str())
+            .unwrap_or_else(|| panic!("No uid in created: {response}"))
+            .to_string();
+        assert!(
+            uid.strip_prefix("urn:uuid:")
+                .is_some_and(|uuid| uuid.len() == 36 && uuid.as_bytes()[14] == b'4'),
+            "{uid}"
+        );
+        assert!(uids.insert(uid.clone()), "{response}");
+        let card_id = created.id().to_string();
+        assert_eq!(
+            account
+                .jmap_get(MethodObject::ContactCard, ["uid"], [&card_id])
+                .await
+                .list()[0]
+                .get("uid")
+                .and_then(|uid| uid.as_str()),
+            Some(uid.as_str())
+        );
+        let path = resources
+            .format_resource_paths_by_id(Id::from_str(&card_id).unwrap().document_id())
+            .next()
+            .unwrap();
+        let vcard = dav_client
+            .request("GET", &path, "")
+            .await
+            .with_status(StatusCode::OK)
+            .expect_body()
+            .to_string();
+        assert!(
+            vcard.lines().any(|line| line == format!("UID:{uid}")),
+            "{vcard}"
+        );
+    }
+
+    // An online service with a user name and no URI survives a save and a fetch, and
+    // its vCard carries the user name as a TEXT value
+    let online_services = json!({
+        "os1": {
+            "service": "Mastodon",
+            "user": "jdoe"
+        },
+        "os2": {
+            "service": "Mastodon",
+            "uri": "https://example.com/@jdoe",
+            "user": "jdoe"
+        }
+    });
+    let card_id = account
+        .jmap_create(
+            MethodObject::ContactCard,
+            [json!({
+                "uid": "urn:uuid:3d6f0a52-8c1e-4b7a-9f2d-6e5c4b3a2910",
+                "name": {
+                    "full": "Online Contact",
+                },
+                "onlineServices": &online_services,
+                "addressBookIds": {
+                    &book1_id: true
+                },
+            })],
+            Vec::<(&str, &str)>::new(),
+        )
+        .await
+        .created(0)
+        .id()
+        .to_string();
+    let response = account
+        .jmap_get(MethodObject::ContactCard, ["onlineServices"], [&card_id])
+        .await;
+    assert_eq!(
+        response.list()[0].get("onlineServices"),
+        Some(&online_services),
+        "{response}"
+    );
+    let path = test
+        .server
+        .fetch_dav_resources(account_id, account_id, SyncCollection::AddressBook)
+        .await
+        .unwrap()
+        .format_resource_paths_by_id(Id::from_str(&card_id).unwrap().document_id())
+        .next()
+        .unwrap();
+    let vcard = dav_client
+        .request("GET", &path, "")
+        .await
+        .with_status(StatusCode::OK)
+        .expect_body()
+        .to_string();
+    assert!(
+        vcard.lines().any(|line| line.starts_with("SOCIALPROFILE;")
+            && line.contains("VALUE=TEXT")
+            && line.ends_with(":jdoe")),
+        "{vcard}"
+    );
 
     // Clean up
     test.wait_for_tasks().await;
