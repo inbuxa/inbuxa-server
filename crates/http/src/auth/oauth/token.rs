@@ -10,7 +10,7 @@ use super::{
     ArchivedOAuthStatus, ArchivedPkceCodeChallenge, ErrorType, FormData, MAX_POST_LEN, OAuthCode,
     OAuthResponse, OAuthStatus, TokenResponse, registration::ClientRegistrationHandler,
 };
-use crate::auth::authenticate::HttpHeaders;
+use crate::auth::{authenticate::HttpHeaders, passkey::claim_once};
 use base64::{
     Engine,
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
@@ -121,6 +121,17 @@ impl TokenHandler for Server {
                                 .await?
                             {
                                 TokenResponse::error(error)
+                            } else if !claim_once(
+                                // inbuxa: a code is good once, even sent twice at once:
+                                // only the first request to claim it gets tokens
+                                self.in_memory_store(),
+                                &KeyValue::<()>::build_key(KV_OAUTH, code.as_bytes()),
+                                "",
+                                self.core.oauth.oauth_expiry_auth_code,
+                            )
+                            .await?
+                            {
+                                TokenResponse::error(ErrorType::InvalidGrant)
                             } else {
                                 // Mark this token as issued
                                 self.in_memory_store()
@@ -197,6 +208,20 @@ impl TokenHandler for Server {
                                     .await?
                                 {
                                     TokenResponse::error(error)
+                                } else if !claim_once(
+                                    // inbuxa: as for an authorization code, only the
+                                    // first request to claim the device code gets tokens
+                                    self.in_memory_store(),
+                                    &KeyValue::<()>::build_key(
+                                        KV_OAUTH_DEVICE,
+                                        device_code.as_bytes(),
+                                    ),
+                                    "",
+                                    self.core.oauth.oauth_expiry_user_code,
+                                )
+                                .await?
+                                {
+                                    TokenResponse::error(ErrorType::ExpiredToken)
                                 } else {
                                     // Mark this token as issued
                                     self.in_memory_store()

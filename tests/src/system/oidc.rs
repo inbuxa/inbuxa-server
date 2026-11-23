@@ -1068,7 +1068,8 @@ pub async fn test(test: &mut TestServer) {
 
     // ------------------------
     // inbuxa: a confidential client authenticates for the device grant too,
-    // at both endpoints (RFC 8628 3.1 and 3.4)
+    // at both endpoints (RFC 8628 3.1 and 3.4), and a code is good once even
+    // when sent several times at once
     // ------------------------
 
     // These requests come on top of the rest of the OIDC tests', past the
@@ -1153,8 +1154,23 @@ pub async fn test(test: &mut TestServer) {
         "a device code redeemed with a wrong secret"
     );
 
+    // The right secret, sent four times at once: one set of tokens
     redeem.insert("client_secret".to_string(), confidential_secret.to_string());
-    unwrap_token_response(post(&metadata.token_endpoint, &redeem).await);
+    let granted = redeem_at_once(&metadata.token_endpoint, &redeem, 4).await;
+    assert_eq!(granted, 1, "one device code granted tokens {granted} times");
+
+    // An authorization code sent four times at once: one set of tokens
+    let mut params = base_params();
+    params.insert(
+        "code".to_string(),
+        obtain_auth_code(&http, &confidential_id, confidential_redirect).await,
+    );
+    params.insert("client_secret".to_string(), confidential_secret.to_string());
+    let granted = redeem_at_once(&metadata.token_endpoint, &params, 4).await;
+    assert_eq!(
+        granted, 1,
+        "one authorization code granted tokens {granted} times"
+    );
 
     set_anonymous_rate(&admin, 100, 60_000).await;
 
@@ -1517,6 +1533,30 @@ async fn post_form_basic_status(
         .unwrap()
         .status()
         .as_u16()
+}
+
+/// inbuxa: sends the same token request `times` times at once and counts the
+/// grants. A longer timeout than the other helpers: each request checks the
+/// client's secret hash, and they all do it together.
+async fn redeem_at_once(url: &str, params: &AHashMap<String, String>, times: usize) -> usize {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .danger_accept_invalid_certs(true)
+        .build()
+        .unwrap();
+    futures::future::join_all((0..times).map(|_| {
+        let request = client.post(url).form(params);
+        async move {
+            serde_json::from_slice::<TokenResponse>(
+                &request.send().await.unwrap().bytes().await.unwrap(),
+            )
+            .unwrap()
+        }
+    }))
+    .await
+    .into_iter()
+    .filter(|response| matches!(response, TokenResponse::Granted(_)))
+    .count()
 }
 
 async fn post_login_raw(body: &impl Serialize) -> (u16, serde_json::Value) {
