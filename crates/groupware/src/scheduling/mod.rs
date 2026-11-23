@@ -537,4 +537,53 @@ END:VCALENDAR
             Some("mailto:observer")
         );
     }
+
+    // An attendee who accepted the series still hears about a new exception to it;
+    // one who declined does not.
+    #[test]
+    fn new_exception_reaches_attendees_who_replied() {
+        let account = account();
+        let series = "BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Test//EN
+BEGIN:VEVENT
+UID:exception@example.com
+DTSTAMP:20260101T000000Z
+SEQUENCE:0
+DTSTART:20300101T100000Z
+DURATION:PT1H
+RRULE:FREQ=DAILY;COUNT=5
+SUMMARY:Standup
+ORGANIZER:mailto:organizer@example.com
+ATTENDEE;PARTSTAT=ACCEPTED:mailto:accepted@example.com
+ATTENDEE;PARTSTAT=DECLINED:mailto:declined@example.com
+END:VEVENT
+";
+        let old_ical = parse(&format!("{series}END:VCALENDAR\n"));
+        let mut new_ical = parse(&format!(
+            "{series}BEGIN:VEVENT
+UID:exception@example.com
+DTSTAMP:20260101T000000Z
+SEQUENCE:0
+RECURRENCE-ID:20300102T100000Z
+DTSTART:20300102T140000Z
+DURATION:PT1H
+SUMMARY:Standup
+ORGANIZER:mailto:organizer@example.com
+ATTENDEE;PARTSTAT=ACCEPTED:mailto:accepted@example.com
+ATTENDEE;PARTSTAT=DECLINED:mailto:declined@example.com
+END:VEVENT
+END:VCALENDAR
+"
+        ));
+
+        let messages = itip_update(&mut new_ical, &old_ical, &account).expect("Update expected");
+        assert_eq!(recipients(&messages), ["accepted@example.com"]);
+        let message = messages[0].message.to_string();
+        assert!(
+            message.contains("METHOD:REQUEST")
+                && message.contains("RECURRENCE-ID:20300102T100000Z"),
+            "{message}"
+        );
+    }
 }
