@@ -228,12 +228,12 @@ impl EmailImport for Server {
             }
         }
 
-        // Update state
+        // Update state. inbuxa: no EmailDelivery, which is for mail that
+        // arrives, not mail a client adds (RFC 8621, section 1.5).
         if let Some(change_id) = last_change_id {
             self.broadcast_push_notification(PushNotification::StateChange(
                 StateChange::new(account_id)
                     .with_change_id(change_id)
-                    .with_change(DataType::EmailDelivery)
                     .with_change(DataType::Email)
                     .with_change(DataType::Mailbox)
                     .with_change(DataType::Thread),

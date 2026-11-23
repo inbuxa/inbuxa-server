@@ -2,12 +2,16 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use email::mailbox::INBOX_ID;
 use futures::StreamExt;
 use jmap_client::{
     DataType,
+    core::set::SetObject,
+    email::EmailBodyPart,
     event_source::{Changes, PushNotification},
     mailbox::Role,
 };
@@ -24,6 +28,29 @@ pub async fn test(test: &TestServer) {
     // Create test account
     let account = test.account("jdoe@example.com");
     let client = account.jmap_client().await;
+
+    // inbuxa: an email in another account, for the Email/copy check below
+    let jane = test.account("jane.smith@example.com");
+    let mut admin_client = test.account("admin@example.com").jmap_client().await;
+    let jane_email_id = admin_client
+        .set_default_account_id(jane.id_string())
+        .email_import(
+            concat!(
+                "From: jane.smith@example.com\r\n",
+                "To: jdoe@example.com\r\n",
+                "Subject: TPS Report (copied)\r\n",
+                "\r\n",
+                "Here is my copy."
+            )
+            .as_bytes()
+            .to_vec(),
+            [Id::from(INBOX_ID).to_string()],
+            None::<Vec<&str>>,
+            None,
+        )
+        .await
+        .unwrap()
+        .take_id();
 
     let mut changes = client
         .event_source(None::<Vec<_>>, false, 1.into(), None)
@@ -97,7 +124,9 @@ pub async fn test(test: &TestServer) {
     .await;
     assert_ping(&mut event_rx).await;
 
-    // Import email and expect EmailDelivery state change
+    // inbuxa: mail a client adds is not a delivery, so an import, a draft
+    // saved with Email/set and an Email/copy change Email, Thread and
+    // Mailbox but not EmailDelivery (RFC 8621, section 1.5)
     client
         .email_import(
             concat!(
@@ -118,15 +147,59 @@ pub async fn test(test: &TestServer) {
     assert_state(
         &mut event_rx,
         account.id_string(),
-        &[
-            DataType::EmailDelivery,
-            DataType::Email,
-            DataType::Thread,
-            DataType::Mailbox,
-        ],
+        &[DataType::Email, DataType::Thread, DataType::Mailbox],
     )
     .await;
     assert_ping(&mut event_rx).await;
+
+    let mut request = client.build();
+    let create_id = request
+        .set_email()
+        .create()
+        .mailbox_ids([Id::from(INBOX_ID).to_string()])
+        .keywords(["$draft"])
+        .from(["jdoe@example.com"])
+        .to(["bill@example.com"])
+        .subject("Re: TPS Report (draft)")
+        .body_value("t".to_string(), "Working on it.")
+        .text_body(EmailBodyPart::new().part_id("t"))
+        .create_id()
+        .unwrap();
+    request
+        .send_set_email()
+        .await
+        .unwrap()
+        .created(&create_id)
+        .unwrap();
+    assert_state(
+        &mut event_rx,
+        account.id_string(),
+        &[DataType::Email, DataType::Thread, DataType::Mailbox],
+    )
+    .await;
+    assert_ping(&mut event_rx).await;
+
+    admin_client
+        .set_default_account_id(account.id_string())
+        .email_copy(
+            jane.id_string(),
+            &jane_email_id,
+            [Id::from(INBOX_ID).to_string()],
+            None::<Vec<&str>>,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_state(
+        &mut event_rx,
+        account.id_string(),
+        &[DataType::Email, DataType::Thread, DataType::Mailbox],
+    )
+    .await;
+    assert_ping(&mut event_rx).await;
+    test.account("admin@example.com")
+        .destroy_all_mailboxes_for_account(jane.id().document_id())
+        .await;
 
     // Destroy mailbox
     client.mailbox_destroy(&mailbox_id, true).await.unwrap();
