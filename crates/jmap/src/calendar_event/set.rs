@@ -756,7 +756,7 @@ impl CalendarEventSet for Server {
 
         // Generate a UID when the client omitted one
         if ical.uids().next().is_none() {
-            let uid = generate_uid();
+            let uid = generate_uuid();
             for component in &mut ical.components {
                 if component.component_type.is_event_or_todo() {
                     component.add_uid(&uid);
@@ -1781,7 +1781,7 @@ fn default_alert_to_ical(alert: &ArchivedDefaultAlert) -> ICalendarComponent {
     }
 }
 
-fn generate_uid() -> String {
+pub(crate) fn generate_uuid() -> String {
     let mut bytes = rand::random::<[u8; 16]>();
     bytes[6] = (bytes[6] & 0x0f) | 0x40;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;

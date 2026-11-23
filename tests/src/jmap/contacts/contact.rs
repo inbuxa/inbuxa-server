@@ -650,6 +650,78 @@ END:VCARD
         .properties(&href_in_book2)
         .with_status(StatusCode::NOT_FOUND);
 
+    // A card created without a uid, or with a null one, gets a urn:uuid uid: it comes
+    // back in created, on a get and as the UID of its vCard
+    let response = account
+        .jmap_create(
+            MethodObject::ContactCard,
+            [
+                json!({
+                    "name": {
+                        "full": "Contact Without Uid",
+                    },
+                    "addressBookIds": {
+                        &book1_id: true
+                    },
+                }),
+                json!({
+                    "uid": null,
+                    "name": {
+                        "full": "Contact With Null Uid",
+                    },
+                    "addressBookIds": {
+                        &book1_id: true
+                    },
+                }),
+            ],
+            Vec::<(&str, &str)>::new(),
+        )
+        .await;
+    let resources = test
+        .server
+        .fetch_dav_resources(account_id, account_id, SyncCollection::AddressBook)
+        .await
+        .unwrap();
+    let mut uids = AHashSet::new();
+    for idx in 0..2 {
+        let created = response.created(idx);
+        let uid = created
+            .get("uid")
+            .and_then(|uid| uid.as_str())
+            .unwrap_or_else(|| panic!("No uid in created: {response}"))
+            .to_string();
+        assert!(
+            uid.strip_prefix("urn:uuid:")
+                .is_some_and(|uuid| uuid.len() == 36 && uuid.as_bytes()[14] == b'4'),
+            "{uid}"
+        );
+        assert!(uids.insert(uid.clone()), "{response}");
+        let card_id = created.id().to_string();
+        assert_eq!(
+            account
+                .jmap_get(MethodObject::ContactCard, ["uid"], [&card_id])
+                .await
+                .list()[0]
+                .get("uid")
+                .and_then(|uid| uid.as_str()),
+            Some(uid.as_str())
+        );
+        let path = resources
+            .format_resource_paths_by_id(Id::from_str(&card_id).unwrap().document_id())
+            .next()
+            .unwrap();
+        let vcard = dav_client
+            .request("GET", &path, "")
+            .await
+            .with_status(StatusCode::OK)
+            .expect_body()
+            .to_string();
+        assert!(
+            vcard.lines().any(|line| line == format!("UID:{uid}")),
+            "{vcard}"
+        );
+    }
+
     // An online service with a user name and no URI survives a save and a fetch, and
     // its vCard carries the user name as a TEXT value
     let online_services = json!({

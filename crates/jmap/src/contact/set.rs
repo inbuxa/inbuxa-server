@@ -6,6 +6,7 @@
  * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
+use crate::calendar_event::set::generate_uuid;
 use crate::changes::state::JmapCacheState;
 use crate::contact::assert_is_unique_uid;
 use calcard::jscontact::{JSContact, JSContactProperty, JSContactValue};
@@ -19,7 +20,7 @@ use jmap_proto::{
     request::MaybeInvalid,
     types::state::State,
 };
-use jmap_tools::{JsonPointerHandler, JsonPointerItem, Key, Value};
+use jmap_tools::{JsonPointerHandler, JsonPointerItem, Key, Map, Value};
 use store::{
     ValueKey,
     ahash::AHashSet,
@@ -53,7 +54,32 @@ pub trait ContactCardSet: Sync + Send {
         can_add_address_books: &Option<RoaringBitmap>,
         js_contact: JSContact<'_, Id, BlobId>,
         updates: Value<'_, JSContactProperty<Id>, JSContactValue<Id, BlobId>>,
-    ) -> impl Future<Output = trc::Result<Result<u32, SetError<JSContactProperty<Id>>>>>;
+    ) -> impl Future<Output = trc::Result<Result<CreatedCard, SetError<JSContactProperty<Id>>>>>;
+}
+
+/// A card written by a create or a copy, with the uid the server gave it when the client
+/// sent none.
+pub struct CreatedCard {
+    pub document_id: u32,
+    pub generated_uid: Option<String>,
+}
+
+impl CreatedCard {
+    /// What `created` reports for the card: its id, and its uid when the server set it
+    /// (RFC 8620, Section 5.3, returns the properties the server set by default).
+    pub fn into_created(self) -> Value<'static, JSContactProperty<Id>, JSContactValue<Id, BlobId>> {
+        let mut created = vec![(
+            Key::Property(JSContactProperty::Id),
+            Value::Element(JSContactValue::Id(Id::from(self.document_id))),
+        )];
+        if let Some(uid) = self.generated_uid {
+            created.push((
+                Key::Property(JSContactProperty::Uid),
+                Value::Str(uid.into()),
+            ));
+        }
+        Value::Object(Map::from(created))
+    }
 }
 
 impl ContactCardSet for Server {
@@ -111,8 +137,8 @@ impl ContactCardSet for Server {
                 )
                 .await?
             {
-                Ok(document_id) => {
-                    response.created(id, document_id);
+                Ok(card) => {
+                    response.created.insert(id, card.into_created());
                 }
                 Err(err) => {
                     response.not_created.append(id, err);
@@ -392,12 +418,26 @@ impl ContactCardSet for Server {
         can_add_address_books: &Option<RoaringBitmap>,
         mut js_contact: JSContact<'_, Id, BlobId>,
         updates: Value<'_, JSContactProperty<Id>, JSContactValue<Id, BlobId>>,
-    ) -> trc::Result<Result<u32, SetError<JSContactProperty<Id>>>> {
+    ) -> trc::Result<Result<CreatedCard, SetError<JSContactProperty<Id>>>> {
         // Process changes
         let mut names = Vec::new();
         if let Err(err) = update_contact_card(None, updates, &mut names, &mut js_contact) {
             return Ok(Err(err));
         }
+
+        // A card must have a uid (RFC 9553, Section 2.1.9): one the client left out or
+        // set to null is a random UUID URN
+        let entries = js_contact.0.as_object_mut().unwrap();
+        let generated_uid = if entries
+            .get(&Key::Property(JSContactProperty::Uid))
+            .is_none_or(|uid| uid.is_null())
+        {
+            let uid = format!("urn:uuid:{}", generate_uuid());
+            entries.insert(JSContactProperty::Uid, Value::Str(uid.clone().into()));
+            Some(uid)
+        } else {
+            None
+        };
 
         // Verify that the address book ids valid
         for name in &names {
@@ -468,7 +508,12 @@ impl ContactCardSet for Server {
                 batch,
             )
             .caused_by(trc::location!())
-            .map(|_| Ok(document_id))
+            .map(|_| {
+                Ok(CreatedCard {
+                    document_id,
+                    generated_uid,
+                })
+            })
     }
 }
 
