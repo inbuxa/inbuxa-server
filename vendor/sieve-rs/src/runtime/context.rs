@@ -653,6 +653,13 @@ impl<'x> Context<'x> {
         self.main_message_id > 0
     }
 
+    // inbuxa: the id of the inbound message as the script left it (0, or
+    // the id of its edited copy). A SendMessage for this id is a redirect;
+    // vacation and notify send messages of their own.
+    pub fn main_message_id(&self) -> usize {
+        self.main_message_id
+    }
+
     // inbuxa: the account's name and address go into From headers; the
     // value loses any CR, LF or other control
     pub(crate) fn user_from_field(&self) -> String {
