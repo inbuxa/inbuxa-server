@@ -314,6 +314,110 @@ pub async fn test(test: &mut TestServer) {
         .await
         .unwrap();
 
+    // inbuxa: a login's failures from many addresses ban only the address
+    // that goes over the limit, and only until the count starts over. They
+    // used to ban every address failing on that login afterwards, its
+    // owner's included, for the whole ban period (forever, unset).
+    admin
+        .registry_update_object(
+            ObjectType::Security,
+            Id::singleton(),
+            json!({ Property::AuthBanPeriod: null }),
+        )
+        .await;
+    admin.reload_settings().await;
+    let victim = test
+        .create_user_account(
+            "admin@example.org",
+            "victim@example.org",
+            "this is a very strong password",
+            &[],
+            "victim@example.org",
+        )
+        .await;
+    // 100 failures on the login from two addresses, neither over its own limit
+    for attacker_ip in ["198.18.0.1", "198.18.0.2"] {
+        for _ in 0..50 {
+            validate_password_with_ip("victim@example.org", "guess", attacker_ip, false).await;
+        }
+        validate_password_with_ip(
+            "user@example.org",
+            "this is a very strong password",
+            attacker_ip,
+            true,
+        )
+        .await;
+    }
+    // The 101st goes over: that address is banned, until the count starts over
+    validate_password_with_ip("victim@example.org", "guess", "198.18.0.3", false).await;
+    let tripped_id = test
+        .server
+        .registry()
+        .primary_key(
+            ObjectType::BlockedIp.into(),
+            Property::Address,
+            IpAddrOrMask::from_ip(Ipv4Addr::new(198, 18, 0, 3).into()).to_index_key(),
+        )
+        .await
+        .unwrap()
+        .expect("the address that went over the login's limit is banned");
+    // The owner's typo, and anyone else's single failure, bans nobody
+    for ip in ["192.0.2.10", "198.18.0.4"] {
+        validate_password_with_ip("victim@example.org", "typo", ip, false).await;
+        assert_eq!(
+            admin
+                .registry_query_ids(
+                    ObjectType::BlockedIp,
+                    [(Property::Address, ip)],
+                    Vec::<&str>::new(),
+                )
+                .await,
+            Vec::<Id>::new(),
+            "{ip} was banned for one failure on a login over its limit"
+        );
+    }
+    validate_password_with_ip(
+        "victim@example.org",
+        "this is a very strong password",
+        "192.0.2.10",
+        true,
+    )
+    .await;
+    let tripped = test
+        .server
+        .registry()
+        .object::<BlockedIp>(tripped_id.id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        tripped
+            .expires_at
+            .is_some_and(|at| at.timestamp() <= store::write::now() as i64 + 86_400),
+        "a login's ban lasts at most until its count starts over: {tripped:?}"
+    );
+    test.server
+        .registry()
+        .write(RegistryWrite::delete(tripped_id))
+        .await
+        .unwrap()
+        .unwrap_id(trc::location!());
+    test.server
+        .reload_registry(RegistryChange::Delete(tripped_id))
+        .await
+        .unwrap();
+    admin.destroy_account(victim).await;
+    admin
+        .registry_update_object(
+            ObjectType::Security,
+            Id::singleton(),
+            json!({
+                Property::AuthBanPeriod: registry::types::duration::Duration::from_millis(5000)
+            }),
+        )
+        .await;
+    admin.reload_settings().await;
+
     // inbuxa: personal-data catalog, D1: how long rotated log files are kept.
     // Unset keeps every file; a value is days; zero is refused; null goes back
     let using = &["urn:ietf:params:jmap:core", "urn:inbuxa:jmap"];
