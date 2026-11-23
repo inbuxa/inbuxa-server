@@ -11,6 +11,52 @@ https://github.com/inbuxa/inbuxa-server/security/advisories.
 Every version PR adds that version's entry here. CI refuses a version this
 file has no entry for (`tools/release/changelog-check.py`).
 
+## [2026.11.23.1] - 2026-11-23
+
+2026.11.23 with security fixes from an internal security review (two high,
+three medium). 2026.9.20 to 2026.11.23 are affected, and so is 27.1 up to
+and including 27.1-rc.42. The same fixes are in 27.1-rc.43.
+
+### Security
+High
+- DNS: a sender's SPF record could hide another domain's DMARC policy and
+  DKIM keys. TXT lookups were cached by name only, so naming
+  `_dmarc.<domain>` or a DKIM key name in an SPF `include:`, `redirect=` or
+  `exp=` made that domain's policy or key look missing, and mail spoofing a
+  `p=reject` domain was accepted. Failed lookups are no longer cached.
+  (GHSA-2h94-5pr4-7q3w, #578)
+- Roles: anyone allowed to create or change roles could make the
+  administrator role a parent of a role they hold, and become an
+  administrator. A role's parents now count toward the permissions needed
+  to create or change it, and a parent from another tenant is refused.
+  (GHSA-rv5j-gmx8-8mjx, #578)
+
+Medium
+- Sieve: an incoming Subject could add header lines to out-of-office
+  replies, which the server signs and sends. Header values in vacation
+  replies, notifications and enclosed messages no longer keep line breaks
+  or control characters. (GHSA-9v39-p3px-g58p, #578)
+- HTTP: any web page could get its visitors' addresses banned from every
+  service by linking to a scan-ban path such as `/x.php`. Requests the
+  browser marks as caused by another site no longer bring a ban.
+  (GHSA-78p8-qv5v-wpjj, #578)
+- Sign-in: anyone who knew a login name could make its owner's next typo
+  ban the owner's address. When a login's failures go over the limit, only
+  the address that took it over is banned, and only until the count starts
+  over. (GHSA-vf25-5gq2-f3cp, #578)
+
+### Changed
+- OAuth: a self-registered client asking for a device code gets only the
+  scopes it registered for, as with an authorization code. (#578)
+- Sieve: a notify mailto link with an invalid header name or a line break
+  in an address is refused. (#578)
+
+### Upgrading
+- A role manager can no longer change a role that inherits permissions
+  they don't hold themselves.
+- Sieve scripts with a literal notify mailto link that has an invalid
+  header name no longer compile.
+
 ## [2026.11.23] - 2026-11-23
 
 2026.11.20.2 with a security fix from a private security review (medium)
