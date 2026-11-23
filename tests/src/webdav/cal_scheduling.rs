@@ -932,6 +932,62 @@ pub async fn test(test: &TestServer) {
         Vec::<String>::new()
     );
 
+    // Ending a recurring series in the past still tells the attendees
+    bill_client.fetch_and_remove_itips().await;
+    let series_ical = |until: i64| {
+        TEST_ITIP_SERIES
+            .replace("$START", &stamp(-3 * 24 * 60 * 60))
+            .replace("$END", &stamp(-3 * 24 * 60 * 60 + 60 * 60))
+            .replace("$UNTIL", &stamp(until))
+    };
+    john_client
+        .request_with_headers(
+            "PUT",
+            "/dav/cal/john%40example.com/default/series.ics",
+            [("content-type", "text/calendar; charset=utf-8")],
+            series_ical(7 * 24 * 60 * 60),
+        )
+        .await
+        .with_status(StatusCode::CREATED);
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    test.wait_for_tasks().await;
+    let itips = bill_client.fetch_and_remove_itips().await;
+    assert!(
+        itips.len() == 1
+            && unfold(&itips[0]).contains("METHOD:REQUEST")
+            && unfold(&itips[0]).contains("UID:SER9263504FD3"),
+        "failed for itips: {itips:?}"
+    );
+    let past_until = stamp(-24 * 60 * 60);
+    john_client
+        .request_with_headers(
+            "PUT",
+            "/dav/cal/john%40example.com/default/series.ics",
+            [("content-type", "text/calendar; charset=utf-8")],
+            series_ical(-24 * 60 * 60),
+        )
+        .await
+        .with_status(StatusCode::NO_CONTENT);
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    test.wait_for_tasks().await;
+    let itips = bill_client.fetch_and_remove_itips().await;
+    assert!(
+        itips.len() == 1
+            && unfold(&itips[0]).contains("METHOD:REQUEST")
+            && unfold(&itips[0]).contains(&format!("UNTIL={past_until}")),
+        "the attendee must be told the series now ends in the past: {itips:?}"
+    );
+    john_client
+        .request(
+            "DELETE",
+            "/dav/cal/john%40example.com/default/series.ics",
+            "",
+        )
+        .await
+        .with_status(StatusCode::NO_CONTENT);
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    bill_client.fetch_and_remove_itips().await;
+
     // A signed-in user can't send an iMIP request in someone else's name
     let jane_events = jane_client.fetch_icals().await.len();
     let mut session = test.new_mta_session();
@@ -1442,6 +1498,24 @@ TRANSP:OPAQUE
 SUMMARY:Weekly sync (moved)
 ORGANIZER:mailto:jdoe@example.com
 ATTENDEE;CUTYPE=INDIVIDUAL:mailto:carol@remote.org
+END:VEVENT
+END:VCALENDAR
+"#;
+
+const TEST_ITIP_SERIES: &str = r#"BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Example Corp.//CalDAV Client//EN
+BEGIN:VEVENT
+UID:SER9263504FD3
+SEQUENCE:0
+DTSTART:$START
+DTEND:$END
+DTSTAMP:20090602T170000Z
+RRULE:FREQ=DAILY;UNTIL=$UNTIL
+TRANSP:OPAQUE
+SUMMARY:Daily standup
+ORGANIZER:mailto:jdoe@example.com
+ATTENDEE;CUTYPE=INDIVIDUAL:mailto:bill@example.com
 END:VEVENT
 END:VCALENDAR
 "#;

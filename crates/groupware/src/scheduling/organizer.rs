@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::scheduling::{
@@ -94,8 +96,10 @@ pub(crate) fn organizer_handle_update(
                 &ICalendarMethod::Request
             };
 
+            // inbuxa: a new exception copies the attendees' replies from the series, so
+            // everyone who hasn't declined hears about it, not only those yet to answer
             changed_instances.extend(instance.attendees.iter().filter_map(|attendee| {
-                if attendee.send_invite_messages() {
+                if attendee.send_update_messages() {
                     Some((instance_id, attendee.email.email.as_str(), method))
                 } else {
                     None

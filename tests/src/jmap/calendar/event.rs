@@ -332,6 +332,82 @@ pub async fn test(test: &TestServer) {
         "An event with UID 00959BC664CA650E933C892C@example.com already exists."
     );
 
+    // Unknown time zones are refused instead of being stored as floating time
+    for (event, property) in [
+        (
+            json!({
+                "title": "Event #6",
+                "start": "2006-01-22T10:00:00",
+                "duration": "PT1H",
+                "timeZone": "Mars/Olympus",
+                "calendarIds": {
+                    &calendar1_id: true
+                },
+            }),
+            "timeZone",
+        ),
+        (
+            json!({
+                "title": "Event #6",
+                "start": "2006-01-22T10:00:00",
+                "duration": "PT1H",
+                "timeZone": "US/Eastern",
+                "endTimeZone": "Mars/Olympus",
+                "calendarIds": {
+                    &calendar1_id: true
+                },
+            }),
+            "endTimeZone",
+        ),
+        (
+            json!({
+                "title": "Event #6",
+                "start": "2006-01-22T10:00:00",
+                "duration": "PT1H",
+                "timeZone": "US/Eastern",
+                "recurrenceRule": {
+                    "frequency": "weekly",
+                    "count": 3
+                },
+                "recurrenceOverrides": {
+                    "2006-01-29T10:00:00": {
+                        "start": "2006-01-29T12:00:00",
+                        "timeZone": "Mars/Olympus"
+                    }
+                },
+                "calendarIds": {
+                    &calendar1_id: true
+                },
+            }),
+            "timeZone",
+        ),
+    ] {
+        let response = account
+            .jmap_create(
+                MethodObject::CalendarEvent,
+                [event],
+                Vec::<(&str, &str)>::new(),
+            )
+            .await;
+        let error = response.not_created(0);
+        assert_eq!(error["type"], "invalidProperties", "failed for {error}");
+        assert_eq!(error["properties"], json!([property]), "failed for {error}");
+    }
+    let response = account
+        .jmap_update(
+            MethodObject::CalendarEvent,
+            [(&event_1_id, json!({ "timeZone": "Mars/Olympus" }))],
+            Vec::<(&str, &str)>::new(),
+        )
+        .await;
+    let error = response.not_updated(&event_1_id);
+    assert_eq!(error["type"], "invalidProperties", "failed for {error}");
+    assert_eq!(
+        error["properties"],
+        json!(["timeZone"]),
+        "failed for {error}"
+    );
+
     // Patching tests
     let response = account
         .jmap_update(

@@ -7,11 +7,17 @@
  */
 
 use crate::utils::{
+    account::Account,
     jmap::{ChangeType, JmapUtils},
     server::TestServer,
 };
+use dav_proto::schema::property::{CalDavProperty, DavProperty};
+use groupware::cache::GroupwareCache;
+use hyper::StatusCode;
 use jmap_proto::{object::calendar::CalendarProperty, request::method::MethodObject};
 use serde_json::json;
+use std::str::FromStr;
+use types::{collection::SyncCollection, id::Id};
 
 pub async fn test(test: &TestServer) {
     println!("Running Calendar tests...");
@@ -323,6 +329,9 @@ pub async fn test(test: &TestServer) {
         "defaultAlertsWithoutTime": {}
     }));
 
+    // CalDAV reports the calendar chosen over JMAP as the default
+    assert_dav_default_calendar(test, account, &calendar_id).await;
+
     // Create an event
     let _ = account
         .jmap_create(
@@ -373,7 +382,44 @@ pub async fn test(test: &TestServer) {
         vec![&calendar_id]
     );
 
+    // Once the JMAP default is gone, CalDAV falls back to the configured default calendar
+    assert_dav_default_calendar(test, account, &default_calendar_id).await;
+
     // Destroy all mailboxes
     account.destroy_all_calendars().await;
     test.assert_is_empty().await;
+}
+
+async fn assert_dav_default_calendar(test: &TestServer, account: &Account, calendar_id: &str) {
+    let account_id = account.id().document_id();
+    let resources = test
+        .server
+        .fetch_dav_resources(account_id, account_id, SyncCollection::Calendar)
+        .await
+        .unwrap();
+    let calendar_href = resources.format_resource(
+        resources
+            .container_resource_path_by_id(Id::from_str(calendar_id).unwrap().document_id())
+            .expect("Missing calendar"),
+    );
+    let inbox_href = format!(
+        "/dav/itip/{}/inbox/",
+        resources.base_path.split('/').nth(3).unwrap()
+    );
+    let expected = format!("D:href:{calendar_href}");
+    account
+        .webdav_client()
+        .propfind(
+            &inbox_href,
+            [DavProperty::CalDav(
+                CalDavProperty::ScheduleDefaultCalendarURL,
+            )],
+        )
+        .await
+        .properties(&inbox_href)
+        .get(DavProperty::CalDav(
+            CalDavProperty::ScheduleDefaultCalendarURL,
+        ))
+        .with_values([expected.as_str()])
+        .with_status(StatusCode::OK);
 }
