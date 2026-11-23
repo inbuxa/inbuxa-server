@@ -388,6 +388,9 @@ impl<T: SessionStream> Session<T> {
         // Expand list
         if let Some(members) = rcpt_members {
             let list_addr = self.data.rcpt_to.pop().unwrap();
+            // inbuxa (#529): a list that names no one but itself adds nobody
+            // to the envelope, so it's refused here rather than at DATA
+            let mut has_members = false;
             for member in members.as_ref() {
                 let member_lcase = member.to_lowercase();
                 let is_local = match self
@@ -430,13 +433,30 @@ impl<T: SessionStream> Session<T> {
                 };
 
                 let mut member_addr = SessionAddress::new(address);
-                if !self.data.rcpt_to.contains(&member_addr)
-                    && member_addr.address_lcase != list_addr.address_lcase
-                {
+                if member_addr.address_lcase == list_addr.address_lcase {
+                    continue;
+                }
+                has_members = true;
+                if !self.data.rcpt_to.contains(&member_addr) {
                     member_addr.dsn_info = list_addr.address_lcase.clone().into();
                     member_addr.flags = list_addr.flags;
                     self.data.rcpt_to.push(member_addr);
                 }
+            }
+
+            if !has_members {
+                trc::event!(
+                    Smtp(SmtpEvent::MailboxDoesNotExist),
+                    SpanId = self.data.session_id,
+                    To = list_addr.address_lcase.clone(),
+                );
+
+                return self
+                    .rcpt_error(
+                        b"550 5.1.2 Mailbox does not exist.\r\n",
+                        list_addr.address_lcase,
+                    )
+                    .await;
             }
         }
 

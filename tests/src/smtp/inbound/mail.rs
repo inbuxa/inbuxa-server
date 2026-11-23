@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
@@ -285,6 +287,25 @@ async fn mail() {
     assert_eq!(mail_from.address_lcase, "jane@foobar.org");
     session.rset().await;
 
+    // inbuxa (#533): an unknown modifier is ignored even when its value holds
+    // a "/", so the rest of the record is evaluated and the sender passes
+    test.server.txt_add(
+        "modifier.foobar.org",
+        Spf::parse(b"v=spf1 ip4:10.0.0.2 foo=bar/baz -all")
+            .expect("an unknown modifier with a \"/\" is a permerror"),
+        Instant::now() + Duration::from_secs(5),
+    );
+    session
+        .ingest(b"MAIL FROM:<jane@modifier.foobar.org>\r\n")
+        .await
+        .unwrap();
+    session.response().assert_code("250");
+    assert_eq!(
+        session.data.spf_mail_from.as_ref().unwrap().result(),
+        SpfResult::Pass
+    );
+    session.rset().await;
+
     // Test SIZE extension
     session
         .ingest(b"MAIL FROM:<jane@foobar.org> SIZE=1023\r\n")
@@ -420,4 +441,40 @@ async fn mail() {
         .unwrap();
     session.response().assert_code("501 5.5.4");
     session.rset().await;
+}
+
+// inbuxa (#533): RFC 7208 section 6 says unknown modifiers are ignored, and
+// section 4.6.1 gives their value as a macro-string, whose literals are any
+// visible character but "%" (section 7.1), "/" included. Only the macro
+// syntax in the value is still checked.
+#[test]
+fn spf_unknown_modifiers_are_ignored() {
+    let plain = Spf::parse(b"v=spf1 ip4:192.0.2.1 -all").unwrap();
+    for record in [
+        "v=spf1 ip4:192.0.2.1 foo=bar/baz -all",
+        "v=spf1 ip4:192.0.2.1 foo=/ -all",
+        "v=spf1 ip4:192.0.2.1 foo=a/b/c/24 -all",
+        "v=spf1 ip4:192.0.2.1 foo=%{d}/%{i}.x -all",
+        "v=spf1 ip4:192.0.2.1 foo-bar.1_x=https://example.com/a?b=c -all",
+        "v=spf1 ip4:192.0.2.1 foo= -all",
+        "v=spf1 ip4:192.0.2.1 -all foo=bar/baz",
+    ] {
+        assert_eq!(
+            Spf::parse(record.as_bytes()).as_ref(),
+            Ok(&plain),
+            "{record}"
+        );
+    }
+
+    // A value that isn't a macro-string is still a syntax error
+    for record in [
+        "v=spf1 ip4:192.0.2.1 foo=%x/y -all",
+        "v=spf1 ip4:192.0.2.1 foo=%{z}/y -all",
+    ] {
+        assert!(Spf::parse(record.as_bytes()).is_err(), "{record}");
+    }
+
+    // The CIDR lengths of a, mx, ip4 and ip6 still end at "/"
+    assert!(Spf::parse(b"v=spf1 ip4:192.0.2.1/24/x -all").is_err());
+    assert!(Spf::parse(b"v=spf1 a:example.com/24/64 -all").is_ok());
 }

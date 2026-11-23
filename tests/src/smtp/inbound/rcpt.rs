@@ -14,7 +14,8 @@ use registry::{
     schema::{
         enums::MtaInboundThrottleKey,
         structs::{
-            Expression, ExpressionMatch, MtaExtensions, MtaInboundThrottle, MtaStageRcpt, Rate,
+            Expression, ExpressionMatch, MailingList, MtaExtensions, MtaInboundThrottle,
+            MtaStageRcpt, Rate,
         },
     },
     types::{list::List, map::Map},
@@ -59,6 +60,24 @@ async fn rcpt() {
     ] {
         admin
             .create_user_account(name, secret, description, aliases, vec![])
+            .await;
+    }
+
+    // inbuxa (#529): a list with no members, a list whose only member is
+    // itself, and a list of one existing user
+    let domain_id = admin.find_or_create_domain("foobar.org").await;
+    for (name, recipients) in [
+        ("empty-list", vec![]),
+        ("self-list", vec!["self-list@foobar.org".to_string()]),
+        ("jane-list", vec!["jane@foobar.org".to_string()]),
+    ] {
+        admin
+            .registry_create_object(MailingList {
+                domain_id,
+                name: name.into(),
+                recipients: Map::new(recipients),
+                ..Default::default()
+            })
             .await;
     }
 
@@ -257,4 +276,23 @@ async fn rcpt() {
     session
         .rcpt_to("nobody@xn--stra6-oqa.de", "550 5.1.2")
         .await;
+
+    // inbuxa (#529): a mailing list that expands to no one is refused at RCPT,
+    // instead of a 250 followed by "RCPT is required first" at DATA
+    let mut session = test.new_mta_session();
+    session.data.remote_ip_str = "10.0.0.2".into();
+    session.eval_session_params().await;
+    session.ehlo("mx1.foobar.org").await;
+    session.mail_from("lists@example.net", "250").await;
+    session.rcpt_to("empty-list@foobar.org", "550 5.1.2").await;
+    session.rcpt_to("self-list@foobar.org", "550 5.1.2").await;
+    assert!(session.data.rcpt_to.is_empty());
+    assert_eq!(session.data.rcpt_errors, 2);
+
+    // A list whose members are all in the envelope already is a duplicate,
+    // which is still accepted
+    session.rcpt_to("jane@foobar.org", "250").await;
+    session.rcpt_to("jane-list@foobar.org", "250").await;
+    assert_eq!(session.data.rcpt_to.len(), 1);
+    assert_eq!(session.data.rcpt_to[0].address_lcase, "jane@foobar.org");
 }
