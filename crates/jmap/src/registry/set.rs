@@ -1286,11 +1286,11 @@ impl Modification {
         }
     }
 
-    fn as_role(&self) -> Option<&Role> {
+    fn as_role(&self) -> Option<(Id, &Role)> {
         match self {
             Modification::Create { .. } => None,
-            Modification::Update { object, .. } => match &object.inner {
-                ObjectInner::Role(role) => Some(role),
+            Modification::Update { id, object } => match &object.inner {
+                ObjectInner::Role(role) => Some((*id, role)),
                 _ => None,
             },
         }
