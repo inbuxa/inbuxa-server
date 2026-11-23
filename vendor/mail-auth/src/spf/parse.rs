@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: Apache-2.0 OR MIT
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use super::{
@@ -189,6 +191,20 @@ impl TxtRecordParser for Spf {
                 }
                 RR => {
                     rr = record.rr()?;
+                }
+                // inbuxa: an unknown modifier's value is a macro-string
+                // (RFC 7208 section 4.6.1), and "/" is a macro-literal like
+                // any other visible character but "%" (section 7.1), so the
+                // value runs to the next space. Its macros must still be
+                // well formed; the modifier itself is ignored (section 6).
+                _ if stop_char == b'=' => {
+                    let rest = record.as_slice();
+                    let end = find_ascii_whitespace(rest);
+                    let value = rest.get(..end).unwrap_or_default();
+                    if !value.is_empty() {
+                        value.iter().macro_string(true)?;
+                    }
+                    record = rest.get(end + 1..).unwrap_or_default().iter();
                 }
                 _ => {
                     let (_, stop_char) = record.macro_string(false)?;
