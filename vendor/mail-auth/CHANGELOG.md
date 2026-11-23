@@ -1,0 +1,213 @@
+mail-auth 0.13.3
+================================
+- DMARC: Aggregate reports serialise at most one `spf` element per record, dropping `helo` scoped results, as RFC 9990 Appendix A caps `AuthResultType/spf` at `maxOccurs="1"` and Section 3.1.1.13 restricts it to the `MAIL FROM` identity with `mfrom` as the only valid scope.
+- DMARC: The aggregate report `version` element is written as `1.0` rather than `1`, per RFC 9990 Section 3.1.1.2.
+
+mail-auth 0.13.2
+================================
+- SPF: `SpfParameters::verify` now checks the `MAIL FROM` identity whenever the `HELO` check does not return `fail`, instead of only when it returns `pass` (#61).
+- DMARC: New `DmarcOutput::result` returns the overall DMARC result: `fail` when a policy record exists but no Authenticated Identifier aligns (RFC 9989 Section 5.3.5).
+- DMARC: A `temperror` SPF result or DKIM signature whose identifier aligns with the Author Domain, or a DNS error while resolving an Organizational Domain for relaxed alignment, yields `temperror` instead of `fail` (RFC 9989 Section 5.3.6).
+- DMARC: A policy record without a `p` tag is treated as `p=none` when it has a `rua` tag and ignored otherwise, regardless of its `sp` and `np` tags (RFC 9989 Section 4.10.1).
+- DNS: A name that cannot be encoded as a DNS name, such as one with a label longer than 63 bytes, is reported as `Error::ParseError` instead of a resolver error.
+
+mail-auth 0.13.1
+================================
+- Bump to `mail-builder` 1.0.0
+
+mail-auth 0.13.0
+================================
+- Performance enhancements
+
+mail-auth 0.12.2
+================================
+- Bump `mail-builder` dependency to 0.5.
+
+mail-auth 0.12.1
+================================
+- MX and PTR records are now returned as A-labels.
+- DMARC: Identifiers are converted to their A-label form before alignment, and alignment is no longer case sensitive.
+- DMARC: External reporting addresses are compared to the policy domain in their A-label form.
+
+mail-auth 0.12.0
+================================
+- `Report::parse_rfc5322` and `TlsReport::parse_rfc5322` now take a `max_size` argument, which bounds the size of a decompressed report.
+- Report parsing: Reject `.gz` and `.zip` attachments that decompress beyond `max_size`, and stop sizing the output buffer from the attacker-controlled ZIP size fields.
+- DKIM2: Cap the signature chain at 50 `DKIM2-Signature` / `Message-Instance` header fields, reported as `Dkim2Error::ChainTooLong`.
+- DKIM2: Accept an imaginary hop (`nd=`) that follows a real hop, provided its `d=` matches a recipient of the previous hop ([draft-ietf-dkim-dkim2-spec-04](https://datatracker.ietf.org/doc/html/draft-ietf-dkim-dkim2-spec-04) §9.3).
+
+mail-auth 0.11.2
+================================
+- Bump `mail-parser` to 0.11.5.
+
+mail-auth 0.11.1
+================================
+- [RFC 9989 - Domain-based Message Authentication, Reporting, and Conformance (DMARC)](https://datatracker.ietf.org/doc/html/rfc9989) support.
+- [RFC 9990 - DMARC Aggregate Reporting](https://datatracker.ietf.org/doc/html/rfc9990) support.
+- [RFC 9991 - DMARC Failure Reporting](https://datatracker.ietf.org/doc/html/rfc9991) support.
+
+mail-auth 0.11.0
+================================
+- DKIM2 support ([draft-ietf-dkim-dkim2-spec-03](https://datatracker.ietf.org/doc/html/draft-ietf-dkim-dkim2-spec-03))
+- ARC is now gated under the `arc` feature. The ARC implementation is now considered historic, see [Reclassifying ARC as Historic](https://datatracker.ietf.org/doc/draft-ietf-dmarc-arc-to-historic/).
+- WASM support (#18).
+
+mail-auth 0.10.0
+================================
+- Include DNSSEC status in cache entries.
+
+mail-auth 0.9.2
+================================
+- Fix: Body canonicalization uses header canonicalization settings.
+- Use `rustls-platform-verifier` in `hickory-resolver`.
+
+mail-auth 0.9.1
+================================
+- Fix: Security Header injection in `Authentication-Results`.
+
+mail-auth 0.9.0
+================================
+- Bump `hickory-resolver` to 0.26.
+
+mail-auth 0.8.0
+================================
+- Added `aws-lc-rs` backend.
+- Removed `rust-crypto` backend.
+- Use boxed slices in caches to slightly reduce memory usage.
+
+mail-auth 0.7.5
+================================
+- Fix decoding PKCS#8 key DER regression (#51).
+- Add streaming DKIM signing API to reduce memory usage for large emails (#47).
+
+mail-auth 0.7.4
+================================
+- Parse PEM with `rustls-pki-types` (#49)
+
+mail-auth 0.7.3
+================================
+- Fix bug in SPF verification with mixed `redirect` and `include` mechanisms.
+- Bump `zip` to 6.0
+
+mail-auth 0.7.2
+================================
+- Bump `quick-xml` to 0.38
+- Bump `zip` to 5.1
+
+mail-auth 0.7.1
+================================
+- Bump `hickory-resolver`to 0.26.0-alpha.1
+- Bump `zip` to 4.0
+
+mail-auth 0.7.0
+================================
+- Bump `mail-parser` to 0.11.
+- Bump `hickory-resolver` to 0.25.
+- Added `rkyv` support.
+- Make `zip` dependency optional.
+
+mail-auth 0.6.1
+================================
+- Bump `mail-parser` to 0.10.0.
+
+mail-auth 0.6.0
+================================
+- `Resolver` is now `MessageAuthenticator`.
+- Bring your own cache (or none at all): All validation functions can now take a `Parameters` struct that allows you to provide custom caches implementing the `ResolverCache` trait. By default no cache is used.
+
+mail-auth 0.5.1
+================================
+- Build `AuthenticatedMessage` from `mail-parser::Message`.
+
+mail-auth 0.5.0
+================================
+- Fix: Use public suffix list for DMARC relaxed alignment verification (#37)
+- Fix: Increase DNS lookup limit to 10 during SPF verification (#35)
+
+mail-auth 0.4.3
+================================
+- Fix: Domain name length check in SPF verification (#34)
+- Fix: DNS lookup limit being hit too early during SPF verification (#35)
+- Make `TlsReport` clonable.
+- Bump `quick-xml` dependency to 0.3.2.
+
+mail-auth 0.4.2
+================================
+- Fix: IPv6 parsing bug in SPF parser (#32)
+
+mail-auth 0.4.1
+================================
+- Bump `zip` dependency to 2.1.1.
+
+mail-auth 0.4.0
+================================
+- DKIM verification defaults to `strict` mode and ignores signatures with a `l=` tag to avoid exploits (see https://stalw.art/blog/dkim-exploit). Use `AuthenticatedMessage::parse_with_opts(&message, false)` to enable `relaxed` mode.
+- Parsed fields are now public.
+
+mail-auth 0.3.11
+================================
+- Added: DKIM keypair generation for both RSA and Ed25519.
+- Fix:  Check PTR against FQDN (including dot at the end) #28 
+
+mail-auth 0.3.10
+================================
+- Make `Resolver` cloneable.
+
+mail-auth 0.3.9
+================================
+- Use relaxed parsing for DNS names (#25)
+
+mail-auth 0.3.8
+================================
+- Made `pct` field accessible.
+- ARF Feedback storage of messages of headers as strings.
+
+mail-auth 0.3.7
+================================
+- Fix: Incorrect body hash when content is empty (#22)
+- Bump to `rustls-pemfile` dependency to 2.
+
+mail-auth 0.3.6
+================================
+- Bump `hickory-resolver` dependency to 0.24.
+
+mail-auth 0.3.5
+================================
+- Bump `ring` dependency to 0.17.
+
+mail-auth 0.3.4
+================================
+- Added `to_reverse_name` method to `IpAddr` to convert an IP address to a reverse DNS domain name.
+- Added `txt_raw_lookup` method to `Resolver` to perform a raw TXT lookup.
+
+mail-auth 0.3.3
+================================
+- Bump `mail-parser` dependency to 0.9
+- Bump `trust-dns-resolver` dependency to 0.23
+
+mail-auth 0.3.2
+================================
+- Bump `mail-builder` dependency to 0.3
+- Bump `quick-xml` dependency to 0.28
+
+mail-auth 0.3.1
+================================
+- Fix: Avoid panicking on invalid RSA key input (#17)
+
+mail-auth 0.3.0
+================================
+- ``ring`` backend support.
+- API improvements: ``DkimSigner`` and ``ArcSealer`` builders.
+- Reverse IP authentication (iprev).
+- MTA-STS lookup.
+- SMTP TLS Report generation and parsing.
+- Bug fixes.
+
+mail-auth 0.2.0
+================================
+- Fixed: Acronyms in type names do not match the recommended spelling from RFC 430 (#31)
+- Fixed: Inconsistent use of '.' at the end of strings on fmt::Display impl for Error (#31)
+
+mail-auth 0.1.0
+================================
+- Initial release.

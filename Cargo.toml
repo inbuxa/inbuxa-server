@@ -103,6 +103,9 @@ rpath = false
 # inbuxa: vendor/mail-parser is the published 0.11.9 with the changes its
 # VENDORED.md lists. Re-vendor when the version in Cargo.lock moves.
 #
+# inbuxa: vendor/mail-auth is the published 0.13.3 with the changes its
+# VENDORED.md lists. Re-vendor when the version in Cargo.lock moves.
+#
 # inbuxa: hickory and opentelemetry are upstream's patched branches, vendored
 # at the commits upstream pins so builds never fetch from upstream's
 # repositories; see vendor/hickory-dns/VENDORED.md and
@@ -111,6 +114,7 @@ rpath = false
 sieve-rs = { path = "vendor/sieve-rs" }
 calcard = { path = "vendor/calcard" }
 mail-parser = { path = "vendor/mail-parser" }
+mail-auth = { path = "vendor/mail-auth" }
 hickory-proto = { path = "vendor/hickory-dns/hickory-proto" }
 hickory-net = { path = "vendor/hickory-dns/hickory-net" }
 hickory-resolver = { path = "vendor/hickory-dns/hickory-resolver" }
