@@ -7,6 +7,7 @@
  */
 
 use crate::utils::{
+    account::Account,
     http::HttpRequest,
     imap::{AssertResult, ImapConnection, Type},
     pop3::Pop3Connection,
@@ -37,7 +38,7 @@ use jmap_client::{
 use registry::schema::{
     enums::JwtSignatureAlgorithm,
     prelude::{ObjectType, Property},
-    structs::{OAuthClient, OidcProvider, SecretText, SecretTextValue},
+    structs::{Http, OAuthClient, OidcProvider, Rate, SecretText, SecretTextValue},
 };
 use rustls_pki_types::ServerName;
 use serde::{Serialize, de::DeserializeOwned};
@@ -1066,6 +1067,98 @@ pub async fn test(test: &mut TestServer) {
     unwrap_token_response(post(&metadata.token_endpoint, &params).await);
 
     // ------------------------
+    // inbuxa: a confidential client authenticates for the device grant too,
+    // at both endpoints (RFC 8628 3.1 and 3.4)
+    // ------------------------
+
+    // These requests come on top of the rest of the OIDC tests', past the
+    // anonymous rate limit (100 a minute). Counted over another period they
+    // go in buckets of their own, and the minute's count is left as it was.
+    set_anonymous_rate(&admin, 1000, 61_000).await;
+
+    // Asking for a device code takes the client's secret
+    let confidential_device =
+        AHashMap::from_iter([("client_id".to_string(), confidential_id.to_string())]);
+    let (status, body) = post_status(
+        &metadata.device_authorization_endpoint,
+        &confidential_device,
+    )
+    .await;
+    assert_eq!(
+        status,
+        401,
+        "a device code without the client's secret: {}",
+        String::from_utf8_lossy(&body)
+    );
+    let mut wrong = confidential_device.clone();
+    wrong.insert("client_secret".to_string(), "not-the-secret".to_string());
+    let (status, _) = post_status(&metadata.device_authorization_endpoint, &wrong).await;
+    assert_eq!(status, 401, "a device code with a wrong secret");
+    assert_eq!(
+        post_form_basic_status(
+            &metadata.device_authorization_endpoint,
+            &confidential_id,
+            "not-the-secret",
+            &AHashMap::new(),
+        )
+        .await,
+        401,
+        "a device code with a wrong secret over HTTP Basic"
+    );
+    let mut with_secret = confidential_device.clone();
+    with_secret.insert("client_secret".to_string(), confidential_secret.to_string());
+    let device_response: DeviceAuthResponse =
+        post(&metadata.device_authorization_endpoint, &with_secret).await;
+    assert_eq!(
+        http.post::<LoginResponse>(
+            "/api/auth",
+            &LoginRequest::AuthDevice {
+                account_name: "user@example.org".to_string(),
+                account_secret: "this is a very strong password".to_string(),
+                mfa_token: None,
+                code: device_response.user_code.clone(),
+                passkey: None,
+            },
+        )
+        .await
+        .unwrap(),
+        LoginResponse::Verified
+    );
+
+    // Redeeming it takes the secret as well
+    let mut redeem = AHashMap::from_iter([
+        ("client_id".to_string(), confidential_id.to_string()),
+        (
+            "grant_type".to_string(),
+            "urn:ietf:params:oauth:grant-type:device_code".to_string(),
+        ),
+        (
+            "device_code".to_string(),
+            device_response.device_code.to_string(),
+        ),
+    ]);
+    assert_eq!(
+        post::<TokenResponse>(&metadata.token_endpoint, &redeem).await,
+        TokenResponse::Error {
+            error: ErrorType::InvalidClient
+        },
+        "a device code redeemed without the client's secret"
+    );
+    redeem.insert("client_secret".to_string(), "not-the-secret".to_string());
+    assert_eq!(
+        post::<TokenResponse>(&metadata.token_endpoint, &redeem).await,
+        TokenResponse::Error {
+            error: ErrorType::InvalidClient
+        },
+        "a device code redeemed with a wrong secret"
+    );
+
+    redeem.insert("client_secret".to_string(), confidential_secret.to_string());
+    unwrap_token_response(post(&metadata.token_endpoint, &redeem).await);
+
+    set_anonymous_rate(&admin, 100, 60_000).await;
+
+    // ------------------------
     // Device code flow
     // ------------------------
 
@@ -1430,6 +1523,23 @@ async fn post_login_raw(body: &impl Serialize) -> (u16, serde_json::Value) {
     post_json_raw("https://127.0.0.1:8899/api/auth", body).await
 }
 
+/// inbuxa: the anonymous HTTP rate limit, `count` requests per `period_ms`.
+async fn set_anonymous_rate(admin: &Account, count: u64, period_ms: u64) {
+    admin
+        .registry_update_setting(
+            Http {
+                rate_limit_anonymous: Some(Rate {
+                    count,
+                    period: registry::schema::prelude::Duration::from_millis(period_ms),
+                }),
+                ..Default::default()
+            },
+            &[Property::RateLimitAnonymous],
+        )
+        .await;
+    admin.reload_settings().await;
+}
+
 async fn post<T: DeserializeOwned>(url: &str, params: &AHashMap<String, String>) -> T {
     post_with_auth(url, None, params).await
 }
@@ -1438,7 +1548,13 @@ async fn post_with_auth<T: DeserializeOwned>(
     auth_token: Option<&str>,
     params: &AHashMap<String, String>,
 ) -> T {
-    serde_json::from_slice(&post_bytes(url, auth_token, params).await).unwrap()
+    let body = post_bytes(url, auth_token, params).await;
+    serde_json::from_slice(&body).unwrap_or_else(|err| {
+        panic!(
+            "{url}: {err}: {}",
+            String::from_utf8_lossy(&body[..body.len().min(500)])
+        )
+    })
 }
 
 async fn get_bytes(url: &str) -> Bytes {

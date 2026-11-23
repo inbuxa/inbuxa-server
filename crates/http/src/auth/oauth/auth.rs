@@ -6,7 +6,10 @@
  * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
-use super::{DeviceAuthResponse, FormData, MAX_POST_LEN, OAuthCode, PkceCodeChallenge};
+use super::{
+    DeviceAuthResponse, FormData, MAX_POST_LEN, OAuthCode, PkceCodeChallenge, TokenResponse,
+    token::client_credentials,
+};
 use crate::auth::oauth::{
     OAuthStatus, openid::OpenIdHandler, registration::ClientRegistrationHandler,
 };
@@ -25,7 +28,8 @@ use common::{
 };
 use directory::Credentials;
 use http_proto::*;
-use std::future::Future;
+use hyper::StatusCode;
+use std::{borrow::Cow, future::Future};
 use store::{
     Serialize,
     dispatch::lookup::KeyValue,
@@ -525,14 +529,32 @@ impl OAuthApiHandler for Server {
     ) -> trc::Result<HttpResponse> {
         // Parse form
         let mut form_data = FormData::from_request(req, MAX_POST_LEN, session.session_id).await?;
-        let client_id = form_data
-            .remove("client_id")
+        // inbuxa: RFC 8628 3.1: a confidential client authenticates here as it
+        // does at the token endpoint, in the body or with HTTP Basic
+        let (client_id, client_secret) = {
+            let (id, secret) = client_credentials(req, &form_data);
+            (id.map(Cow::into_owned), secret.map(Cow::into_owned))
+        };
+        form_data.remove("client_id");
+        form_data.remove("client_secret");
+        let client_id = client_id
             .filter(|client_id| client_id.len() <= CLIENT_ID_MAX_LEN)
             .ok_or_else(|| {
                 trc::ResourceEvent::BadParameters
                     .into_err()
                     .details("Client ID is missing.")
             })?;
+        if let Some(error) = self
+            .verify_client_secret(&client_id, client_secret.as_deref())
+            .await?
+        {
+            return Ok(JsonResponse::with_status(
+                StatusCode::UNAUTHORIZED,
+                TokenResponse::error(error),
+            )
+            .no_cache()
+            .into_http_response());
+        }
         let nonce = form_data.remove("nonce");
         let scope = form_data
             .remove("scope")

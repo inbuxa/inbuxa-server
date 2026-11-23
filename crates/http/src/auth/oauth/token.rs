@@ -162,7 +162,7 @@ impl TokenHandler for Server {
             response = TokenResponse::error(ErrorType::ExpiredToken);
 
             if let (Some(device_code), Some(client_id)) =
-                (params.get("device_code"), params.get("client_id"))
+                (params.get("device_code"), client_id_cred.as_deref())
             {
                 // Obtain code
                 if let Some(auth_code_) = self
@@ -187,6 +187,13 @@ impl TokenHandler for Server {
                                         None,
                                         oauth.account_id.into(),
                                     )
+                                    .await?
+                                {
+                                    TokenResponse::error(error)
+                                } else if let Some(error) = self
+                                    // inbuxa: a confidential client authenticates to
+                                    // redeem a device code, as it does an authorization code
+                                    .verify_client_secret(client_id, client_secret_cred.as_deref())
                                     .await?
                                 {
                                     TokenResponse::error(error)
@@ -500,7 +507,7 @@ fn revoke_error(status: StatusCode, error: ErrorType) -> HttpResponse {
         .into_http_response()
 }
 
-fn client_credentials<'x>(
+pub(super) fn client_credentials<'x>(
     req: &'x HttpRequest,
     params: &'x FormData,
 ) -> (Option<Cow<'x, str>>, Option<Cow<'x, str>>) {
