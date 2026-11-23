@@ -15,7 +15,7 @@ use common::{
     auth::{AccessToken, Permissions, PermissionsGroup, permissions::BuildPermissions},
 };
 use directory::core::secret::{hash_secret, is_password_hash};
-use jmap_proto::error::set::SetError;
+use jmap_proto::error::set::{SetError, SetErrorType};
 use registry::{schema::structs::TaskStatus, types::datetime::UTCDateTime};
 use registry::{
     schema::{
@@ -23,7 +23,7 @@ use registry::{
         prelude::{MASKED_PASSWORD, ObjectType, Property},
         structs::{Account, Credential, Role, Task, TaskDestroyAccount},
     },
-    types::EnumImpl,
+    types::{EnumImpl, id::ObjectId},
 };
 use store::write::{BatchBuilder, RegistryClass, ValueClass, now};
 use trc::AddContext;
@@ -337,8 +337,12 @@ pub(crate) async fn validate_role(
     server: &Server,
     access_token: &AccessToken,
     role: &mut Role,
-    old_role: Option<&Role>,
+    old_role: Option<(Id, &Role)>,
 ) -> ValidationResult {
+    let (role_id, old_role) = match old_role {
+        Some((role_id, old_role)) => (Some(role_id), Some(old_role)),
+        None => (None, None),
+    };
     if old_role.is_none() {
         // Validate tenant quotas
         if let Err(err) =
@@ -353,15 +357,42 @@ pub(crate) async fn validate_role(
             || old_role.disabled_permissions != role.disabled_permissions
             || old_role.role_ids != role.role_ids
     }) {
-        Ok(access_token
-            .can_grant_permissions(
+        // inbuxa: a role brings everything its parent roles hold as well, so
+        // whoever changes it must be able to grant all of that, not only the
+        // role's own lists; otherwise a role manager could make the
+        // administrator role a parent of a role they hold
+        for parent_id in role.role_ids.as_slice() {
+            let parent = server
+                .registry()
+                .object::<Role>(*parent_id)
+                .await
+                .caused_by(trc::location!())?;
+            // (as the write's own check: a tenant's role takes its parents
+            // from that tenant)
+            if parent.is_none_or(|parent| {
+                role.member_tenant_id
+                    .is_some_and(|tenant_id| parent.member_tenant_id != Some(tenant_id))
+            }) {
+                return Ok(Err(SetError::new(SetErrorType::InvalidForeignKey)
+                    .with_property(Property::RoleIds)
+                    .with_object_id(ObjectId::new(ObjectType::Role, *parent_id))));
+            }
+        }
+        let permissions = server
+            .add_role_permissions_except(
                 PermissionsGroup {
                     enabled: Permissions::from_permission(role.enabled_permissions.as_slice()),
                     disabled: Permissions::from_permission(role.disabled_permissions.as_slice()),
                     merge: false,
-                }
-                .finalize(),
+                },
+                role.role_ids.as_slice().iter().map(|id| id.document_id()),
+                role_id.map(|id| id.document_id()),
             )
+            .await
+            .caused_by(trc::location!())?;
+
+        Ok(access_token
+            .can_grant_permissions(permissions.finalize())
             .map(|_| ObjectResponse::default())
             .map_err(build_set_error))
     } else {

@@ -295,23 +295,40 @@ impl Server {
     }
 
     pub async fn is_auth_fail2banned(&self, ip: IpAddr, login: Option<&str>) -> trc::Result<bool> {
-        if let Some(rate) = &self.core.network.security.auth_fail_rate {
-            let login = login.unwrap_or_default();
-            let is_allowed = self.is_ip_allowed(ip)
-                || (self
-                    .in_memory_store()
-                    .is_rate_allowed(KV_RATE_LIMIT_AUTH, &ip_to_bytes(&ip), rate, false)
-                    .await?
-                    .is_none()
-                    && (login.is_empty()
-                        || self
-                            .in_memory_store()
-                            .is_rate_allowed(KV_RATE_LIMIT_AUTH, login.as_bytes(), rate, false)
-                            .await?
-                            .is_none()));
-            if !is_allowed {
+        if let Some(rate) = &self.core.network.security.auth_fail_rate
+            && !self.is_ip_allowed(ip)
+        {
+            if self
+                .in_memory_store()
+                .is_rate_allowed(KV_RATE_LIMIT_AUTH, &ip_to_bytes(&ip), rate, false)
+                .await?
+                .is_some()
+            {
                 return self
                     .block_ip(ip, BlockReason::AuthFailure)
+                    .await
+                    .map(|_| true);
+            }
+
+            // inbuxa: a login's failures from everywhere together ban only
+            // the address whose failure went over the limit, and at most
+            // until that count starts over. Banning every address that
+            // failed on the login after that let anyone who ran a login's
+            // count up ban its owner's address on their next typo.
+            if let Some(login) = login.filter(|login| !login.is_empty())
+                && let Some(window_left) = self
+                    .in_memory_store()
+                    .is_rate_first_exceeded(KV_RATE_LIMIT_AUTH, login.as_bytes(), rate)
+                    .await?
+            {
+                let period = self
+                    .core
+                    .network
+                    .security
+                    .auth_ban_period
+                    .map_or(window_left, |period| period.min(window_left));
+                return self
+                    .block_ip_for(ip, BlockReason::AuthFailure, Some(period))
                     .await
                     .map(|_| true);
             }
@@ -321,14 +338,20 @@ impl Server {
     }
 
     pub async fn block_ip(&self, ip: IpAddr, reason: BlockReason) -> trc::Result<()> {
+        self.block_ip_for(ip, reason, self.core.network.security.ban_period(reason))
+            .await
+    }
+
+    /// inbuxa: a ban for `period` seconds (`None`: no end)
+    pub async fn block_ip_for(
+        &self,
+        ip: IpAddr,
+        reason: BlockReason,
+        period: Option<u64>,
+    ) -> trc::Result<()> {
         // Add IP to blocked list
         let now = now();
-        let expires_at = self
-            .core
-            .network
-            .security
-            .ban_period(reason)
-            .map(|v| now + v);
+        let expires_at = period.map(|v| now + v);
         self.inner
             .data
             .blocked_ips

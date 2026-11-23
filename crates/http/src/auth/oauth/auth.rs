@@ -527,9 +527,14 @@ impl OAuthApiHandler for Server {
             .into_http_response());
         }
         let nonce = form_data.remove("nonce");
+        // inbuxa: a registered (stateless) client is granted no more than the
+        // scope it registered for, as at the authorization endpoint: the
+        // scopes it asks for beyond that are left out
+        let registered_mask = decode_client_id(self.core.oauth.oauth_key.as_bytes(), &client_id)
+            .map_or(u64::MAX, |meta| meta.scope_mask);
         let scope = form_data
             .remove("scope")
-            .and_then(|scope| grant_scope(Some(&scope), u64::MAX));
+            .and_then(|scope| grant_scope(Some(&scope), registered_mask));
 
         // Generate device code
         let device_code = rng()

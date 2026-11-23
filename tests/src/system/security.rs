@@ -314,6 +314,110 @@ pub async fn test(test: &mut TestServer) {
         .await
         .unwrap();
 
+    // inbuxa: a login's failures from many addresses ban only the address
+    // that goes over the limit, and only until the count starts over. They
+    // used to ban every address failing on that login afterwards, its
+    // owner's included, for the whole ban period (forever, unset).
+    admin
+        .registry_update_object(
+            ObjectType::Security,
+            Id::singleton(),
+            json!({ Property::AuthBanPeriod: null }),
+        )
+        .await;
+    admin.reload_settings().await;
+    let victim = test
+        .create_user_account(
+            "admin@example.org",
+            "victim@example.org",
+            "this is a very strong password",
+            &[],
+            "victim@example.org",
+        )
+        .await;
+    // 100 failures on the login from two addresses, neither over its own limit
+    for attacker_ip in ["198.18.0.1", "198.18.0.2"] {
+        for _ in 0..50 {
+            validate_password_with_ip("victim@example.org", "guess", attacker_ip, false).await;
+        }
+        validate_password_with_ip(
+            "user@example.org",
+            "this is a very strong password",
+            attacker_ip,
+            true,
+        )
+        .await;
+    }
+    // The 101st goes over: that address is banned, until the count starts over
+    validate_password_with_ip("victim@example.org", "guess", "198.18.0.3", false).await;
+    let tripped_id = test
+        .server
+        .registry()
+        .primary_key(
+            ObjectType::BlockedIp.into(),
+            Property::Address,
+            IpAddrOrMask::from_ip(Ipv4Addr::new(198, 18, 0, 3).into()).to_index_key(),
+        )
+        .await
+        .unwrap()
+        .expect("the address that went over the login's limit is banned");
+    // The owner's typo, and anyone else's single failure, bans nobody
+    for ip in ["192.0.2.10", "198.18.0.4"] {
+        validate_password_with_ip("victim@example.org", "typo", ip, false).await;
+        assert_eq!(
+            admin
+                .registry_query_ids(
+                    ObjectType::BlockedIp,
+                    [(Property::Address, ip)],
+                    Vec::<&str>::new(),
+                )
+                .await,
+            Vec::<Id>::new(),
+            "{ip} was banned for one failure on a login over its limit"
+        );
+    }
+    validate_password_with_ip(
+        "victim@example.org",
+        "this is a very strong password",
+        "192.0.2.10",
+        true,
+    )
+    .await;
+    let tripped = test
+        .server
+        .registry()
+        .object::<BlockedIp>(tripped_id.id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        tripped
+            .expires_at
+            .is_some_and(|at| at.timestamp() <= store::write::now() as i64 + 86_400),
+        "a login's ban lasts at most until its count starts over: {tripped:?}"
+    );
+    test.server
+        .registry()
+        .write(RegistryWrite::delete(tripped_id))
+        .await
+        .unwrap()
+        .unwrap_id(trc::location!());
+    test.server
+        .reload_registry(RegistryChange::Delete(tripped_id))
+        .await
+        .unwrap();
+    admin.destroy_account(victim).await;
+    admin
+        .registry_update_object(
+            ObjectType::Security,
+            Id::singleton(),
+            json!({
+                Property::AuthBanPeriod: registry::types::duration::Duration::from_millis(5000)
+            }),
+        )
+        .await;
+    admin.reload_settings().await;
+
     // inbuxa: personal-data catalog, D1: how long rotated log files are kept.
     // Unset keeps every file; a value is days; zero is refused; null goes back
     let using = &["urn:ietf:params:jmap:core", "urn:inbuxa:jmap"];
@@ -556,4 +660,117 @@ pub async fn test(test: &mut TestServer) {
     admin.destroy_account(user).await;
 
     test.cleanup().await;
+}
+
+/// inbuxa: HTTP-JMAP-PREAUTH-2. A page on any other site can make its
+/// visitors' browsers fetch a scan-ban path, with `<img src=".../x.php">`
+/// say. The browser marks such a request `Sec-Fetch-Site: cross-site` or
+/// `same-site`: it gets the 404 and its address isn't banned. A request
+/// without the header, as a scanner sends it, is still banned.
+///
+/// Runs alone: `cargo test -p tests scan_ban_tests -- --ignored`.
+#[ignore]
+#[tokio::test(flavor = "multi_thread")]
+pub async fn scan_ban_tests() {
+    let test = crate::utils::server::TestServerBuilder::new("scan_ban_tests")
+        .await
+        .with_default_listeners()
+        .await
+        .build()
+        .await;
+    println!("Running scan ban tests...");
+
+    let localhost: std::net::IpAddr = Ipv4Addr::LOCALHOST.into();
+    let ban = || async {
+        test.server
+            .registry()
+            .primary_key(
+                ObjectType::BlockedIp.into(),
+                Property::Address,
+                IpAddrOrMask::from_ip(localhost).to_index_key(),
+            )
+            .await
+            .unwrap()
+    };
+    assert!(ban().await.is_none(), "not banned before the test");
+
+    // `/x.php` is answered with a redirect to `/x.php/`, which the browser
+    // follows with the same Sec-Fetch-Site
+    for site in ["cross-site", "same-site", "CROSS-SITE"] {
+        for path in ["/x.php", "/wp-admin/setup-config.php"] {
+            let status = get_scan_path(path, Some(site))
+                .await
+                .unwrap_or_else(|err| panic!("{site} {path}: {err}"));
+            assert_eq!(status, 404, "{site} {path}");
+            assert!(
+                ban().await.is_none() && !test.server.is_ip_blocked(localhost),
+                "a {site} request for {path} banned its address"
+            );
+        }
+    }
+
+    // The browser's own navigations and fetches from this origin, and
+    // requests that say nothing, are banned as before
+    for site in [Some("same-origin"), Some("none"), None] {
+        let status = get_scan_path("/x.php", site)
+            .await
+            .unwrap_or_else(|err| panic!("{site:?}: {err}"));
+        assert_eq!(status, 404, "{site:?}");
+        let blocked_id = ban()
+            .await
+            .unwrap_or_else(|| panic!("a {site:?} scan request should ban its address"));
+        let blocked_ip = test
+            .server
+            .registry()
+            .object::<BlockedIp>(blocked_id.id())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(blocked_ip.reason, BlockReason::PortScanning, "{site:?}");
+        assert!(test.server.is_ip_blocked(localhost), "{site:?}");
+        assert!(
+            get_scan_path("/", None).await.is_err(),
+            "{site:?}: the banned address is turned away"
+        );
+
+        // Lift ban
+        test.server
+            .registry()
+            .write(RegistryWrite::delete(blocked_id))
+            .await
+            .unwrap()
+            .unwrap_id(trc::location!());
+        test.server
+            .reload_registry(RegistryChange::Delete(blocked_id))
+            .await
+            .unwrap();
+        assert!(!test.server.is_ip_blocked(localhost), "{site:?}: lifted");
+    }
+
+    if test.is_reset() {
+        test.temp_dir.delete();
+    }
+}
+
+/// GETs `path` on a new connection, with `Sec-Fetch-Site: site` when given,
+/// following redirects; the final status, or an error when the server
+/// turned the connection away
+async fn get_scan_path(path: &str, site: Option<&str>) -> Result<u16, String> {
+    let mut request = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .danger_accept_invalid_certs(true)
+        .pool_max_idle_per_host(0)
+        .build()
+        .unwrap()
+        .get(format!("https://127.0.0.1:8899{path}"));
+    if let Some(site) = site {
+        request = request.header("Sec-Fetch-Site", site);
+    }
+    let response = request.send().await.map_err(|err| err.to_string())?;
+    match response.status().as_u16() {
+        // inbuxa: a banned address is turned away when it connects, or with
+        // a 403 on a connection it already had
+        403 => Err("forbidden".to_string()),
+        status => Ok(status),
+    }
 }

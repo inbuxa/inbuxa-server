@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use std::borrow::Cow;
@@ -20,6 +22,8 @@ use crate::{
     },
     runtime::tests::TestResult,
 };
+
+use super::action_editheader::RemoveCrLf;
 
 pub(crate) const MAX_SUBJECT_LEN: usize = 256;
 
@@ -241,6 +245,7 @@ impl Vacation {
             vacation_subject = ctx.runtime.vacation_default_subject.as_ref().into();
         }
         let vacation_body = ctx.eval_value(&self.reason);
+        let max_header_size = ctx.runtime.max_header_size;
         let message_len = vacation_body.len()
             + vacation_from.len()
             + vacation_to_full
@@ -251,18 +256,31 @@ impl Vacation {
             + references.as_ref().map_or(0, |m| m.len())
             + 160;
 
+        // inbuxa: the inbound Message-ID is raw text and may hold a bare CR
+        let message_id = message_id.map(|id| id.remove_crlf(max_header_size));
         let mut message = Vec::with_capacity(message_len);
-        write_header(&mut message, "From: ", vacation_from.to_string().as_ref());
+        write_header(
+            &mut message,
+            "From: ",
+            vacation_from.to_string().as_ref(),
+            max_header_size,
+        );
         if let Some(vacation_to_full) = vacation_to_full {
             message.extend_from_slice(b"To:");
             message.extend_from_slice(vacation_to_full);
         } else {
-            write_header(&mut message, "To: ", vacation_to.to_string().as_ref());
+            write_header(
+                &mut message,
+                "To: ",
+                vacation_to.to_string().as_ref(),
+                max_header_size,
+            );
         }
         write_header(
             &mut message,
             "Subject: ",
             vacation_subject.to_string().as_ref(),
+            max_header_size,
         );
         if let Some(message_id) = message_id {
             message.extend_from_slice(b"In-Reply-To: <");
@@ -286,7 +304,12 @@ impl Vacation {
         generate_message_id_header(&mut message, &ctx.runtime.local_hostname).unwrap();
         message.extend_from_slice(b"\r\n");
 
-        write_header(&mut message, "Auto-Submitted: ", "auto-replied");
+        write_header(
+            &mut message,
+            "Auto-Submitted: ",
+            "auto-replied",
+            max_header_size,
+        );
         if !self.mime {
             message.extend_from_slice(b"Content-type: text/plain; charset=utf-8\r\n\r\n");
         }
@@ -329,8 +352,10 @@ impl Vacation {
     }
 }
 
-fn write_header(buf: &mut Vec<u8>, name: &str, value: &str) {
+// inbuxa: values come from the script and from the inbound message (its
+// Subject is decoded, so RFC 2047 can carry a CR or LF)
+fn write_header(buf: &mut Vec<u8>, name: &str, value: &str, max_len: usize) {
     buf.extend_from_slice(name.as_bytes());
-    buf.extend_from_slice(value.as_bytes());
+    buf.extend_from_slice(value.remove_crlf(max_len).as_bytes());
     buf.extend_from_slice(b"\r\n");
 }
