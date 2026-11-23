@@ -661,3 +661,116 @@ pub async fn test(test: &mut TestServer) {
 
     test.cleanup().await;
 }
+
+/// inbuxa: HTTP-JMAP-PREAUTH-2. A page on any other site can make its
+/// visitors' browsers fetch a scan-ban path, with `<img src=".../x.php">`
+/// say. The browser marks such a request `Sec-Fetch-Site: cross-site` or
+/// `same-site`: it gets the 404 and its address isn't banned. A request
+/// without the header, as a scanner sends it, is still banned.
+///
+/// Runs alone: `cargo test -p tests scan_ban_tests -- --ignored`.
+#[ignore]
+#[tokio::test(flavor = "multi_thread")]
+pub async fn scan_ban_tests() {
+    let test = crate::utils::server::TestServerBuilder::new("scan_ban_tests")
+        .await
+        .with_default_listeners()
+        .await
+        .build()
+        .await;
+    println!("Running scan ban tests...");
+
+    let localhost: std::net::IpAddr = Ipv4Addr::LOCALHOST.into();
+    let ban = || async {
+        test.server
+            .registry()
+            .primary_key(
+                ObjectType::BlockedIp.into(),
+                Property::Address,
+                IpAddrOrMask::from_ip(localhost).to_index_key(),
+            )
+            .await
+            .unwrap()
+    };
+    assert!(ban().await.is_none(), "not banned before the test");
+
+    // `/x.php` is answered with a redirect to `/x.php/`, which the browser
+    // follows with the same Sec-Fetch-Site
+    for site in ["cross-site", "same-site", "CROSS-SITE"] {
+        for path in ["/x.php", "/wp-admin/setup-config.php"] {
+            let status = get_scan_path(path, Some(site))
+                .await
+                .unwrap_or_else(|err| panic!("{site} {path}: {err}"));
+            assert_eq!(status, 404, "{site} {path}");
+            assert!(
+                ban().await.is_none() && !test.server.is_ip_blocked(localhost),
+                "a {site} request for {path} banned its address"
+            );
+        }
+    }
+
+    // The browser's own navigations and fetches from this origin, and
+    // requests that say nothing, are banned as before
+    for site in [Some("same-origin"), Some("none"), None] {
+        let status = get_scan_path("/x.php", site)
+            .await
+            .unwrap_or_else(|err| panic!("{site:?}: {err}"));
+        assert_eq!(status, 404, "{site:?}");
+        let blocked_id = ban()
+            .await
+            .unwrap_or_else(|| panic!("a {site:?} scan request should ban its address"));
+        let blocked_ip = test
+            .server
+            .registry()
+            .object::<BlockedIp>(blocked_id.id())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(blocked_ip.reason, BlockReason::PortScanning, "{site:?}");
+        assert!(test.server.is_ip_blocked(localhost), "{site:?}");
+        assert!(
+            get_scan_path("/", None).await.is_err(),
+            "{site:?}: the banned address is turned away"
+        );
+
+        // Lift ban
+        test.server
+            .registry()
+            .write(RegistryWrite::delete(blocked_id))
+            .await
+            .unwrap()
+            .unwrap_id(trc::location!());
+        test.server
+            .reload_registry(RegistryChange::Delete(blocked_id))
+            .await
+            .unwrap();
+        assert!(!test.server.is_ip_blocked(localhost), "{site:?}: lifted");
+    }
+
+    if test.is_reset() {
+        test.temp_dir.delete();
+    }
+}
+
+/// GETs `path` on a new connection, with `Sec-Fetch-Site: site` when given,
+/// following redirects; the final status, or an error when the server
+/// turned the connection away
+async fn get_scan_path(path: &str, site: Option<&str>) -> Result<u16, String> {
+    let mut request = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .danger_accept_invalid_certs(true)
+        .pool_max_idle_per_host(0)
+        .build()
+        .unwrap()
+        .get(format!("https://127.0.0.1:8899{path}"));
+    if let Some(site) = site {
+        request = request.header("Sec-Fetch-Site", site);
+    }
+    let response = request.send().await.map_err(|err| err.to_string())?;
+    match response.status().as_u16() {
+        // inbuxa: a banned address is turned away when it connects, or with
+        // a 403 on a connection it already had
+        403 => Err("forbidden".to_string()),
+        status => Ok(status),
+    }
+}
