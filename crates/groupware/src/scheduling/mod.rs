@@ -210,11 +210,12 @@ pub struct ItipMessages {
     pub messages: Vec<TaskCalendarItipContents>,
 }
 
+// RSVP=FALSE only means no reply is expected (RFC 5545, section 3.2.17): such an
+// attendee is still sent requests, updates and cancellations (RFC 5546, section 4.2.1).
 impl Attendee<'_> {
     pub fn send_invite_messages(&self) -> bool {
         !self.email.is_local
             && self.is_server_scheduling
-            && self.rsvp.is_none_or(|rsvp| rsvp)
             && (self.force_send.is_some()
                 || self.part_stat.is_none_or(|part_stat| {
                     part_stat == &ICalendarParticipationStatus::NeedsAction
@@ -224,7 +225,6 @@ impl Attendee<'_> {
     pub fn send_update_messages(&self) -> bool {
         !self.email.is_local
             && self.is_server_scheduling
-            && self.rsvp.is_none_or(|rsvp| rsvp)
             && (self.force_send.is_some()
                 || self
                     .part_stat
@@ -452,5 +452,89 @@ impl Display for ItipError {
                 write!(f, "Auto-adding events is disabled for this account")
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ItipMessage, event_cancel::itip_cancel, event_create::itip_create,
+        event_update::itip_update, itip::itip_unreachable_recipient,
+    };
+    use calcard::icalendar::ICalendar;
+
+    fn account() -> Vec<String> {
+        vec!["organizer@example.com".to_string()]
+    }
+
+    fn parse(ical: &str) -> ICalendar {
+        ICalendar::parse(ical.replace('\n', "\r\n")).expect("Invalid iCalendar")
+    }
+
+    fn recipients(messages: &[ItipMessage<ICalendar>]) -> Vec<&str> {
+        let mut recipients = messages
+            .iter()
+            .flat_map(|message| message.to.iter().map(|to| to.as_str()))
+            .collect::<Vec<_>>();
+        recipients.sort_unstable();
+        recipients
+    }
+
+    fn rsvp_false_event(start: &str, observer: &str) -> String {
+        format!(
+            "BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Test//EN
+BEGIN:VEVENT
+UID:rsvp-false@example.com
+DTSTAMP:20260101T000000Z
+DTSTART:{start}
+DURATION:PT1H
+SUMMARY:Planning
+ORGANIZER:mailto:organizer@example.com
+ATTENDEE;RSVP=TRUE:mailto:guest@example.com
+ATTENDEE;ROLE=NON-PARTICIPANT;RSVP=FALSE:{observer}
+END:VEVENT
+END:VCALENDAR
+"
+        )
+    }
+
+    // RSVP=FALSE only says no reply is expected (RFC 5545, section 3.2.17); the
+    // attendee is still sent the request, its updates and its cancellation.
+    #[test]
+    fn rsvp_false_attendees_are_scheduled() {
+        let account = account();
+        let mut ical = parse(&rsvp_false_event(
+            "20300101T100000Z",
+            "mailto:observer@example.com",
+        ));
+        let messages = itip_create(&mut ical, &account).expect("Invitation expected");
+        assert_eq!(
+            recipients(&messages),
+            ["guest@example.com", "observer@example.com"]
+        );
+
+        let mut moved = parse(&rsvp_false_event(
+            "20300101T120000Z",
+            "mailto:observer@example.com",
+        ));
+        let messages = itip_update(&mut moved, &ical, &account).expect("Update expected");
+        assert_eq!(
+            recipients(&messages),
+            ["guest@example.com", "observer@example.com"]
+        );
+
+        let message = itip_cancel(&moved, &account, true).expect("Cancellation expected");
+        let mut to = message.to.iter().map(|to| to.as_str()).collect::<Vec<_>>();
+        to.sort_unstable();
+        assert_eq!(to, ["guest@example.com", "observer@example.com"]);
+
+        // Since they are scheduled, an address that can't be reached is reported too
+        let ical = parse(&rsvp_false_event("20300101T100000Z", "mailto:observer"));
+        assert_eq!(
+            itip_unreachable_recipient(&ical, &account),
+            Some("mailto:observer")
+        );
     }
 }
