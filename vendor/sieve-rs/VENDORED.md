@@ -71,6 +71,21 @@ Every changed file carries the AGPL 5(a) notice in its header.
   delivery on a message with nested parts. Headers are added and removed
   only on a part that exists, and the message size can't wrap below zero.
   The `sieve_replace_inside_foreverypart` test in `crates/common` covers it.
+- `src/runtime/actions/action_vacation.rs`, `action_notify.rs`,
+  `action_mime.rs`, `action_editheader.rs`, `src/runtime/context.rs`: every
+  header value written into a message the runtime builds (the vacation
+  reply, the notify mailto message, `enclose`, `replace`, `addheader`) goes
+  through `remove_crlf`, which drops CR, LF and every other control but tab
+  and caps it at the runtime's `max_header_size`. That covers values from
+  the script (`:subject`, `:from`, `:message`), from the mailto URI and
+  from the inbound message (its Subject, decoded, so an RFC 2047 word can
+  carry a CR or LF; its Message-ID), and the account's name in From. Upstream wrote the
+  vacation and notify headers raw and enclose's Subject fallback raw, so a
+  Subject like `=?utf-8?b?eA0KQmNjOiB2aWN0aW1AZXhhbXBsZS5jb20=?=` put a
+  `Bcc:` line into a signed auto-reply. A mailto URI whose parameter name
+  isn't a field name, or whose address holds a control (a `%0D%0A`), is
+  refused. The `header_injection_tests` in `action_editheader.rs` cover it
+  (run like `scan_limit_tests`).
 - `Cargo.toml`: the example target is dropped, with the top-level
   `examples/` and `tests/`, which the server never builds. (`src/` keeps its
   own `tests` modules: the crate declares them.)
