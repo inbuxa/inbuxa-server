@@ -367,6 +367,10 @@ pub async fn test(test: &mut TestServer) {
                 Permission::SysAccountQuery,
                 Permission::SysAccountUpdate,
                 Permission::SysAccountDestroy,
+                Permission::SysRoleGet,
+                Permission::SysRoleQuery,
+                Permission::SysRoleCreate,
+                Permission::SysRoleUpdate,
             ]),
             ..Default::default()
         })
@@ -438,6 +442,11 @@ pub async fn test(test: &mut TestServer) {
         .registry_destroy_object_expect_err(ObjectType::Account, boss_id)
         .await
         .assert_type(SetErrorType::Forbidden);
+
+    // inbuxa: a role manager used to be able to make the administrator role a
+    // parent of a role they hold, since only the role's own lists were checked
+    let parent_role_ids = roles_bring_their_parents(test, &limited, limited_role_id).await;
+
     admin
         .registry_destroy(ObjectType::Account, account_ids.clone())
         .await
@@ -446,6 +455,12 @@ pub async fn test(test: &mut TestServer) {
         .registry_destroy(ObjectType::Role, [limited_role_id, minion_role_id])
         .await
         .assert_destroyed(&[limited_role_id, minion_role_id]);
+    for role_id in parent_role_ids {
+        admin
+            .registry_destroy(ObjectType::Role, [role_id])
+            .await
+            .assert_destroyed(&[role_id]);
+    }
 
     // Destroy test data
     for (account, ids) in [(&john, &john_ids), (&jane, &jane_ids)] {
@@ -460,6 +475,131 @@ pub async fn test(test: &mut TestServer) {
     admin.destroy_account(jane).await;
 
     test.cleanup().await;
+}
+
+/// `manager` holds `manager_role_id`, which lets it manage roles and accounts
+/// but not much else. Returns the roles it made, for the caller to remove
+/// once `manager_role_id` is gone.
+async fn roles_bring_their_parents(
+    test: &TestServer,
+    manager: &crate::utils::account::Account,
+    manager_role_id: Id,
+) -> Vec<Id> {
+    let admin = test.account("admin@example.org");
+    let manager_id = manager.id();
+    let system_role_id = *admin
+        .registry_query_ids(
+            ObjectType::Role,
+            [(Property::Description, "system")],
+            Vec::<&str>::new(),
+        )
+        .await
+        .first()
+        .expect("system role");
+    // Reaches the administrator role one step removed
+    let middle_role_id = admin
+        .registry_create_object(Role {
+            description: "Middle".to_string(),
+            role_ids: Map::new(vec![system_role_id]),
+            ..Default::default()
+        })
+        .await;
+    // Holds what the manager lacks, but turns it off again
+    let muted_role_id = admin
+        .registry_create_object(Role {
+            description: "Muted".to_string(),
+            enabled_permissions: Map::new(vec![
+                Permission::Authenticate,
+                Permission::SysTenantDestroy,
+            ]),
+            disabled_permissions: Map::new(vec![Permission::SysTenantDestroy]),
+            ..Default::default()
+        })
+        .await;
+    let signer_role_id = admin
+        .registry_create_object(Role {
+            description: "Signer".to_string(),
+            enabled_permissions: Map::new(vec![Permission::Authenticate]),
+            ..Default::default()
+        })
+        .await;
+
+    // The administrator role as a parent of its own role, directly or one
+    // step removed, or of a new role: refused
+    for parent_id in [system_role_id, middle_role_id] {
+        manager
+            .registry_update_object_expect_err(
+                ObjectType::Role,
+                manager_role_id,
+                json!({ Property::RoleIds: Map::new(vec![parent_id]) }),
+            )
+            .await
+            .assert_type(SetErrorType::Forbidden);
+    }
+    manager
+        .registry_create_object_expect_err(Role {
+            description: "Back door".to_string(),
+            role_ids: Map::new(vec![system_role_id]),
+            ..Default::default()
+        })
+        .await
+        .assert_type(SetErrorType::Forbidden);
+    // Nor through its own account's roles
+    manager
+        .registry_update_object_expect_err(
+            ObjectType::Account,
+            manager_id,
+            json!({
+                Property::Roles: UserRoles::Custom(CustomRoles {
+                    role_ids: Map::new(vec![manager_role_id, system_role_id]),
+                })
+            }),
+        )
+        .await
+        .assert_type(SetErrorType::Forbidden);
+    let token = test
+        .server
+        .access_token(manager_id.document_id())
+        .await
+        .unwrap()
+        .build();
+    assert!(!token.has_permission(Permission::SysTenantDestroy));
+
+    // A parent bringing only what it holds, or what it turns off, is fine,
+    // and so is a cycle back to the role being changed
+    manager
+        .registry_update_object(
+            ObjectType::Role,
+            manager_role_id,
+            json!({ Property::RoleIds: Map::new(vec![signer_role_id, muted_role_id]) }),
+        )
+        .await;
+    manager
+        .registry_update_object(
+            ObjectType::Role,
+            signer_role_id,
+            json!({ Property::RoleIds: Map::new(vec![manager_role_id]) }),
+        )
+        .await;
+    // A parent that doesn't exist is a foreign key error, as before
+    manager
+        .registry_update_object_expect_err(
+            ObjectType::Role,
+            manager_role_id,
+            json!({ Property::RoleIds: Map::new(vec![Id::from(999_999u64)]) }),
+        )
+        .await
+        .assert_type(SetErrorType::InvalidForeignKey);
+
+    // Break the cycle so the roles can go
+    admin
+        .registry_update_object(
+            ObjectType::Role,
+            signer_role_id,
+            json!({ Property::RoleIds: Map::new(Vec::<Id>::new()) }),
+        )
+        .await;
+    vec![signer_role_id, muted_role_id, middle_role_id]
 }
 
 const SMIME_CERTIFICATE: &str = "-----BEGIN CERTIFICATE-----

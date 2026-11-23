@@ -34,11 +34,24 @@ impl Server {
 
     pub async fn add_role_permissions(
         &self,
+        base_permissions: PermissionsGroup,
+        roles: impl IntoIterator<Item = u32>,
+    ) -> trc::Result<PermissionsGroup> {
+        self.add_role_permissions_except(base_permissions, roles, None)
+            .await
+    }
+
+    /// inbuxa: as `add_role_permissions`, leaving out one role: the one being
+    /// changed, whose stored version a cycle would otherwise bring back
+    pub async fn add_role_permissions_except(
+        &self,
         mut base_permissions: PermissionsGroup,
         roles: impl IntoIterator<Item = u32>,
+        except_role_id: Option<u32>,
     ) -> trc::Result<PermissionsGroup> {
         let mut role_ids = roles.into_iter().collect::<Vec<u32>>();
         let mut fetched_role_ids = AHashSet::new();
+        fetched_role_ids.extend(except_role_id);
 
         while let Some(role_id) = role_ids.pop() {
             if fetched_role_ids.insert(role_id) {

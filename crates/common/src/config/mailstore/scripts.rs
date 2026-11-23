@@ -515,4 +515,47 @@ if header :regex "x-h" "${p}" { discard; }
         );
         assert!(built.contains("wrapped"), "{built}");
     }
+
+    // inbuxa: an inbound Subject that decodes to a CR or LF doesn't add a
+    // header to the vacation reply, the notify message or enclose's message
+    #[test]
+    fn sieve_generated_messages_take_no_header_from_the_subject() {
+        let runtime = sieve::Runtime::new();
+        // "x\r\nBcc: victim@example.com", RFC 2047 encoded
+        let message = concat!(
+            "From: sender@example.org\r\nTo: john@example.com\r\n",
+            "Subject: =?utf-8?b?eA0KQmNjOiB2aWN0aW1AZXhhbXBsZS5jb20=?=\r\n\r\nbody\r\n"
+        );
+        for script in [
+            "require \"vacation\";\nvacation \"away\";\n",
+            "require \"enotify\";\nnotify \"mailto:john@example.net\";\n",
+            "require \"enclose\";\nenclose \"wrapped\";\nkeep;\n",
+        ] {
+            let compiled =
+                std::sync::Arc::new(sieve::Compiler::new().compile(script.as_bytes()).unwrap());
+            let mut ctx = runtime
+                .filter(message.as_bytes())
+                .with_envelope(sieve::Envelope::From, "sender@example.org")
+                .with_envelope(sieve::Envelope::To, "john@example.com")
+                .with_user_address("john@example.com");
+            let mut input = sieve::Input::script("test", compiled);
+            let mut created = Vec::new();
+            while let Some(event) = ctx.run(input) {
+                input = match event.unwrap() {
+                    sieve::Event::CreatedMessage { message, .. } => {
+                        created.push(String::from_utf8(message).unwrap());
+                        sieve::Input::True
+                    }
+                    sieve::Event::DuplicateId { .. } => sieve::Input::False,
+                    _ => sieve::Input::True,
+                };
+            }
+            assert_eq!(created.len(), 1, "{script}");
+            let headers = created[0].split("\r\n\r\n").next().unwrap();
+            assert!(
+                headers.contains("Subject: ") && !headers.to_ascii_lowercase().contains("\nbcc:"),
+                "{script}{headers}"
+            );
+        }
+    }
 }
