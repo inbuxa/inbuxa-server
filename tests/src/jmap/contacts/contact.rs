@@ -382,8 +382,9 @@ pub async fn test(test: &TestServer) {
             .collect::<AHashSet<_>>()
     );
 
-    // Parse tests
-    account
+    // Parse tests: every vCard in a blob comes back, in order, and a blob with no
+    // vCard in it is not parsable
+    let response = account
         .jmap_method_calls(json!([
          [
           "Blob/upload",
@@ -398,12 +399,28 @@ VERSION:4.0
 KIND:individual
 FN:Jane Doe
 ORG:ABC\, Inc.;North American Division;Marketing
-END:VCARD"#
+END:VCARD
+BEGIN:VCARD
+VERSION:4.0
+FN:John Roe
+END:VCARD
+BEGIN:VCARD
+VERSION:4.0
+FN:Mary Major
+END:VCARD
+"#
               }
             ]
+           },
+            "junk": {
+             "data": [
+              {
+               "data:asText": "This is not a vCard.\r\n"
+              }
+             ]
+            }
            }
-          }
-         },
+          },
          "S4"
         ],
         [
@@ -411,52 +428,74 @@ END:VCARD"#
           {
            "accountId": account.id_string(),
            "blobIds": [
-             "#vcard"
+             "#vcard",
+             "#junk"
            ]
           },
           "G4"
          ]
         ]))
-        .await
+        .await;
+    let parsed = response
         .pointer("/methodResponses/1/1/parsed")
         .unwrap()
         .as_object()
-        .unwrap()
-        .iter()
-        .next()
-        .unwrap()
-        .1
-        .assert_is_equal(json!({
-          "name": {
-            "full": "Jane Doe"
-          },
-          "version": "1.0",
-          "vCard": {
-            "properties": [
-              [
-                "version",
-                {},
-                "unknown",
-                "4.0"
-              ]
-            ]
-          },
-          "organizations": {
-            "k1": {
-              "name": "ABC, Inc.",
-              "units": [
-                {
-                  "name": "North American Division"
-                },
-                {
-                  "name": "Marketing"
-                }
-              ]
+        .unwrap();
+    assert_eq!(parsed.len(), 1, "{response}");
+    let cards = parsed.values().next().unwrap().as_array().unwrap();
+    assert_eq!(cards.len(), 3, "{response}");
+    cards[0].assert_is_equal(json!({
+      "name": {
+        "full": "Jane Doe"
+      },
+      "version": "1.0",
+      "vCard": {
+        "properties": [
+          [
+            "version",
+            {},
+            "unknown",
+            "4.0"
+          ]
+        ]
+      },
+      "organizations": {
+        "k1": {
+          "name": "ABC, Inc.",
+          "units": [
+            {
+              "name": "North American Division"
+            },
+            {
+              "name": "Marketing"
             }
-          },
-          "@type": "Card",
-          "kind": "individual"
-        }));
+          ]
+        }
+      },
+      "@type": "Card",
+      "kind": "individual"
+    }));
+    assert_eq!(
+        cards
+            .iter()
+            .map(|card| card.pointer("/name/full").and_then(|v| v.as_str()))
+            .collect::<Vec<_>>(),
+        [Some("Jane Doe"), Some("John Roe"), Some("Mary Major")],
+        "{response}"
+    );
+    assert_eq!(
+        response
+            .pointer("/methodResponses/1/1/notParsable")
+            .and_then(|v| v.as_array())
+            .map(|v| v.len()),
+        Some(1),
+        "{response}"
+    );
+    assert_eq!(
+        response.pointer("/methodResponses/1/1/notParsable/0"),
+        response.pointer("/methodResponses/0/1/created/junk/id"),
+        "{response}"
+    );
 
     // Deletion tests
     test.wait_for_tasks().await;
