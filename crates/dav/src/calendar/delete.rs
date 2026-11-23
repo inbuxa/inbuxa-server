@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
@@ -85,12 +87,10 @@ impl CalendarDeleteRequestHandler for Server {
         if delete_resource.is_container() {
             // Deleting the default calendar is not allowed
             #[cfg(not(any(feature = "dev_mode", feature = "test_mode")))]
-            if self
-                .core
-                .groupware
-                .default_calendar_name
-                .as_ref()
-                .is_some_and(|name| name == delete_path)
+            if super::default_calendar_id(self, &resources, account_id)
+                .await
+                .caused_by(trc::location!())?
+                == Some(document_id)
             {
                 return Err(DavError::Condition(crate::DavErrorCondition::new(
                     StatusCode::FORBIDDEN,

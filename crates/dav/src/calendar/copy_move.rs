@@ -76,12 +76,10 @@ impl CalendarCopyMoveRequestHandler for Server {
         #[cfg(not(any(feature = "dev_mode", feature = "test_mode")))]
         if is_move
             && from_resource.is_container()
-            && self
-                .core
-                .groupware
-                .default_calendar_name
-                .as_ref()
-                .is_some_and(|name| name == from_resource_name)
+            && super::default_calendar_id(self, &from_resources, from_account_id)
+                .await
+                .caused_by(trc::location!())?
+                == Some(from_resource.document_id())
         {
             return Err(DavError::Condition(crate::DavErrorCondition::new(
                 StatusCode::FORBIDDEN,

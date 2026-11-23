@@ -1111,7 +1111,30 @@ impl PropFindRequestHandler for Server {
                             CalDavProperty::ScheduleDefaultCalendarURL,
                             ArchivedResource::CalendarEventNotificationCollection(true),
                         ) => {
-                            if let Some(default_cal) = &self.core.groupware.default_calendar_name {
+                            // inbuxa: report the same default calendar as JMAP
+                            let calendars = self
+                                .fetch_dav_resources(
+                                    access_token.account_id(),
+                                    account_id,
+                                    SyncCollection::Calendar,
+                                )
+                                .await
+                                .caused_by(trc::location!())?;
+                            if let Some(default_cal) =
+                                crate::calendar::default_calendar_id(self, &calendars, account_id)
+                                    .await
+                                    .caused_by(trc::location!())?
+                                    .and_then(|document_id| {
+                                        calendars.container_resource_path_by_id(document_id)
+                                    })
+                            {
+                                fields.push(DavPropertyValue::new(
+                                    property.clone(),
+                                    vec![Href(calendars.format_resource(default_cal))],
+                                ));
+                            } else if let Some(default_cal) =
+                                &self.core.groupware.default_calendar_name
+                            {
                                 fields.push(DavPropertyValue::new(
                                     property.clone(),
                                     vec![Href(format!(

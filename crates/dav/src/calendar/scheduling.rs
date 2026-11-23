@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
@@ -380,12 +382,10 @@ impl CalendarEventNotificationHandler for Server {
                     )
                     .await
                     .caused_by(trc::location!())?;
-                if let Some(resource) = self
-                    .core
-                    .groupware
-                    .default_calendar_name
-                    .as_ref()
-                    .and_then(|name| resources.by_path(name))
+                if let Some(resource) = super::default_calendar_id(self, &resources, account_id)
+                    .await
+                    .caused_by(trc::location!())?
+                    .and_then(|document_id| resources.container_resource_path_by_id(document_id))
                 {
                     let mut free_busy = self
                         .build_freebusy_object(

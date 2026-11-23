@@ -25,8 +25,12 @@ use dav_proto::schema::{
 };
 use groupware::scheduling::ItipError;
 use hyper::StatusCode;
+use store::{ValueKey, write::ValueClass};
 use trc::AddContext;
-use types::{collection::Collection, field::CalendarEventField};
+use types::{
+    collection::Collection,
+    field::{CalendarEventField, PrincipalField},
+};
 
 pub(crate) static CALENDAR_CONTAINER_PROPS: [DavProperty; 31] = [
     DavProperty::WebDav(WebDavProperty::CreationDate),
@@ -121,6 +125,38 @@ pub(crate) async fn assert_is_unique_uid(
     }
 
     Ok(())
+}
+
+// inbuxa: the account's default calendar as CalDAV sees it. This is the one chosen
+// over JMAP while it exists, else the calendar at the configured default name.
+pub(crate) async fn default_calendar_id(
+    server: &Server,
+    resources: &DavResources,
+    account_id: u32,
+) -> trc::Result<Option<u32>> {
+    if let Some(document_id) = server
+        .store()
+        .get_value::<u32>(ValueKey {
+            account_id,
+            collection: Collection::Principal.into(),
+            document_id: 0,
+            class: ValueClass::Property(PrincipalField::DefaultCalendarId.into()),
+        })
+        .await
+        .caused_by(trc::location!())?
+        && resources.has_container_id(&document_id)
+    {
+        return Ok(Some(document_id));
+    }
+
+    Ok(server
+        .core
+        .groupware
+        .default_calendar_name
+        .as_ref()
+        .and_then(|name| resources.by_path(name))
+        .filter(|resource| resource.is_container())
+        .map(|resource| resource.document_id()))
 }
 
 pub(crate) trait ItipPrecondition {
