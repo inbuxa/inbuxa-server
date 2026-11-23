@@ -645,13 +645,14 @@ impl<T: SessionStream> SessionData<T> {
                 did_move = true;
             }
 
-            // Broadcast changes on destination account
+            // Broadcast changes on destination account. inbuxa: no
+            // EmailDelivery, also when the destination is another account:
+            // a copy or move is not mail that arrives (RFC 8621, section 1.5)
             if let Some(change_id) = dest_change_id {
                 self.server
                     .broadcast_push_notification(PushNotification::StateChange(
                         StateChange::new(dest_account_id)
                             .with_change_id(change_id)
-                            .with_change(DataType::EmailDelivery)
                             .with_change(DataType::Email)
                             .with_change(DataType::Thread)
                             .with_change(DataType::Mailbox),
