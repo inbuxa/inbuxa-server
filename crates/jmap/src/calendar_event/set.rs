@@ -460,14 +460,19 @@ impl CalendarEventSet for Server {
                 &mut next_email_alarm,
             );
 
-            // Scheduling
+            // Scheduling. The later of the stored and the new range end is used, so an
+            // organizer who cuts a series short (or moves an event into the past) still
+            // tells the attendees about it.
             let mut itip_messages = None;
             let itip_status = if send_scheduling_messages {
                 ItipSendStatus::resolve(
                     self,
                     access_token,
                     &account_info,
-                    new_calendar_event.data.event_range_end(),
+                    new_calendar_event
+                        .data
+                        .event_range_end()
+                        .max(calendar_event.inner.data.event_range_end()),
                 )
             } else {
                 ItipSendStatus::NotRequested
