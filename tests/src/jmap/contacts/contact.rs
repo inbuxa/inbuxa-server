@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::utils::{
@@ -608,6 +610,67 @@ END:VCARD"#
         .into_propfind_response(None)
         .properties(&href_in_book2)
         .with_status(StatusCode::NOT_FOUND);
+
+    // An online service with a user name and no URI survives a save and a fetch, and
+    // its vCard carries the user name as a TEXT value
+    let online_services = json!({
+        "os1": {
+            "service": "Mastodon",
+            "user": "jdoe"
+        },
+        "os2": {
+            "service": "Mastodon",
+            "uri": "https://example.com/@jdoe",
+            "user": "jdoe"
+        }
+    });
+    let card_id = account
+        .jmap_create(
+            MethodObject::ContactCard,
+            [json!({
+                "uid": "urn:uuid:3d6f0a52-8c1e-4b7a-9f2d-6e5c4b3a2910",
+                "name": {
+                    "full": "Online Contact",
+                },
+                "onlineServices": &online_services,
+                "addressBookIds": {
+                    &book1_id: true
+                },
+            })],
+            Vec::<(&str, &str)>::new(),
+        )
+        .await
+        .created(0)
+        .id()
+        .to_string();
+    let response = account
+        .jmap_get(MethodObject::ContactCard, ["onlineServices"], [&card_id])
+        .await;
+    assert_eq!(
+        response.list()[0].get("onlineServices"),
+        Some(&online_services),
+        "{response}"
+    );
+    let path = test
+        .server
+        .fetch_dav_resources(account_id, account_id, SyncCollection::AddressBook)
+        .await
+        .unwrap()
+        .format_resource_paths_by_id(Id::from_str(&card_id).unwrap().document_id())
+        .next()
+        .unwrap();
+    let vcard = dav_client
+        .request("GET", &path, "")
+        .await
+        .with_status(StatusCode::OK)
+        .expect_body()
+        .to_string();
+    assert!(
+        vcard.lines().any(|line| line.starts_with("SOCIALPROFILE;")
+            && line.contains("VALUE=TEXT")
+            && line.ends_with(":jdoe")),
+        "{vcard}"
+    );
 
     // Clean up
     test.wait_for_tasks().await;

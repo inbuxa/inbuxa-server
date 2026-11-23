@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: Apache-2.0 OR MIT
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::common::CalendarScale;
@@ -703,5 +705,91 @@ mod tests {
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod online_service_tests {
+    // An online service known only by its user name survives the trip through vCard.
+    use crate::{jscontact::JSContact, vcard::VCard};
+    use serde_json::{Value, json};
+
+    fn online_services(vcard: &str) -> Value {
+        let card = VCard::parse(vcard).unwrap();
+        let js = serde_json::to_value(card.into_jscontact::<String, String>().0).unwrap();
+        js.get("onlineServices").cloned().unwrap_or(Value::Null)
+    }
+
+    fn roundtrip(card: Value) -> (String, Value) {
+        let text = card.to_string();
+        let vcard = JSContact::<String, String>::parse(&text)
+            .unwrap()
+            .into_vcard()
+            .unwrap()
+            .to_string();
+        let services = online_services(&vcard);
+        (vcard, services)
+    }
+
+    #[test]
+    fn user_only_online_service_survives_roundtrip() {
+        let (vcard, services) = roundtrip(json!({
+            "@type": "Card",
+            "version": "1.0",
+            "uid": "urn:uuid:5a0f3b8e-3c55-4f1e-9a33-0b8b7a2f9d01",
+            "onlineServices": {
+                "x": {"user": "jdoe", "service": "Mastodon"}
+            }
+        }));
+        let service = &services["x"];
+        assert_eq!(service["user"], "jdoe", "{vcard}\n{services}");
+        assert_eq!(service["service"], "Mastodon", "{vcard}\n{services}");
+        assert!(service.get("uri").is_none(), "{vcard}\n{services}");
+    }
+
+    #[test]
+    fn uri_and_user_online_service_survives_roundtrip() {
+        let (vcard, services) = roundtrip(json!({
+            "@type": "Card",
+            "version": "1.0",
+            "uid": "urn:uuid:5a0f3b8e-3c55-4f1e-9a33-0b8b7a2f9d02",
+            "onlineServices": {
+                "x": {
+                    "uri": "https://example.com/@jdoe",
+                    "user": "jdoe",
+                    "service": "Mastodon"
+                }
+            }
+        }));
+        let service = &services["x"];
+        assert_eq!(
+            service["uri"], "https://example.com/@jdoe",
+            "{vcard}\n{services}"
+        );
+        assert_eq!(service["user"], "jdoe", "{vcard}\n{services}");
+        assert_eq!(service["service"], "Mastodon", "{vcard}\n{services}");
+    }
+
+    #[test]
+    fn text_socialprofile_imports_as_user() {
+        let services = online_services(
+            "BEGIN:VCARD\r\nVERSION:4.0\r\nSOCIALPROFILE;SERVICE-TYPE=SomeSite;VALUE=text:peter94\r\nEND:VCARD\r\n",
+        );
+        let service = services.as_object().unwrap().values().next().unwrap();
+        assert_eq!(service["user"], "peter94", "{services}");
+        assert_eq!(service["service"], "SomeSite", "{services}");
+        assert!(service.get("uri").is_none(), "{services}");
+    }
+
+    #[test]
+    fn empty_socialprofile_with_username_imports_as_user() {
+        // What earlier versions stored for a user-only online service.
+        let services = online_services(
+            "BEGIN:VCARD\r\nVERSION:4.0\r\nSOCIALPROFILE;SERVICE-TYPE=Mastodon;USERNAME=jdoe;PROP-ID=x:\r\nEND:VCARD\r\n",
+        );
+        let service = &services["x"];
+        assert_eq!(service["user"], "jdoe", "{services}");
+        assert_eq!(service["service"], "Mastodon", "{services}");
+        assert!(service.get("uri").is_none(), "{services}");
     }
 }

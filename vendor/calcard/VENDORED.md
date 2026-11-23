@@ -51,6 +51,17 @@ Every changed file carries a Coffey Labs notice in its header.
   right), and the server then read the series in the zone each request asked
   for. The `start_zone_tests` in `dates.rs` cover it. calcard 0.4 makes the
   same change.
+- `src/jscontact/export/convert.rs`, `src/jscontact/import/convert.rs`: a
+  JSContact online service with a `user` and no `uri` is written as a
+  `SOCIALPROFILE;VALUE=TEXT` whose value is the user name, and a TEXT
+  `SOCIALPROFILE` reads back as `user` (RFC 9555, Section 2.7.5). Upstream
+  wrote the user name in a `USERNAME` parameter on an empty value, which read
+  back as nothing (or as `"uri": ""`), so the service was lost; such a stored
+  vCard now reads back as `user` too. A service with a `uri` still carries
+  its user name in `USERNAME`. The crate's `resources/jscontact/017_rfc9554.txt`
+  case "RFC9554 SOCIALPROFILE" expects the TEXT value as `uri`; with this
+  change it is `user` (the only case in `convert_jscontact` that changes).
+  The `online_service_tests` in `src/jscontact/mod.rs` cover it.
 
 ## Updating
 
