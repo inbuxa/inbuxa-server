@@ -13,8 +13,18 @@ use crate::{
     utils::{dns::DnsCache, server::TestServer, smtp::SmtpConnection},
 };
 use chrono::{TimeDelta, Utc};
+use email::{
+    cache::{MessageCacheFetch, email::MessageCacheAccess},
+    mailbox::JUNK_ID,
+};
 use jmap_client::core::response::VacationResponseSetResponse;
-use registry::schema::prelude::{ObjectType, Property};
+use registry::{
+    schema::{
+        prelude::{ObjectType, Property},
+        structs::{SpamTag, SpamTagScore},
+    },
+    types::float::Float,
+};
 use serde_json::json;
 use std::time::Instant;
 
@@ -138,6 +148,55 @@ pub async fn test(test: &TestServer) {
     .await;
 
     expect_nothing(&mut smtp_rx).await;
+
+    // inbuxa: #543: no vacation response to a message the spam filter
+    // classified as spam (filed in Junk), from a sender not answered yet
+    let admin = test.account("admin@example.com");
+    let gtube_score = admin
+        .registry_create_object(SpamTag::Score(SpamTagScore {
+            score: Float::new(1000.0),
+            tag: "GTUBE_TEST".to_string(),
+        }))
+        .await;
+    admin.reload_settings().await;
+    let junk_count = || async {
+        server
+            .get_cached_messages(account.id().document_id())
+            .await
+            .unwrap()
+            .in_mailbox(JUNK_ID)
+            .count()
+    };
+    let junk_before = junk_count().await;
+    let mut spam_lmtp = SmtpConnection::connect().await;
+    spam_lmtp
+        .ingest(
+            "spammer@remote.org",
+            &["jdoe@example.com"],
+            concat!(
+                "From: spammer@remote.org\r\n",
+                "To: jdoe@example.com\r\n",
+                "Subject: XJS*C4JDBQADN1.NSBN3*2IDNEN*GTUBE-STANDARD-ANTI-UBE-TEST-EMAIL*C.34X\r\n",
+                "\r\n",
+                "Spam that must not be answered.",
+            ),
+        )
+        .await;
+    spam_lmtp.quit().await;
+    let started = Instant::now();
+    while junk_count().await == junk_before {
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "the spam message wasn't filed in Junk"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    expect_nothing(&mut smtp_rx).await;
+    admin
+        .registry_destroy(ObjectType::SpamTag, [gtube_score])
+        .await
+        .assert_destroyed(&[gtube_score]);
+    admin.reload_settings().await;
 
     // Vacation responses should honor the configured date ranges
     client
