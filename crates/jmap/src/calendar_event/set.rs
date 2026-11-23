@@ -299,6 +299,16 @@ impl CalendarEventSet for Server {
             limit_component_depth(&mut new_calendar_event.data.event);
             let mut js_calendar_group =
                 std::mem::take(&mut new_calendar_event.data.event).into_jscalendar::<Id, BlobId>();
+            let stored_time_zones = js_calendar_group
+                .event_mut()
+                .and_then(|event| event.as_object())
+                .map(|event| {
+                    event_time_zones(event)
+                        .into_iter()
+                        .map(|(_, name)| name)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
 
             // Apply per-instance changes to the recurrence overrides of the base event
             if has_instances && !update.apply_instances(&mut js_calendar_group, &mut response) {
@@ -312,6 +322,7 @@ impl CalendarEventSet for Server {
                 update.base_patch.take().unwrap_or_default(),
                 &mut new_calendar_event,
                 &mut js_calendar_group,
+                &stored_time_zones,
             ) {
                 update.fail(&mut response, err);
                 continue 'update;
@@ -739,6 +750,7 @@ impl CalendarEventSet for Server {
             updates,
             &mut event,
             &mut js_calendar_group,
+            &[],
         ) {
             Ok(use_default_alerts) => use_default_alerts,
             Err(err) => {
@@ -976,6 +988,7 @@ fn update_calendar_event<'x>(
     updates: Value<'x, JSCalendarProperty<Id>, JSCalendarValue<Id, BlobId>>,
     event: &mut CalendarEvent,
     js_calendar_group: &mut JSCalendar<'x, Id, BlobId>,
+    stored_time_zones: &[String],
 ) -> Result<Option<bool>, SetError<JSCalendarProperty<Id>>> {
     // Extract event
     let js_calendar_events = js_calendar_group
@@ -1139,6 +1152,16 @@ fn update_calendar_event<'x>(
                 entries.insert(property, value);
             }
         }
+    }
+
+    // inbuxa: a time zone name the server can't resolve would be stored as floating
+    // time, so a new one is refused. Names the stored event already had are kept.
+    if let Some((property, name)) = event_time_zones(entries).into_iter().find(|(_, name)| {
+        Tz::from_str(name).is_err() && !stored_time_zones.iter().any(|stored| stored == name)
+    }) {
+        return Err(SetError::invalid_properties()
+            .with_property(property)
+            .with_description(format!("Unknown time zone \"{name}\".")));
     }
 
     // Validate UTC start/end
@@ -1705,6 +1728,36 @@ impl InstanceTarget {
                 | JSCalendarProperty::RelatedTo
         )
     }
+}
+
+// inbuxa: the time zone names an event and its recurrence overrides refer to
+fn event_time_zones(
+    event: &Map<'_, JSCalendarProperty<Id>, JSCalendarValue<Id, BlobId>>,
+) -> Vec<(JSCalendarProperty<Id>, String)> {
+    let mut zones = Vec::new();
+    let overrides = event
+        .get(&Key::Property(JSCalendarProperty::RecurrenceOverrides))
+        .and_then(|overrides| overrides.as_object())
+        .into_iter()
+        .flat_map(|overrides| overrides.iter())
+        .filter_map(|(_, patch)| patch.as_object());
+
+    for object in std::iter::once(event).chain(overrides) {
+        for property in [
+            JSCalendarProperty::TimeZone,
+            JSCalendarProperty::EndTimeZone,
+            JSCalendarProperty::RecurrenceIdTimeZone,
+        ] {
+            if let Some(name) = object
+                .get(&Key::Property(property.clone()))
+                .and_then(|value| value.as_str())
+            {
+                zones.push((property, name.into_owned()));
+            }
+        }
+    }
+
+    zones
 }
 
 fn patch_parent_ids(
