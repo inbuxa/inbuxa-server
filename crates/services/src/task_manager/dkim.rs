@@ -202,38 +202,18 @@ async fn dkim_management(server: &Server, task: &TaskDomainManagement) -> trc::R
 
         // Build key
         let private_key = SecretText::Text(SecretTextValue { secret });
-        let mut signature = match algorithm {
-            DkimSignatureType::Dkim1Ed25519Sha256 | DkimSignatureType::Dkim1RsaSha256 => {
-                let signature = Dkim1Signature {
-                    stage: DkimRotationStage::Active,
-                    domain_id: task.domain_id,
-                    member_tenant_id: domain.member_tenant_id,
-                    selector: selector.clone(),
-                    private_key,
-                    ..Default::default()
-                };
-                if algorithm == DkimSignatureType::Dkim1Ed25519Sha256 {
-                    DkimSignature::Dkim1Ed25519Sha256(signature)
-                } else {
-                    DkimSignature::Dkim1RsaSha256(signature)
-                }
-            }
-            DkimSignatureType::Dkim2Ed25519Sha256 | DkimSignatureType::Dkim2RsaSha256 => {
-                let signature = Dkim2Signature {
-                    stage: DkimRotationStage::Active,
-                    domain_id: task.domain_id,
-                    member_tenant_id: domain.member_tenant_id,
-                    selector: selector.clone(),
-                    private_key,
-                    ..Default::default()
-                };
-                if algorithm == DkimSignatureType::Dkim2Ed25519Sha256 {
-                    DkimSignature::Dkim2Ed25519Sha256(signature)
-                } else {
-                    DkimSignature::Dkim2RsaSha256(signature)
-                }
-            }
-        };
+        let replaces = retiring_signatures
+            .iter()
+            .map(|key| &key.object)
+            .find(|key| key.object_type() == algorithm);
+        let mut signature = build_signature(
+            algorithm,
+            replaces,
+            task.domain_id,
+            domain.member_tenant_id,
+            selector.clone(),
+            private_key,
+        );
 
         // Publish key
         if let Some((updater, origin)) = &dns_updater {
@@ -664,6 +644,67 @@ async fn dkim_management(server: &Server, task: &TaskDomainManagement) -> trc::R
     }
 }
 
+// inbuxa (#534): a key that replaces one of the same algorithm keeps its
+// settings (headers, canonicalization, flags and the rest), so signatures
+// don't change shape on rotation; only a domain's first key takes defaults
+fn build_signature(
+    algorithm: DkimSignatureType,
+    replaces: Option<&DkimSignature>,
+    domain_id: Id,
+    member_tenant_id: Option<Id>,
+    selector: String,
+    private_key: SecretText,
+) -> DkimSignature {
+    match algorithm {
+        DkimSignatureType::Dkim1Ed25519Sha256 | DkimSignatureType::Dkim1RsaSha256 => {
+            let settings = match replaces {
+                Some(
+                    DkimSignature::Dkim1Ed25519Sha256(key) | DkimSignature::Dkim1RsaSha256(key),
+                ) => key.clone(),
+                _ => Dkim1Signature::default(),
+            };
+            let signature = Dkim1Signature {
+                stage: DkimRotationStage::Active,
+                domain_id,
+                member_tenant_id,
+                selector,
+                private_key,
+                created_at: UTCDateTime::now(),
+                next_transition_at: None,
+                ..settings
+            };
+            if algorithm == DkimSignatureType::Dkim1Ed25519Sha256 {
+                DkimSignature::Dkim1Ed25519Sha256(signature)
+            } else {
+                DkimSignature::Dkim1RsaSha256(signature)
+            }
+        }
+        DkimSignatureType::Dkim2Ed25519Sha256 | DkimSignatureType::Dkim2RsaSha256 => {
+            let settings = match replaces {
+                Some(
+                    DkimSignature::Dkim2Ed25519Sha256(key) | DkimSignature::Dkim2RsaSha256(key),
+                ) => key.clone(),
+                _ => Dkim2Signature::default(),
+            };
+            let signature = Dkim2Signature {
+                stage: DkimRotationStage::Active,
+                domain_id,
+                member_tenant_id,
+                selector,
+                private_key,
+                created_at: UTCDateTime::now(),
+                next_transition_at: None,
+                ..settings
+            };
+            if algorithm == DkimSignatureType::Dkim2Ed25519Sha256 {
+                DkimSignature::Dkim2Ed25519Sha256(signature)
+            } else {
+                DkimSignature::Dkim2RsaSha256(signature)
+            }
+        }
+    }
+}
+
 enum SignatureUpdate {
     Written,
     Conflict,
@@ -745,3 +786,147 @@ const TEST_ED25519_KEY: &str = r#"-----BEGIN PRIVATE KEY-----
 MC4CAQAwBQYDK2VwBCIEIAO3hAf144lTAVjTkht3ZwBTK0CMCCd1bI0alggneN3B
 -----END PRIVATE KEY-----
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use registry::{
+        schema::enums::{Dkim2Flag, DkimCanonicalization, DkimHash},
+        types::{duration::Duration, map::Map},
+    };
+
+    fn key(secret: &str) -> SecretText {
+        SecretText::Text(SecretTextValue {
+            secret: secret.to_string(),
+        })
+    }
+
+    // inbuxa (#534): the key a rotation creates signs the way the key it
+    // replaces did; it only gets a new selector, private key and schedule
+    #[test]
+    fn rotated_key_keeps_the_retiring_key_settings() {
+        let old_domain = Id::new(1);
+        let new_domain = Id::new(2);
+        let created_at = UTCDateTime::from_timestamp(1_000_000);
+        let next_transition_at = Some(UTCDateTime::from_timestamp(2_000_000));
+
+        let old_v1 = Dkim1Signature {
+            auid: Some("@mail.example.org".to_string()),
+            canonicalization: DkimCanonicalization::SimpleRelaxed,
+            expire: Some(Duration::from_millis(86_400_000)),
+            headers: Map::new(vec!["From".to_string(), "Reply-To".to_string()]),
+            private_key: key("old"),
+            report: false,
+            third_party: Some("example.net".to_string()),
+            third_party_hash: Some(DkimHash::Sha1),
+            domain_id: old_domain,
+            member_tenant_id: None,
+            selector: "old-rsa".to_string(),
+            created_at,
+            next_transition_at,
+            stage: DkimRotationStage::Active,
+        };
+        let old_v2 = Dkim2Signature {
+            flags: Map::new(vec![Dkim2Flag::Donotexplode, Dkim2Flag::Feedback]),
+            private_key: key("old"),
+            domain_id: old_domain,
+            member_tenant_id: None,
+            selector: "old-ed".to_string(),
+            created_at,
+            next_transition_at,
+            stage: DkimRotationStage::Active,
+        };
+
+        for (algorithm, old) in [
+            (
+                DkimSignatureType::Dkim1RsaSha256,
+                DkimSignature::Dkim1RsaSha256(old_v1.clone()),
+            ),
+            (
+                DkimSignatureType::Dkim1Ed25519Sha256,
+                DkimSignature::Dkim1Ed25519Sha256(old_v1.clone()),
+            ),
+            (
+                DkimSignatureType::Dkim2Ed25519Sha256,
+                DkimSignature::Dkim2Ed25519Sha256(old_v2.clone()),
+            ),
+            (
+                DkimSignatureType::Dkim2RsaSha256,
+                DkimSignature::Dkim2RsaSha256(old_v2.clone()),
+            ),
+        ] {
+            let new = build_signature(
+                algorithm,
+                Some(&old),
+                new_domain,
+                Some(Id::new(3)),
+                "new".to_string(),
+                key("new"),
+            );
+            assert_eq!(new.object_type(), algorithm);
+            match new {
+                DkimSignature::Dkim1RsaSha256(new) | DkimSignature::Dkim1Ed25519Sha256(new) => {
+                    let Dkim1Signature {
+                        auid,
+                        canonicalization,
+                        expire,
+                        headers,
+                        report,
+                        third_party,
+                        third_party_hash,
+                        ..
+                    } = &old_v1;
+                    assert_eq!(&new.auid, auid, "{algorithm:?}");
+                    assert_eq!(&new.canonicalization, canonicalization, "{algorithm:?}");
+                    assert_eq!(&new.expire, expire, "{algorithm:?}");
+                    assert_eq!(&new.headers, headers, "{algorithm:?}");
+                    assert_eq!(&new.report, report, "{algorithm:?}");
+                    assert_eq!(&new.third_party, third_party, "{algorithm:?}");
+                    assert_eq!(&new.third_party_hash, third_party_hash, "{algorithm:?}");
+                    assert_eq!(new.private_key, key("new"));
+                    assert_eq!(new.domain_id, new_domain);
+                    assert_eq!(new.member_tenant_id, Some(Id::new(3)));
+                    assert_eq!(new.selector, "new");
+                    assert_eq!(new.stage, DkimRotationStage::Active);
+                    assert_eq!(new.next_transition_at, None);
+                    assert!(new.created_at > created_at);
+                }
+                DkimSignature::Dkim2Ed25519Sha256(new) | DkimSignature::Dkim2RsaSha256(new) => {
+                    assert_eq!(new.flags, old_v2.flags, "{algorithm:?}");
+                    assert_eq!(new.private_key, key("new"));
+                    assert_eq!(new.domain_id, new_domain);
+                    assert_eq!(new.member_tenant_id, Some(Id::new(3)));
+                    assert_eq!(new.selector, "new");
+                    assert_eq!(new.stage, DkimRotationStage::Active);
+                    assert_eq!(new.next_transition_at, None);
+                    assert!(new.created_at > created_at);
+                }
+            }
+        }
+
+        // A domain's first key of an algorithm takes the defaults
+        let DkimSignature::Dkim1RsaSha256(first) = build_signature(
+            DkimSignatureType::Dkim1RsaSha256,
+            None,
+            new_domain,
+            None,
+            "first".to_string(),
+            key("first"),
+        ) else {
+            panic!("expected a DKIM1 RSA key");
+        };
+        let defaults = Dkim1Signature::default();
+        assert_eq!(
+            Dkim1Signature {
+                created_at: defaults.created_at,
+                ..first
+            },
+            Dkim1Signature {
+                domain_id: new_domain,
+                selector: "first".to_string(),
+                private_key: key("first"),
+                ..defaults
+            }
+        );
+    }
+}
