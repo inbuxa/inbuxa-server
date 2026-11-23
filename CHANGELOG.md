@@ -11,6 +11,30 @@ https://github.com/inbuxa/inbuxa-server/security/advisories.
 Every version PR adds that version's entry here. CI refuses a version this
 file has no entry for (`tools/release/changelog-check.py`).
 
+## [2026.11.23] - 2026-11-23
+
+2026.11.20.2 with a security fix from a private security review (medium)
+and two hardening changes. 2026.9.20 to 2026.11.20.2 are affected, and so
+is 27.1 up to and including 27.1-rc.41. The same fixes are in 27.1-rc.42.
+
+### Security
+Medium
+- OAuth: the device grant didn't authenticate confidential clients. A
+  device code could be requested and, once a user approved it, redeemed in
+  a confidential client's name with its client id alone. Both device
+  endpoints now ask for the client's secret, in the body or over HTTP
+  Basic. (GHSA-fwvh-2466-qmjg, #574)
+
+### Changed
+- OAuth: an authorization code or device code sent several times at once
+  grants tokens once. (#574)
+- A tenant's OIDC directory checks the URLs the provider's discovery
+  document names before it sends anything to them. (#574)
+
+### Upgrading
+- Device-flow clients registered with a secret must now send it to
+  `/auth/device` and with the device-code token request.
+
 ## [2026.11.20.2] - 2026-11-20
 
 2026.11.20.1 with two fixes to restoring a store export. The same fixes
