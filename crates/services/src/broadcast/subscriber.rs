@@ -278,9 +278,9 @@ pub fn spawn_broadcast_subscriber(inner: Arc<Inner>, mut shutdown_rx: watch::Rec
 
 /// inbuxa: after a gap in which cluster events may have been missed, drops
 /// every local cache that only those events keep fresh and rebuilds the
-/// settings, certificates and blocked addresses from the registry, as the
-/// missed events would have. The message caches check the change log on
-/// each use and need nothing.
+/// settings, certificates and blocked addresses from the registry and loads
+/// the stored spam model, as the missed events would have. The message
+/// caches check the change log on each use and need nothing.
 async fn recover_missed_events(inner: &Arc<Inner>, why: &str) {
     let server = inner.build_server();
     server.invalidate_all_local_caches();
@@ -299,6 +299,8 @@ async fn recover_missed_events(inner: &Arc<Inner>, why: &str) {
             }
         }
     }
+    // A model another node trained meanwhile; its reload event may be lost
+    server.reload_spam_model().await;
     trc::event!(
         Cluster(ClusterEvent::CoordinatorConnected),
         Details = format!(

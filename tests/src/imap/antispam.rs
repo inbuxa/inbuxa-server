@@ -11,7 +11,10 @@ use crate::{
     system::antispam::{HAM, SPAM, TEST},
     utils::{imap::AssertResult, server::TestServer, smtp::SmtpConnection},
 };
-use common::{Server, manager::SPAM_TRAINER_KEY};
+use common::{
+    Server, config::mailstore::spamfilter::SpamClassifier as SpamClassifierModel,
+    ipc::RegistryChange, manager::SPAM_TRAINER_KEY,
+};
 use imap_proto::ResponseType;
 use registry::schema::{
     enums::TaskSpamFilterMaintenanceType,
@@ -19,6 +22,7 @@ use registry::schema::{
     structs::{Task, TaskSpamFilterMaintenance, TaskStatus},
 };
 use spam_filter::modules::classifier::SpamTrainer;
+use std::sync::Arc;
 use store::{
     Deserialize,
     write::{AlignedBytes, Archive},
@@ -97,6 +101,24 @@ pub async fn test(test: &TestServer) {
     );
     assert_eq!(account.spam_training_samples().await.len(), 20);
     assert!(test.server.inner.data.spam_classifier.load().is_active());
+
+    // inbuxa: #545: a node that didn't train hears of the new model through
+    // the SpamClassifier reload the training node broadcasts. Simulate a
+    // node still on the model it loaded at boot (none), and run that reload.
+    test.server
+        .inner
+        .data
+        .spam_classifier
+        .store(Arc::new(SpamClassifierModel::default()));
+    assert!(!test.server.inner.data.spam_classifier.load().is_active());
+    test.server
+        .reload_registry(RegistryChange::Reload(ObjectType::SpamClassifier))
+        .await
+        .unwrap();
+    assert!(
+        test.server.inner.data.spam_classifier.load().is_active(),
+        "the SpamClassifier reload didn't load the stored model"
+    );
 
     // Send 3 test emails
     for message in TEST {

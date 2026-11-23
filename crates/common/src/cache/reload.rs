@@ -163,6 +163,10 @@ impl Server {
 
                         self.record_build_errors(&bootstrap.errors);
 
+                        if matches!(object, ObjectType::SpamClassifier) {
+                            self.reload_spam_model().await;
+                        }
+
                         return Ok(ReloadResult {
                             errors: Vec::new(),
                             known_errors: bootstrap.errors,
@@ -170,6 +174,10 @@ impl Server {
                             replaced_core: true,
                         });
                     }
+                }
+
+                if matches!(object, ObjectType::SpamClassifier) {
+                    self.reload_spam_model().await;
                 }
 
                 let (known_errors, errors) = std::mem::take(&mut bootstrap.errors)
@@ -185,6 +193,20 @@ impl Server {
         }
 
         Ok(bootstrap.into())
+    }
+
+    /// inbuxa: the spam model is one blob in the shared blob store, and each
+    /// node scores with the copy it loaded at boot. A node that trains it
+    /// broadcasts a SpamClassifier reload, so the other nodes load the new
+    /// model here; so does this node when the classifier settings change.
+    /// Loaded with the settings now running, which may have just changed.
+    pub async fn reload_spam_model(&self) {
+        if let Err(err) = self.inner.build_server().spam_model_reload().await {
+            trc::error!(
+                err.details("Failed to reload the spam filter model")
+                    .caused_by(trc::location!())
+            );
+        }
     }
 }
 
