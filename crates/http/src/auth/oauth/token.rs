@@ -24,6 +24,7 @@ use hyper::StatusCode;
 use sha2::{Digest, Sha256};
 use std::{borrow::Cow, future::Future};
 use store::{
+    InMemoryStore,
     dispatch::lookup::KeyValue,
     write::{AlignedBytes, Archive},
 };
@@ -110,6 +111,17 @@ impl TokenHandler for Server {
                                 .await?
                             {
                                 TokenResponse::error(error)
+                            } else if !claim_once(
+                                // inbuxa: a code is good once, even sent twice at once:
+                                // only the first request to claim it gets tokens
+                                self.in_memory_store(),
+                                &KeyValue::<()>::build_key(KV_OAUTH, code.as_bytes()),
+                                "",
+                                self.core.oauth.oauth_expiry_auth_code,
+                            )
+                            .await?
+                            {
+                                TokenResponse::error(ErrorType::InvalidGrant)
                             } else {
                                 // Mark this token as issued
                                 self.in_memory_store()
@@ -151,7 +163,7 @@ impl TokenHandler for Server {
             response = TokenResponse::error(ErrorType::ExpiredToken);
 
             if let (Some(device_code), Some(client_id)) =
-                (params.get("device_code"), params.get("client_id"))
+                (params.get("device_code"), client_id_cred.as_deref())
             {
                 // Obtain code
                 if let Some(auth_code_) = self
@@ -179,6 +191,27 @@ impl TokenHandler for Server {
                                     .await?
                                 {
                                     TokenResponse::error(error)
+                                } else if let Some(error) = self
+                                    // inbuxa: a confidential client authenticates to
+                                    // redeem a device code, as it does an authorization code
+                                    .verify_client_secret(client_id, client_secret_cred.as_deref())
+                                    .await?
+                                {
+                                    TokenResponse::error(error)
+                                } else if !claim_once(
+                                    // inbuxa: as for an authorization code, only the
+                                    // first request to claim the device code gets tokens
+                                    self.in_memory_store(),
+                                    &KeyValue::<()>::build_key(
+                                        KV_OAUTH_DEVICE,
+                                        device_code.as_bytes(),
+                                    ),
+                                    "",
+                                    self.core.oauth.oauth_expiry_user_code,
+                                )
+                                .await?
+                                {
+                                    TokenResponse::error(ErrorType::ExpiredToken)
                                 } else {
                                     // Mark this token as issued
                                     self.in_memory_store()
@@ -404,7 +437,7 @@ impl TokenHandler for Server {
     }
 }
 
-fn client_credentials<'x>(
+pub(super) fn client_credentials<'x>(
     req: &'x HttpRequest,
     params: &'x FormData,
 ) -> (Option<Cow<'x, str>>, Option<Cow<'x, str>>) {
@@ -431,6 +464,19 @@ fn client_credentials<'x>(
     }
 
     (client_id, client_secret)
+}
+
+/// inbuxa: the first of any number of requests to claim `key` gets true,
+/// every other false, until `ttl` seconds pass: the in-memory store
+/// increments the claim counter atomically (as on main for passkeys).
+async fn claim_once(store: &InMemoryStore, key: &[u8], value: &str, ttl: u64) -> trc::Result<bool> {
+    let mut claim = key.to_vec();
+    claim.push(b'!');
+    claim.extend_from_slice(&Sha256::digest(value.as_bytes())[..16]);
+    store
+        .counter_incr(KeyValue::new(claim, 1).expires(ttl), true)
+        .await
+        .map(|claims| claims == 1)
 }
 
 fn verify_pkce(stored: &ArchivedPkceCodeChallenge, verifier: Option<&str>) -> bool {

@@ -128,16 +128,6 @@ impl OpenIdDirectory {
             }
         };
 
-        // inbuxa: the provider names the rest of its URLs; a tenant's must be
-        // public too
-        if config.public_only && !is_test_loopback(&config.issue_url) {
-            check_tenant_url("jwks_uri", &document.jwks_uri)?;
-            check_tenant_url("userinfo_endpoint", &document.userinfo_endpoint)?;
-            if let Some(url) = &document.introspection_endpoint {
-                check_tenant_url("introspection_endpoint", url)?;
-            }
-        }
-
         // inbuxa: http-directory-services-13
         if let OpaqueTokens::Introspection(introspection) = &mut config.opaque_tokens
             && introspection.url.is_none()
@@ -165,7 +155,7 @@ impl OpenIdDirectory {
         })
     }
 
-    async fn discover(
+    pub(super) async fn discover(
         http: &Client,
         config: &OidcConfig,
     ) -> Result<(DiscoveryDocument, AHashMap<String, Arc<CachedKey>>), OidcError> {
@@ -258,6 +248,16 @@ impl OpenIdDirectory {
                 }
             });
         }*/
+
+        // inbuxa: the provider names the rest of its URLs; a tenant's must be
+        // public too, and are checked before the first request to any of them
+        if config.public_only && !is_test_loopback(&config.issue_url) {
+            check_tenant_url("jwks_uri", &discovery.jwks_uri)?;
+            check_tenant_url("userinfo_endpoint", &discovery.userinfo_endpoint)?;
+            if let Some(url) = &discovery.introspection_endpoint {
+                check_tenant_url("introspection_endpoint", url)?;
+            }
+        }
 
         let keys = fetch_jwks_keys(http, &discovery.jwks_uri).await?;
 

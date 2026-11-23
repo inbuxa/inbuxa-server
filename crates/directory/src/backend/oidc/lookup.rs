@@ -992,6 +992,73 @@ MCowBQYDK2VwAyEAXNXjqSjw780GFXxFztdFBUMpxRoFqsYWN55FXnvncCE=
         body.to_string()
     }
 
+    // inbuxa: a tenant's directory checks the URLs the provider's discovery
+    // document names before it sends anything to them: a JWKS address the
+    // tenant may not use gets no request at all
+    #[tokio::test]
+    async fn tenant_discovery_checks_urls_before_the_first_request() {
+        if cfg!(feature = "test_mode") {
+            return; // a loopback issuer skips the tenant checks in test builds
+        }
+        let jwks_requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = jwks_requests.clone();
+        let base = Arc::new(std::sync::OnceLock::<String>::new());
+        let base_ = base.clone();
+        let base_url = provider(move |request| {
+            let base = base_.get().unwrap();
+            if request.starts_with("GET /jwks ") {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                (200, json!({"keys": []}).to_string())
+            } else {
+                (
+                    200,
+                    json!({
+                        "issuer": base,
+                        "jwks_uri": format!("{base}/jwks"),
+                        "userinfo_endpoint": format!("{base}/userinfo"),
+                        "token_endpoint": format!("{base}/token"),
+                        "authorization_endpoint": format!("{base}/auth"),
+                    })
+                    .to_string(),
+                )
+            }
+        })
+        .await;
+        base.set(base_url.clone()).unwrap();
+
+        let config = |public_only| crate::backend::oidc::OidcConfig {
+            issue_url: base_url.clone(),
+            require_aud: None,
+            require_scopes: Vec::new(),
+            claim_email: "email".to_string(),
+            claim_name: None,
+            claim_groups: None,
+            default_domain: None,
+            opaque_tokens: OpaqueTokens::Reject,
+            public_only,
+        };
+
+        // A tenant's: the loopback http:// JWKS address is refused unsent
+        let err = OpenIdDirectory::discover(&Client::new(), &config(true))
+            .await
+            .err()
+            .expect("a tenant's directory must refuse the JWKS address");
+        assert!(err.to_string().contains("jwks_uri"), "{err}");
+        assert_eq!(
+            jwks_requests.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the refused JWKS address was contacted"
+        );
+
+        // The server's own directory may use it
+        assert!(
+            OpenIdDirectory::discover(&Client::new(), &config(false))
+                .await
+                .is_ok()
+        );
+        assert_eq!(jwks_requests.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
     // http-directory-services-13: what the provider sends back is read up to
     // 1 MiB, never whole
     #[tokio::test]
