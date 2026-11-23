@@ -749,8 +749,13 @@ impl ParseHttp for Server {
         }
 
         // Block dangerous URLs
+        // inbuxa: HTTP-JMAP-PREAUTH-2: not when the browser says a page on
+        // another site sent it (an <img> pointing at /x.php, say): that would
+        // ban the page's visitors, not a scanner. It still gets the 404
         let path = req.uri().path();
-        if self.is_http_banned_path(path, session.remote_ip).await? {
+        if !is_caused_by_another_site(req.headers())
+            && self.is_http_banned_path(path, session.remote_ip).await?
+        {
             trc::event!(
                 Security(SecurityEvent::ScanBan),
                 SpanId = session.session_id,
@@ -761,6 +766,16 @@ impl ParseHttp for Server {
 
         Err(trc::ResourceEvent::NotFound.into_err())
     }
+}
+
+/// inbuxa: HTTP-JMAP-PREAUTH-2: the browser marks the requests a page on
+/// another site, or on another host of this site, made it send. Any client
+/// can claim that too, but it only spares that request the scan ban.
+fn is_caused_by_another_site(headers: &header::HeaderMap) -> bool {
+    headers.get("sec-fetch-site").is_some_and(|value| {
+        let value = value.as_bytes();
+        value.eq_ignore_ascii_case(b"cross-site") || value.eq_ignore_ascii_case(b"same-site")
+    })
 }
 
 // inbuxa: one HTTP/1 connection, as every HTTP listener serves it. hyper
@@ -1038,6 +1053,31 @@ mod tests {
             )),
         ),
     ];
+
+    // inbuxa: HTTP-JMAP-PREAUTH-2
+    #[test]
+    fn requests_another_site_caused_are_told_apart() {
+        for (value, expected) in [
+            (Some("cross-site"), true),
+            (Some("same-site"), true),
+            (Some("Cross-Site"), true),
+            (Some("same-origin"), false),
+            (Some("none"), false),
+            (Some(""), false),
+            (Some("cross-site, none"), false),
+            (None, false),
+        ] {
+            let mut headers = hyper::header::HeaderMap::new();
+            if let Some(value) = value {
+                headers.insert("sec-fetch-site", value.parse().unwrap());
+            }
+            assert_eq!(
+                super::is_caused_by_another_site(&headers),
+                expected,
+                "{value:?}"
+            );
+        }
+    }
 
     #[test]
     fn gzipped_static_pages_are_in_sync() {
