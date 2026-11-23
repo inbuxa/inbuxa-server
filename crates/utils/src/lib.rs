@@ -253,6 +253,41 @@ static NIL_CHAR: char = char::from_u32(0).unwrap();
 
 // Basic email sanitizer
 pub fn sanitize_email(email: &str) -> Option<String> {
+    sanitize_email_with(email, is_valid_domain)
+}
+
+/// inbuxa: an address mail is sent to. Any well-formed domain is accepted,
+/// whether or not its top-level domain is in the public suffix list, so
+/// internal names (`.lab`, `.intern`) and new gTLDs are not refused; the
+/// delivery route decides whether the domain can be reached.
+pub fn sanitize_recipient(email: &str) -> Option<String> {
+    sanitize_email_with(email, |domain| {
+        is_valid_domain(domain) || is_well_formed_domain(domain)
+    })
+}
+
+/// inbuxa: two or more labels of letters, digits and inner hyphens, at
+/// most 63 characters each and 253 in all, under a top-level domain that is
+/// not all digits (so an IP address is not taken for a domain).
+fn is_well_formed_domain(domain: &str) -> bool {
+    domain.len() <= 253
+        && domain.contains('.')
+        && domain.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == b'-')
+        })
+        && domain
+            .rsplit('.')
+            .next()
+            .is_some_and(|tld| !tld.bytes().all(|ch| ch.is_ascii_digit()))
+}
+
+fn sanitize_email_with(email: &str, valid_domain: impl Fn(&str) -> bool) -> Option<String> {
     let mut result = String::with_capacity(email.len());
     let mut last_ch = NIL_CHAR;
     let mut chars = email.chars();
@@ -341,10 +376,10 @@ pub fn sanitize_email(email: &str) -> Option<String> {
     }
 
     if domain_is_ascii {
-        is_valid_domain(&result[domain_start..]).then_some(result)
+        valid_domain(&result[domain_start..]).then_some(result)
     } else {
         let domain = idna::domain_to_ascii(&result[domain_start..]).ok()?;
-        if !is_valid_domain(&domain) {
+        if !valid_domain(&domain) {
             return None;
         }
         result.truncate(domain_start);
@@ -540,6 +575,60 @@ mod tests {
         assert_eq!(sanitize_email("user@co.uk").as_deref(), Some("user@co.uk"));
         assert_eq!(sanitize_email("user@com"), None);
         assert_eq!(sanitize_email("user@example.invalidtld"), None);
+    }
+
+    #[test]
+    fn recipients_on_any_well_formed_domain_are_accepted() {
+        use super::sanitize_recipient;
+
+        // Top-level domains outside the public suffix list
+        assert_eq!(
+            sanitize_recipient("User@Host.Lab").as_deref(),
+            Some("user@host.lab")
+        );
+        assert_eq!(
+            sanitize_recipient("ops@mail.intern").as_deref(),
+            Some("ops@mail.intern")
+        );
+        assert_eq!(
+            sanitize_recipient("a@b-c.example.invalidtld").as_deref(),
+            Some("a@b-c.example.invalidtld")
+        );
+        assert_eq!(
+            sanitize_recipient("user@xn--fsqu00a.intern").as_deref(),
+            Some("user@xn--fsqu00a.intern")
+        );
+        // Everything sanitize_email accepts is still accepted
+        for addr in [
+            "user@example.com",
+            "user@co.uk",
+            "user@localhost",
+            "user@host.test",
+        ] {
+            assert_eq!(sanitize_recipient(addr), sanitize_email(addr), "{addr}");
+        }
+        // Malformed or not a domain name
+        for addr in [
+            "user@10.0.0.1",
+            "user@host.123",
+            "user@host",
+            "user@com",
+            "user@host_name.lab",
+            "user@-host.lab",
+            "user@host-.lab",
+            "user@host..lab",
+            "user@.host.lab",
+            "user@host.lab.",
+            "user@",
+            "@host.lab",
+            "user.@host.lab",
+        ] {
+            assert_eq!(sanitize_recipient(addr), None, "{addr}");
+        }
+        let long_label = format!("user@{}.lab", "a".repeat(64));
+        assert_eq!(sanitize_recipient(&long_label), None);
+        // sanitize_email itself is unchanged
+        assert_eq!(sanitize_email("user@host.lab"), None);
     }
 
     #[test]

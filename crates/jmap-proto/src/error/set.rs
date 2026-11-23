@@ -52,6 +52,12 @@ struct SetErrorInner<P: Property> {
     // warned or blocked, with its notice
     #[serde(skip_serializing_if = "Vec::is_empty")]
     rules: Vec<DlpRule>,
+
+    // inbuxa: the addresses behind an invalidRecipients error (RFC 8621,
+    // section 7.5)
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(rename = "invalidRecipients")]
+    invalid_recipients: Vec<String>,
 }
 
 /// inbuxa: a DLP rule named in an `inbuxa:dlpWarning` or `inbuxa:dlpBlocked`.
@@ -201,7 +207,14 @@ impl<T: Property> SetError<T> {
             linked_objects: Vec::new(),
             validation_errors: Vec::new(),
             rules: Vec::new(),
+            invalid_recipients: Vec::new(),
         }))
+    }
+
+    /// inbuxa: the addresses an invalidRecipients error is about.
+    pub fn with_invalid_recipients(mut self, invalid_recipients: Vec<String>) -> Self {
+        self.0.invalid_recipients = invalid_recipients;
+        self
     }
 
     /// inbuxa: the DLP rules behind a warning or block.
@@ -381,6 +394,7 @@ impl From<PatchError> for SetError<registry::schema::properties::Property> {
             linked_objects: Vec::new(),
             validation_errors: Vec::new(),
             rules: Vec::new(),
+            invalid_recipients: Vec::new(),
         }))
     }
 }

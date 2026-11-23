@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
@@ -43,15 +45,22 @@ impl ElasticSearchStore {
             request.push('\n');
         }
 
-        assert_success(
+        let response = assert_success(
             self.client
                 .post(format!("{}/_bulk", self.url))
                 .body(request)
                 .send()
                 .await,
         )
-        .await
-        .map(|_| ())
+        .await?;
+
+        // inbuxa: a bulk request answers 200 even when it rejects some of
+        // the documents, so the items are checked one by one
+        let text = response
+            .text()
+            .await
+            .map_err(|err| trc::StoreEvent::ElasticsearchError.reason(err))?;
+        check_bulk_response(&text)
     }
 
     pub async fn query<R: SearchDocumentId>(
@@ -315,6 +324,65 @@ fn build_sort(sort: &[SearchComparator], tie_breaker: &str) -> Value {
     )
 }
 
+/// inbuxa: an error naming how many documents a `_bulk` request rejected
+/// and why the first one was, or `Ok` when every document was indexed.
+fn check_bulk_response(text: &str) -> trc::Result<()> {
+    let response = serde_json::from_str::<BulkResponse>(text).map_err(|err| {
+        trc::StoreEvent::ElasticsearchError
+            .reason(err)
+            .details(text.to_string())
+    })?;
+    if !response.errors {
+        return Ok(());
+    }
+
+    let mut rejected = 0u64;
+    let mut first_error = None;
+    for item in response.items.iter().flat_map(|item| item.values()) {
+        if let Some(error) = &item.error {
+            rejected += 1;
+            if first_error.is_none() {
+                first_error = Some((item.status, error));
+            }
+        }
+    }
+
+    let reason = match first_error {
+        Some((status, error)) => format!(
+            "{rejected} of {} documents were rejected; the first with status {status}: {}",
+            response.items.len(),
+            match (
+                error.get("type").and_then(Value::as_str),
+                error.get("reason").and_then(Value::as_str),
+            ) {
+                (Some(kind), Some(reason)) => format!("{kind}: {reason}"),
+                (Some(kind), None) => kind.to_string(),
+                _ => error.to_string(),
+            }
+        ),
+        None => "The bulk request reported errors without naming a document".to_string(),
+    };
+    Err(trc::StoreEvent::ElasticsearchError
+        .reason(reason)
+        .ctx(trc::Key::Total, rejected))
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct BulkResponse {
+    #[serde(default)]
+    errors: bool,
+    #[serde(default)]
+    items: Vec<std::collections::HashMap<String, BulkItem>>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct BulkItem {
+    #[serde(default)]
+    status: u16,
+    #[serde(default)]
+    error: Option<Value>,
+}
+
 fn json_serialize(request: &mut String, document: &IndexDocument) {
     request.push('{');
     for (idx, (k, v)) in document.fields.iter().enumerate() {
@@ -374,4 +442,129 @@ fn json_serialize_str(request: &mut String, value: &str) {
         }
     }
     request.push('"');
+}
+
+#[cfg(test)]
+mod tests {
+    use super::check_bulk_response;
+    use crate::{backend::elastic::ElasticSearchStore, search::IndexDocument, write::SearchIndex};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    // Answers one HTTP request with 200 and the given body
+    async fn answer_once(body: &'static str) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buf = [0u8; 4096];
+            loop {
+                let n = stream.read(&mut buf).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buf[..n]);
+                let text = String::from_utf8_lossy(&request);
+                if let Some(end) = text.find("\r\n\r\n") {
+                    let length = text[..end]
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())?
+                        })
+                        .unwrap_or(0);
+                    if request.len() >= end + 4 + length {
+                        break;
+                    }
+                }
+            }
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+            stream.shutdown().await.ok();
+        });
+        url
+    }
+
+    #[tokio::test]
+    async fn bulk_index_with_rejected_documents_fails() {
+        let url = answer_once(concat!(
+            r#"{"took":5,"errors":true,"items":["#,
+            r#"{"index":{"_index":"st_email","_id":"4294967297","status":400,"#,
+            r#""error":{"type":"document_parsing_exception","#,
+            r#""reason":"[1:42] failed to parse field [size] of type [integer]"}}}]}"#
+        ))
+        .await;
+        let store = ElasticSearchStore {
+            client: reqwest::Client::new(),
+            url,
+            num_shards: 1,
+            num_replicas: 0,
+            include_source: false,
+        };
+        let result = store
+            .index(vec![
+                IndexDocument::new(SearchIndex::Email)
+                    .with_account_id(1)
+                    .with_document_id(1),
+            ])
+            .await;
+        assert!(
+            result.is_err(),
+            "a rejected document was reported as indexed: {result:?}"
+        );
+    }
+
+    #[test]
+    fn bulk_responses_with_rejected_documents_are_errors() {
+        // Every document indexed
+        assert!(
+            check_bulk_response(concat!(
+                r#"{"took":30,"errors":false,"items":["#,
+                r#"{"index":{"_index":"st_email","_id":"4294967297","_version":1,"#,
+                r#""result":"created","status":201,"_seq_no":0,"_primary_term":1}}]}"#
+            ))
+            .is_ok()
+        );
+
+        // Two of three documents rejected, and still a 200 from Elasticsearch
+        let err = check_bulk_response(concat!(
+            r#"{"took":12,"errors":true,"items":["#,
+            r#"{"index":{"_index":"st_email","_id":"4294967297","_version":1,"#,
+            r#""result":"created","status":201,"_seq_no":1,"_primary_term":1}},"#,
+            r#"{"index":{"_index":"st_email","_id":"4294967298","status":400,"#,
+            r#""error":{"type":"document_parsing_exception","#,
+            r#""reason":"[1:42] failed to parse field [size] of type [integer]"}}},"#,
+            r#"{"index":{"_index":"st_email","_id":"4294967299","status":429,"#,
+            r#""error":{"type":"es_rejected_execution_exception","#,
+            r#""reason":"rejected execution of coordinating operation"}}}]}"#
+        ))
+        .unwrap_err();
+        assert!(err.matches(trc::EventType::Store(trc::StoreEvent::ElasticsearchError)));
+        let text = format!("{err:?}");
+        assert!(text.contains("2 of 3 documents were rejected"), "{text}");
+        assert!(
+            text.contains("status 400: document_parsing_exception"),
+            "{text}"
+        );
+        assert!(text.contains("failed to parse field [size]"), "{text}");
+        assert_eq!(
+            err.value(trc::Key::Total).and_then(|value| value.to_uint()),
+            Some(2)
+        );
+
+        // An error without a reason, and a body that cannot be read
+        let err = check_bulk_response(
+            r#"{"errors":true,"items":[{"create":{"status":409,"error":{"type":"version_conflict_engine_exception"}}}]}"#,
+        )
+        .unwrap_err();
+        assert!(
+            format!("{err:?}").contains("version_conflict_engine_exception"),
+            "{err:?}"
+        );
+        assert!(check_bulk_response("<html>Bad Gateway</html>").is_err());
+    }
 }

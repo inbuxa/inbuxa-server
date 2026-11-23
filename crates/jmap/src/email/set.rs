@@ -1273,23 +1273,18 @@ impl EmailSet for Server {
 
         // Update state
         if let Some(change_id) = last_change_id {
-            if response.updated.is_empty() && response.destroyed.is_empty() {
-                // Message ingest does not broadcast state changes
-                let mut state_change = StateChange::new(account_id)
-                    .with_change_id(change_id)
-                    .with_change(DataType::Email)
-                    .with_change(DataType::Mailbox)
-                    .with_change(DataType::Thread);
-                if !response.created.is_empty() {
-                    state_change.set_change(DataType::EmailDelivery);
-                }
-                self.broadcast_push_notification(PushNotification::StateChange(state_change))
-                    .await;
-            } else if !response.created.is_empty() {
+            // Message ingest does not broadcast state changes. inbuxa: an
+            // email the client creates is not a delivery, so EmailDelivery
+            // is left to mail that arrives (RFC 8621, section 1.5).
+            if !response.created.is_empty()
+                || (response.updated.is_empty() && response.destroyed.is_empty())
+            {
                 self.broadcast_push_notification(PushNotification::StateChange(
                     StateChange::new(account_id)
                         .with_change_id(change_id)
-                        .with_change(DataType::EmailDelivery),
+                        .with_change(DataType::Email)
+                        .with_change(DataType::Mailbox)
+                        .with_change(DataType::Thread),
                 ))
                 .await;
             }

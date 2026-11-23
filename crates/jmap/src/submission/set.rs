@@ -45,7 +45,7 @@ use store::{
 };
 use trc::AddContext;
 use types::{collection::Collection, field::EmailField, id::Id};
-use utils::{map::vec_map::VecMap, sanitize_email};
+use utils::{map::vec_map::VecMap, sanitize_recipient};
 
 pub trait EmailSubmissionSet: Sync + Send {
     fn email_submission_set<'x>(
@@ -680,6 +680,9 @@ impl EmailSubmissionSet for Server {
 
         // Add recipients to envelope if missing
         if rcpt_to.is_empty() {
+            // inbuxa: a header address that is not a valid recipient is
+            // reported, not left out of the envelope without a word
+            let mut invalid_recipients = Vec::new();
             for header in metadata.contents[0].parts[0].headers.iter() {
                 if matches!(
                     header.name,
@@ -687,52 +690,46 @@ impl EmailSubmissionSet for Server {
                         | ArchivedMetadataHeaderName::Cc
                         | ArchivedMetadataHeaderName::Bcc
                 ) {
-                    match &header.value {
-                        ArchivedMetadataHeaderValue::AddressList(addr) => {
-                            for address in addr.iter() {
-                                if let Some(address) = address
-                                    .address
-                                    .as_ref()
-                                    .map(|v| v.as_ref())
-                                    .and_then(sanitize_email)
-                                    && !rcpt_to.iter().any(|rcpt| rcpt.address == address)
-                                {
-                                    submission.envelope.rcpt_to.push(Address {
-                                        email: address.to_string(),
-                                        parameters: None,
-                                    });
-                                    rcpt_to.push(RcptTo {
-                                        address: Cow::Owned(address),
-                                        ..Default::default()
-                                    });
-                                }
+                    let addresses: Vec<&str> = match &header.value {
+                        ArchivedMetadataHeaderValue::AddressList(addr) => addr
+                            .iter()
+                            .filter_map(|address| address.address.as_ref().map(|v| v.as_ref()))
+                            .collect(),
+                        ArchivedMetadataHeaderValue::AddressGroup(groups) => groups
+                            .iter()
+                            .flat_map(|group| group.addresses.iter())
+                            .filter_map(|address| address.address.as_ref().map(|v| v.as_ref()))
+                            .collect(),
+                        _ => continue,
+                    };
+                    for raw_address in addresses {
+                        if let Some(address) = sanitize_recipient(raw_address) {
+                            if !rcpt_to.iter().any(|rcpt| rcpt.address == address) {
+                                submission.envelope.rcpt_to.push(Address {
+                                    email: address.to_string(),
+                                    parameters: None,
+                                });
+                                rcpt_to.push(RcptTo {
+                                    address: Cow::Owned(address),
+                                    ..Default::default()
+                                });
                             }
+                        } else if !raw_address.trim().is_empty()
+                            && !invalid_recipients.iter().any(|addr| addr == raw_address)
+                        {
+                            invalid_recipients.push(raw_address.to_string());
                         }
-                        ArchivedMetadataHeaderValue::AddressGroup(groups) => {
-                            for group in groups.iter() {
-                                for address in group.addresses.iter() {
-                                    if let Some(address) = address
-                                        .address
-                                        .as_ref()
-                                        .map(|v| v.as_ref())
-                                        .and_then(sanitize_email)
-                                        && !rcpt_to.iter().any(|rcpt| rcpt.address == address)
-                                    {
-                                        submission.envelope.rcpt_to.push(Address {
-                                            email: address.to_string(),
-                                            parameters: None,
-                                        });
-                                        rcpt_to.push(RcptTo {
-                                            address: Cow::Owned(address),
-                                            ..Default::default()
-                                        });
-                                    }
-                                }
-                            }
-                        }
-                        _ => {}
                     }
                 }
+            }
+
+            if !invalid_recipients.is_empty() {
+                return Ok(Err(SetError::new(SetErrorType::InvalidRecipients)
+                    .with_description(format!(
+                        "Not a valid address to send to: {}.",
+                        invalid_recipients.join(", ")
+                    ))
+                    .with_invalid_recipients(invalid_recipients)));
             }
 
             if rcpt_to.is_empty() {
@@ -912,7 +909,7 @@ fn parse_envelope_address(
         if let Some(Value::Str(addr)) =
             envelope.remove(&Key::Property(EmailSubmissionProperty::Email))
         {
-            if let Some(addr) = sanitize_email(&addr) {
+            if let Some(addr) = sanitize_recipient(&addr) {
                 if let Some(Value::Object(params)) =
                     envelope.remove(&Key::Property(EmailSubmissionProperty::Parameters))
                 {
