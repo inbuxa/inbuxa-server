@@ -131,10 +131,12 @@ impl<T: SessionStream> Session<T> {
 
             // Validate QRESYNC arguments
             if let Some(qresync) = arguments.qresync {
+                // inbuxa: a protocol error, BAD (RFC 7162 3.2.5)
                 if !self.is_qresync {
                     return Err(trc::ImapEvent::Error
                         .into_err()
                         .details("QRESYNC is not enabled.")
+                        .ctx(trc::Key::Type, ResponseType::Bad)
                         .id(arguments.tag));
                 }
                 if self.is_uidonly && qresync.seq_match.is_some() {
