@@ -115,6 +115,10 @@ impl<T: SessionStream> SessionData<T> {
         self.synchronize_messages(&mailbox)
             .await
             .imap_ctx(&arguments.tag, trc::location!())?;
+        // inbuxa: new messages are announced before the reply
+        self.write_new_messages(&mailbox)
+            .await
+            .imap_ctx(&arguments.tag, trc::location!())?;
 
         // Convert IMAP ids to JMAP ids.
         let mut ids = mailbox

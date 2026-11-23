@@ -76,6 +76,10 @@ impl<T: SessionStream> SessionData<T> {
             self.synchronize_messages(&mailbox)
                 .await
                 .caused_by(trc::location!())?;
+            // inbuxa: new messages are announced before the reply
+            self.write_new_messages(&mailbox)
+                .await
+                .caused_by(trc::location!())?;
         } else {
             return Ok(Response {
                 is_uid,

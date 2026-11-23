@@ -162,6 +162,42 @@ impl<T: SessionStream> SessionData<T> {
         Ok(modseq)
     }
 
+    // inbuxa: announces the messages found by the last synchronization with
+    // EXISTS, so the replies that follow never use a number the client has
+    // not been told about. EXPUNGE may not be sent during FETCH, STORE or
+    // SEARCH (RFC 9051 7.5.1), so while expunges are pending everything waits
+    // for a command that can report them (NOOP, IDLE, EXPUNGE).
+    pub async fn write_new_messages(&self, mailbox: &SelectedMailbox) -> trc::Result<()> {
+        let mut buf = Vec::new();
+        {
+            let mut current_state = mailbox.state.lock();
+            if current_state
+                .next_state
+                .as_ref()
+                .is_some_and(|next_state| next_state.deletions.is_empty())
+            {
+                let next_state = current_state.next_state.take().unwrap().next_state;
+                if next_state.total_messages != current_state.total_messages {
+                    Exists {
+                        total_messages: next_state.total_messages,
+                    }
+                    .serialize(&mut buf);
+                }
+                *current_state = next_state;
+            }
+        }
+        if !buf.is_empty() {
+            self.write_bytes(buf).await?;
+        }
+
+        Ok(())
+    }
+
+    pub async fn announce_new_messages(&self, mailbox: &SelectedMailbox) -> trc::Result<()> {
+        self.synchronize_messages(mailbox).await?;
+        self.write_new_messages(mailbox).await
+    }
+
     pub async fn get_uid_next(&self, mailbox: &MailboxId) -> trc::Result<u32> {
         self.server
             .core

@@ -157,10 +157,10 @@ impl<T: SessionStream> SessionData<T> {
 
         // Obtain modseq
         let highest_modseq = if include_highest_modseq {
-            self.synchronize_messages(&mailbox)
-                .await?
-                .to_modseq()
-                .into()
+            let modseq = self.synchronize_messages(&mailbox).await?;
+            // inbuxa: new messages are announced before the reply
+            self.write_new_messages(&mailbox).await?;
+            modseq.to_modseq().into()
         } else {
             None
         };
