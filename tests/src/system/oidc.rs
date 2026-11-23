@@ -1172,6 +1172,110 @@ pub async fn test(test: &mut TestServer) {
         "one authorization code granted tokens {granted} times"
     );
 
+    // inbuxa: a registered client is granted no more than the scope it
+    // registered for, through the device grant as through an authorization
+    // code: what it asks for beyond that is left out
+    let mail_only: ClientRegistrationResponse = post_json(
+        &metadata.registration_endpoint,
+        None,
+        &ClientRegistrationRequest {
+            redirect_uris: vec!["com.example.mailonly:/cb".to_string()],
+            scope: Some("urn:ietf:params:oauth:scope:mail".to_string()),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mail_only = mail_only.client_id;
+    let wider_scope =
+        "urn:ietf:params:oauth:scope:mail urn:ietf:params:oauth:scope:calendars offline_access";
+    let device_response: DeviceAuthResponse = post(
+        &metadata.device_authorization_endpoint,
+        &AHashMap::from_iter([
+            ("client_id".to_string(), mail_only.clone()),
+            ("scope".to_string(), wider_scope.to_string()),
+        ]),
+    )
+    .await;
+    assert_eq!(
+        http.post::<LoginResponse>(
+            "/api/auth",
+            &LoginRequest::AuthDevice {
+                account_name: "user@example.org".to_string(),
+                account_secret: "this is a very strong password".to_string(),
+                mfa_token: None,
+                code: device_response.user_code.clone(),
+                passkey: None,
+            },
+        )
+        .await
+        .unwrap(),
+        LoginResponse::Verified
+    );
+    let device_grant = post::<TokenResponse>(
+        &metadata.token_endpoint,
+        &AHashMap::from_iter([
+            ("client_id".to_string(), mail_only.clone()),
+            (
+                "grant_type".to_string(),
+                "urn:ietf:params:oauth:grant-type:device_code".to_string(),
+            ),
+            (
+                "device_code".to_string(),
+                device_response.device_code.to_string(),
+            ),
+        ]),
+    )
+    .await;
+    let code_grant = post::<TokenResponse>(
+        &metadata.token_endpoint,
+        &AHashMap::from_iter([
+            ("client_id".to_string(), mail_only.clone()),
+            (
+                "redirect_uri".to_string(),
+                "com.example.mailonly:/cb".to_string(),
+            ),
+            ("grant_type".to_string(), "authorization_code".to_string()),
+            (
+                "code".to_string(),
+                http.post::<LoginResponse>(
+                    "/api/auth",
+                    &LoginRequest::AuthCode {
+                        account_name: "user@example.org".to_string(),
+                        account_secret: "this is a very strong password".to_string(),
+                        mfa_token: None,
+                        client_id: mail_only.clone(),
+                        redirect_uri: "com.example.mailonly:/cb".to_string().into(),
+                        nonce: None,
+                        scope: Some(wider_scope.to_string()),
+                        code_challenge: Some(PKCE_CHALLENGE.to_string()),
+                        code_challenge_method: Some("S256".to_string()),
+                        state: None,
+                        resource: vec![],
+                        passkey: None,
+                    },
+                )
+                .await
+                .unwrap()
+                .unwrap_code(),
+            ),
+            ("code_verifier".to_string(), PKCE_VERIFIER.to_string()),
+        ]),
+    )
+    .await;
+    for (grant, response) in [
+        ("device code", device_grant),
+        ("authorization code", code_grant),
+    ] {
+        match response {
+            TokenResponse::Granted(granted) => assert_eq!(
+                granted.scope.as_deref(),
+                Some("urn:ietf:params:oauth:scope:mail"),
+                "a client registered for mail alone, through the {grant} grant"
+            ),
+            TokenResponse::Error { error } => panic!("{grant} grant refused: {error:?}"),
+        }
+    }
+
     set_anonymous_rate(&admin, 100, 60_000).await;
 
     // ------------------------
