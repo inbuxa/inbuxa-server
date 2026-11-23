@@ -299,7 +299,9 @@ Done 2026-09-18:
   moves.
 - The container image runs as user `inbuxa` (uid 2000, as upstream), with
   `/etc/inbuxa` and `/var/lib/inbuxa` as volumes, `INBUXA_HEALTHCHECK_URL`, and
-  `inbuxa --config /etc/inbuxa/config.json`. The systemd unit
+  `inbuxa --config /etc/inbuxa/config.json`. It sets `INBUXA_LOG_STDOUT=info`,
+  so the log also goes to standard output (`docker logs`, `kubectl logs`)
+  unless the settings have a console tracer; `off` turns it off. The systemd unit
   (`inbuxa.service`), launchd plist and AppArmor profile are renamed to match.
 - `install.sh` is a stub that says there's no release yet. Upstream's version
   would download and install Stalwart itself.

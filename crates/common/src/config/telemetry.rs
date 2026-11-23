@@ -511,6 +511,40 @@ impl Tracers {
                 }
             }
 
+            // inbuxa: the container image sets INBUXA_LOG_STDOUT=info, so the
+            // log also goes to standard output, where `docker logs` and
+            // `kubectl logs` read it: a new store's only tracer is the log
+            // file. A console tracer in the settings takes its place, and
+            // off (anything but a level) turns it off.
+            if let Some(level) = stdout_level_from_env()
+                && !tracers
+                    .iter()
+                    .any(|t| matches!(t.typ, TelemetrySubscriberType::ConsoleTracer(_)))
+            {
+                let mut interests = Interests::default();
+                for event_type in EventType::variants() {
+                    let event_level = custom_levels
+                        .get(event_type)
+                        .copied()
+                        .unwrap_or(event_type.level());
+                    if level.is_contained(event_level) {
+                        interests.set(event_type.to_id() as usize);
+                        global_interests.set(event_type.to_id() as usize);
+                    }
+                }
+                tracers.push(TelemetrySubscriber {
+                    id: "stdout".to_string(),
+                    interests,
+                    typ: TelemetrySubscriberType::ConsoleTracer(ConsoleTracer {
+                        ansi: false,
+                        multiline: false,
+                        buffered: true,
+                    }),
+                    lossy: false,
+                    settings: 0,
+                });
+            }
+
             // inbuxa: MON-10 to MON-12: trace history, when a tracing store is set:
             // info and above, the span edges and MAIL FROM, never raw I/O
             if !storage.tracing.is_none() {
@@ -801,6 +835,22 @@ fn webhook_settings(hook: &WebHook) -> u64 {
     let mut hook = hook.clone();
     in_place_reset!(hook);
     settings_hash(&hook)
+}
+
+/// inbuxa: INBUXA_LOG_STDOUT, the level the container image logs to
+/// standard output at; none when it's unset, off, disable or not a level
+fn stdout_level_from_env() -> Option<Level> {
+    types::branding::env_var("LOG_STDOUT")
+        .ok()
+        .as_deref()
+        .and_then(parse_stdout_level)
+}
+
+fn parse_stdout_level(value: &str) -> Option<Level> {
+    match Level::from_str(value.trim()) {
+        Ok(Level::Disable) | Err(_) => None,
+        Ok(level) => Some(level),
+    }
 }
 
 fn apply_events(
@@ -1104,7 +1154,17 @@ mod tests {
 
 #[cfg(test)]
 mod inbuxa_env_tests {
-    use super::parse_otlp_headers;
+    use super::{Level, parse_otlp_headers, parse_stdout_level};
+
+    #[test]
+    fn stdout_level_from_the_image_setting() {
+        assert_eq!(parse_stdout_level("info"), Some(Level::Info));
+        assert_eq!(parse_stdout_level(" Warn "), Some(Level::Warn));
+        assert_eq!(parse_stdout_level("debug"), Some(Level::Debug));
+        for off in ["off", "disable", "", "no"] {
+            assert_eq!(parse_stdout_level(off), None, "{off:?}");
+        }
+    }
 
     #[test]
     fn otlp_headers_file_pairs() {
