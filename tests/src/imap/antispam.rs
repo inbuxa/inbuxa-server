@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
@@ -35,8 +37,14 @@ pub async fn test(test: &TestServer) {
         .await;
     assert_eq!(admin.spam_training_samples().await, vec![]);
 
-    // Train the classifier via APPEND
+    // inbuxa: #544: a plain APPEND to INBOX (a mailbox migration) trains
+    // nothing; flagging the message $NotJunk does
     imap.append("INBOX", HAM[0]).await;
+    assert_eq!(account.spam_training_samples().await, vec![]);
+    imap.send_ok("SELECT INBOX").await;
+    imap.send_ok("STORE 1 +FLAGS ($NotJunk)").await;
+
+    // Train the classifier via APPEND
     imap.append("Junk Mail", SPAM[0]).await;
     let samples = account.spam_training_samples().await;
     assert_eq!(samples.iter().filter(|x| !x.1.is_spam).count(), 1);
@@ -52,9 +60,14 @@ pub async fn test(test: &TestServer) {
     assert_eq!(samples.iter().filter(|x| !x.1.is_spam).count(), 1);
     assert_eq!(samples.iter().filter(|x| x.1.is_spam).count(), 3);
 
-    // Add the remaining messages via APPEND
+    // Add the remaining messages via APPEND; ham is flagged $NotJunk (#544)
     for message in HAM.iter().skip(1) {
-        imap.append("INBOX", message).await;
+        imap.send_ok(&format!(
+            "APPEND INBOX ($NotJunk) {{{}+}}\r\n{}",
+            message.len(),
+            message
+        ))
+        .await;
     }
     for message in SPAM.iter().skip(3) {
         imap.append("Junk Mail", message).await;
