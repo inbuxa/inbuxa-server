@@ -23,6 +23,7 @@ use jmap_client::{
     mailbox::Role,
 };
 use mail_parser::DateTime;
+use serde_json::json;
 use std::{
     sync::Arc,
     time::{Duration, Instant},
@@ -690,6 +691,114 @@ pub async fn test(test: &TestServer) {
             .is_none()
     );
     assert_email_properties(&client, &submission_id_1, &[&mailbox_id_2], &[]).await;
+
+    // inbuxa: a recipient on a top-level domain outside the public suffix
+    // list is sent to, from the headers and from the envelope
+    let lab_email_id = client
+        .email_import(
+            concat!(
+                "From: jdoe@example.com\r\n",
+                "To: ops@host.lab\r\n",
+                "Cc: jane_smith@remote.org\r\n",
+                "Subject: lab\r\n\r\n",
+                "test"
+            )
+            .as_bytes()
+            .to_vec(),
+            [&mailbox_id],
+            None::<Vec<&str>>,
+            None,
+        )
+        .await
+        .unwrap()
+        .take_id();
+    let lab_submission_id = client
+        .email_submission_create_envelope(
+            &lab_email_id,
+            &identity_id,
+            Address::new("jdoe@example.com")
+                .parameter("HOLDUNTIL", Some(hold_until_date.to_string())),
+            Vec::<Address>::new(),
+        )
+        .await
+        .unwrap()
+        .take_id();
+    let lab_envelope_id = client
+        .email_submission_create_envelope(
+            &lab_email_id,
+            &identity_id,
+            Address::new("jdoe@example.com")
+                .parameter("HOLDUNTIL", Some(hold_until_date.to_string())),
+            ["admin@mail.intern"],
+        )
+        .await
+        .unwrap()
+        .take_id();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    for (submission_id, expected) in [
+        (
+            &lab_submission_id,
+            &["jane_smith@remote.org", "ops@host.lab"][..],
+        ),
+        (&lab_envelope_id, &["admin@mail.intern"][..]),
+    ] {
+        let email_submission = client
+            .email_submission_get(submission_id, None)
+            .await
+            .unwrap()
+            .unwrap();
+        let delivery_status = email_submission.delivery_status().unwrap();
+        let mut rcpts = delivery_status
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        rcpts.sort_unstable();
+        assert_eq!(rcpts, expected);
+        for (rcpt, status) in delivery_status {
+            assert_eq!(status.smtp_reply(), "250 2.1.5 Queued", "{rcpt}");
+        }
+    }
+
+    // A header recipient that is not an address is reported, not dropped
+    let bad_email_id = client
+        .email_import(
+            concat!(
+                "From: jdoe@example.com\r\n",
+                "To: ops@host.123, jane_smith@remote.org\r\n",
+                "Subject: bad\r\n\r\n",
+                "test"
+            )
+            .as_bytes()
+            .to_vec(),
+            [&mailbox_id],
+            None::<Vec<&str>>,
+            None,
+        )
+        .await
+        .unwrap()
+        .take_id();
+    let response = account
+        .jmap_method_calls(json!([[
+            "EmailSubmission/set",
+            {
+                "accountId": account.id_string(),
+                "create": {
+                    "i0": {
+                        "emailId": bad_email_id,
+                        "identityId": identity_id,
+                    }
+                }
+            },
+            "0"
+        ]]))
+        .await;
+    let error = response.not_created(0);
+    assert_eq!(error["type"], "invalidRecipients", "{error}");
+    assert_eq!(
+        error["invalidRecipients"],
+        json!(["ops@host.123"]),
+        "{error}"
+    );
     smtp_settings.lock().do_stop = true;
 
     // Identities are created and destroyed as the account's addresses change
