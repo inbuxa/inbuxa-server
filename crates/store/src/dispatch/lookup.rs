@@ -449,6 +449,32 @@ impl InMemoryStore {
         rate: &Rate,
         soft_check: bool,
     ) -> trc::Result<Option<u64>> {
+        self.rate_requests(prefix, key, rate, soft_check)
+            .await
+            .map(|(requests, expires_in)| (requests > rate.count as i64).then_some(expires_in))
+    }
+
+    /// inbuxa: as `is_rate_allowed`, saying when the window ends if this
+    /// request is the one that goes over the limit; later ones over it, and
+    /// those under it, give none
+    pub async fn is_rate_first_exceeded(
+        &self,
+        prefix: u8,
+        key: &[u8],
+        rate: &Rate,
+    ) -> trc::Result<Option<u64>> {
+        self.rate_requests(prefix, key, rate, false)
+            .await
+            .map(|(requests, expires_in)| (requests == rate.count as i64 + 1).then_some(expires_in))
+    }
+
+    async fn rate_requests(
+        &self,
+        prefix: u8,
+        key: &[u8],
+        rate: &Rate,
+        soft_check: bool,
+    ) -> trc::Result<(i64, u64)> {
         let now = now();
         let period = rate.period.as_secs().max(1);
         let range_start = now / period;
@@ -468,11 +494,7 @@ impl InMemoryStore {
             self.counter_get(bucket).await.caused_by(trc::location!())? + 1
         };
 
-        if requests <= rate.count as i64 {
-            Ok(None)
-        } else {
-            Ok(Some(expires_in))
-        }
+        Ok((requests, expires_in))
     }
 
     pub async fn try_lock(&self, prefix: u8, key: &[u8], duration: u64) -> trc::Result<bool> {
