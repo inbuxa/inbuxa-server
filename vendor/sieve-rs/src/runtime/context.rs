@@ -19,7 +19,7 @@ use crate::{
 
 use super::{
     RuntimeError, Variable,
-    actions::action_include::IncludeResult,
+    actions::{action_editheader::RemoveCrLf, action_include::IncludeResult},
     tests::{TestResult, test_envelope::parse_envelope_address},
 };
 
@@ -653,12 +653,15 @@ impl<'x> Context<'x> {
         self.main_message_id > 0
     }
 
+    // inbuxa: the account's name and address go into From headers; the
+    // value loses any CR, LF or other control
     pub(crate) fn user_from_field(&self) -> String {
-        if !self.user_full_name.is_empty() {
+        let from = if !self.user_full_name.is_empty() {
             format!("\"{}\" <{}>", self.user_full_name, self.user_address)
         } else {
             self.user_address.to_string()
-        }
+        };
+        from.as_str().remove_crlf(self.runtime.max_header_size)
     }
 
     pub fn global_variable_names(&self) -> impl Iterator<Item = &str> {

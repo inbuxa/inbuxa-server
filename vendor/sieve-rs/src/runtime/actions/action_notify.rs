@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use mail_builder::headers::{date::Date, message_id::generate_message_id_header};
@@ -15,7 +17,7 @@ use crate::{
     },
 };
 
-use super::action_vacation::MAX_SUBJECT_LEN;
+use super::{action_editheader::RemoveCrLf, action_vacation::MAX_SUBJECT_LEN};
 
 impl Notify {
     pub(crate) fn exec(&self, ctx: &mut Context) {
@@ -72,6 +74,10 @@ impl Notify {
             } else {
                 ctx.user_from_field()
             };
+            // inbuxa: header values from the script, the URI and the inbound
+            // message lose their CR, LF and other controls
+            let max_header_size = ctx.runtime.max_header_size;
+            let from = from.as_str().remove_crlf(max_header_size);
             let notify_message = self
                 .message
                 .as_ref()
@@ -138,7 +144,7 @@ impl Notify {
                 }
                 message.extend_from_slice(header.as_str().as_bytes());
                 message.extend_from_slice(b": ");
-                message.extend_from_slice(value.as_bytes());
+                message.extend_from_slice(value.as_str().remove_crlf(max_header_size).as_bytes());
                 message.extend_from_slice(b"\r\n");
             }
 
@@ -180,6 +186,7 @@ impl Notify {
             } else {
                 ctx.message.subject().unwrap_or_default()
             };
+            let subject = subject.remove_crlf(max_header_size);
             let mut iter = subject.chars().enumerate();
             let mut buf = [0; 4];
             #[allow(clippy::while_let_on_iterator)]
@@ -478,7 +485,10 @@ fn parse_mailto(uri: &str) -> Option<MailtoMessage> {
                             }
                             _ => State::ParamValue(Mailto::Header(hdr)),
                         })
-                        .unwrap_or_else(|| State::ParamValue(Mailto::Other(String::new())));
+                        // inbuxa: a name that isn't a field name (a %0D%0A in
+                        // it) refuses the URI; it used to become a line
+                        // with no name
+                        ?;
                 }
                 State::ParamValue(_) => buf.push(ch),
                 _ => return None,
@@ -532,6 +542,8 @@ fn parse_mailto(uri: &str) -> Option<MailtoMessage> {
                 has_addresses = true;
             }
             State::ParamName => {
+                // inbuxa: the name is checked here too
+                HeaderName::parse(value.as_str())?;
                 params
                     .headers
                     .push((HeaderName::Other(value.into()), String::new()));
@@ -545,6 +557,18 @@ fn parse_mailto(uri: &str) -> Option<MailtoMessage> {
             },
             _ => return None,
         }
+    }
+
+    // inbuxa: a %0D%0A (or any control) in an address would end the To or
+    // Cc line it's written on; such a URI is refused
+    if params
+        .to
+        .iter()
+        .chain(&params.cc)
+        .chain(&params.bcc)
+        .any(|addr| addr.chars().any(|ch| ch.is_ascii_control()))
+    {
+        return None;
     }
 
     if has_addresses { Some(params) } else { None }

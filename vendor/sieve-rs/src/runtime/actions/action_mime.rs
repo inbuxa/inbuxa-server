@@ -181,7 +181,12 @@ impl Enclose {
                     .as_ref()
                     .remove_crlf(ctx.runtime.max_header_size)
             })
-            .or_else(|| ctx.message.subject().map(|s| s.to_string()))
+            // inbuxa: the inbound Subject is decoded and may hold a CR or LF
+            .or_else(|| {
+                ctx.message
+                    .subject()
+                    .map(|s| s.remove_crlf(ctx.runtime.max_header_size))
+            })
             .unwrap_or_default();
 
         let message = std::mem::take(&mut ctx.message);

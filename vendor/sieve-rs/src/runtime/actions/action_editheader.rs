@@ -152,6 +152,9 @@ impl DeleteHeader {
     }
 }
 
+// inbuxa: every header value the runtime writes into a message goes through
+// this, wherever the value came from: CR, LF and the other control
+// characters but tab are dropped, so a value can't start a header line
 pub(crate) trait RemoveCrLf {
     fn remove_crlf(&self, max_len: usize) -> String;
 }
@@ -160,7 +163,7 @@ impl RemoveCrLf for &str {
     fn remove_crlf(&self, max_len: usize) -> String {
         let mut header_value = String::with_capacity(self.len());
         for ch in self.chars() {
-            if !['\n', '\r'].contains(&ch) {
+            if ch == '\t' || ch >= ' ' {
                 if header_value.len() + ch.len_utf8() <= max_len {
                     header_value.push(ch);
                 } else {
@@ -199,5 +202,185 @@ impl<'x> Context<'x> {
         } else {
             part.headers.push(header);
         }
+    }
+}
+
+// inbuxa: header values that reach a message the runtime writes (vacation,
+// notify, enclose) come from the inbound message and from scripts; a CR or
+// LF in one must not start a new header line in that message
+#[cfg(test)]
+mod header_injection_tests {
+    use mail_parser::MessageParser;
+
+    use crate::{Compiler, Context, Envelope, Event, Input, Runtime};
+
+    // "x\r\nBcc: victim@example.com", RFC 2047 encoded
+    const INJECTED: &str = "=?utf-8?b?eA0KQmNjOiB2aWN0aW1AZXhhbXBsZS5jb20=?=";
+
+    fn messages(script: &str, extra_headers: &str, full_name: &str) -> Vec<String> {
+        let script = std::sync::Arc::new(Compiler::new().compile(script.as_bytes()).unwrap());
+        let raw = format!(
+            "From: sender@example.org\r\nTo: john@example.com\r\n{extra_headers}\
+             Subject: {INJECTED}\r\n\r\nbody\r\n"
+        );
+        let runtime = Runtime::new();
+        let mut ctx = Context::new(
+            &runtime,
+            MessageParser::new().parse(raw.as_bytes()).unwrap(),
+        )
+        .with_envelope(Envelope::From, "sender@example.org")
+        .with_envelope(Envelope::To, "john@example.com")
+        .with_user_address("john@example.com");
+        if !full_name.is_empty() {
+            ctx.set_user_full_name(full_name);
+        }
+        let mut input = Input::script("test", script);
+        let mut created = Vec::new();
+        while let Some(event) = ctx.run(input) {
+            input = match event.unwrap() {
+                Event::CreatedMessage { message, .. } => {
+                    created.push(String::from_utf8(message).unwrap());
+                    Input::True
+                }
+                Event::DuplicateId { .. } => Input::False,
+                _ => Input::True,
+            };
+        }
+        created
+    }
+
+    // every line of the top-level header block is a "name: value" field or a
+    // folded continuation, and none of them is a Bcc
+    fn header_problem(message: &str) -> Option<String> {
+        let headers = message.split("\r\n\r\n").next().unwrap();
+        for line in headers.split("\r\n") {
+            if line.contains(['\r', '\n']) {
+                return Some(format!("bare CR or LF in {line:?}"));
+            }
+            if line.starts_with([' ', '\t']) {
+                continue;
+            }
+            let Some((name, _)) = line.split_once(':') else {
+                return Some(format!("not a header line {line:?}"));
+            };
+            if name.is_empty() || !name.bytes().all(|b| (33..=126).contains(&b)) {
+                return Some(format!("bad field name in {line:?}"));
+            }
+            if name.eq_ignore_ascii_case("bcc") {
+                return Some(format!("injected header {line:?}"));
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn generated_messages_have_no_injected_headers() {
+        // ${1} is the inbound Subject, decoded
+        let matched = |action: &str| {
+            format!(
+                "require [\"variables\", \"vacation\", \"enotify\", \"enclose\"];\n\
+                 if header :matches \"subject\" \"*\" {{ {action} }}\n"
+            )
+        };
+        let plain = |script: &str| script.to_string();
+        // a URI the compiler can't check: it's in a variable
+        let mailto = |uri: &str| {
+            format!(
+                "require [\"variables\", \"enotify\"];\nset \"u\" \"mailto:{uri}\";\n\
+                 notify :message \"hi\" \"${{u}}\";\n"
+            )
+        };
+        let away = "require \"vacation\";\nvacation :subject \"hi\" \"away\";\n";
+        let cases = [
+            (
+                "vacation, inbound subject",
+                plain("require \"vacation\";\nvacation \"away\";\n"),
+            ),
+            (
+                "vacation :subject",
+                matched("vacation :subject \"${1}\" \"away\";"),
+            ),
+            (
+                "vacation :from",
+                matched("vacation :subject \"hi\" :from \"${1} <john@example.com>\" \"away\";"),
+            ),
+            (
+                "enclose, inbound subject",
+                plain("require \"enclose\";\nenclose \"body\";\nkeep;\n"),
+            ),
+            (
+                "enclose :subject",
+                matched("enclose :subject \"${1}\" \"body\"; keep;"),
+            ),
+            (
+                "enclose :headers",
+                matched("enclose :subject \"hi\" :headers \"X-Note: ${1}\" \"body\"; keep;"),
+            ),
+            (
+                "notify, inbound subject",
+                plain("require \"enotify\";\nnotify \"mailto:john@example.net\";\n"),
+            ),
+            (
+                "notify :message",
+                matched("notify :message \"${1}\" \"mailto:john@example.net\";"),
+            ),
+            (
+                "notify :from",
+                matched(
+                    "notify :message \"hi\" :from \"${1} <john@example.com>\" \"mailto:john@example.net\";",
+                ),
+            ),
+            (
+                "notify mailto subject",
+                mailto("john@example.net?subject=a%0D%0ABcc:%20victim@example.com"),
+            ),
+            (
+                "notify mailto header",
+                mailto("john@example.net?subject=hi&x-note=a%0D%0ABcc:%20victim@example.com"),
+            ),
+            (
+                "notify mailto param name",
+                mailto("john@example.net?x%0D%0ABcc=victim%40example.com"),
+            ),
+            (
+                "notify mailto trailing name",
+                mailto("john@example.net?subject=hi&x%0D%0ABcc%3A%20victim%40example%2Ecom"),
+            ),
+            (
+                "notify mailto address",
+                mailto("a%0D%0ABcc%3A%20victim@example.net"),
+            ),
+        ];
+        let mut problems = Vec::new();
+        let mut check = |case: &str, script: &str, extra_headers: &str, full_name: &str| {
+            for message in messages(script, extra_headers, full_name) {
+                if let Some(problem) = header_problem(&message) {
+                    problems.push(format!("{case}: {problem}"));
+                }
+            }
+        };
+        for (case, script) in &cases {
+            check(case, script, "", "");
+        }
+        check(
+            "vacation, user name",
+            away,
+            "",
+            "John\r\nBcc: victim@example.com",
+        );
+        check(
+            "vacation, message id",
+            away,
+            "Message-ID: <a\rBcc: victim@example.com>\r\n",
+            "",
+        );
+        assert!(problems.is_empty(), "{problems:#?}");
+
+        // the inbound subject still makes the vacation reply's subject
+        let reply = &messages(&cases[0].1, "", "")[0];
+        assert!(
+            reply.contains("\r\nSubject: Auto: xBcc: victim@example.com\r\n"),
+            "{reply}"
+        );
     }
 }
