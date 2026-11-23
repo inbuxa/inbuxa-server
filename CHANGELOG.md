@@ -15,6 +15,26 @@ https://github.com/inbuxa/inbuxa-server/security/advisories.
 Every version PR adds that version's entry here. CI refuses a version this
 file has no entry for (`tools/release/version.py --changelog`).
 
+## [27.1-rc.41] - 2026-11-22
+
+27.1-rc.40 with one container change.
+
+### Changed
+- The container image also writes the log to standard output, at `info`,
+  so `docker logs` and `kubectl logs` show it. Until now a new install in
+  a container logged only to its log file and printed nothing. The image
+  sets `INBUXA_LOG_STDOUT=info`; a console tracer in the settings takes
+  its place. The log file is kept either way. Installs from the binaries
+  or packages don't change. (#527)
+
+### Before you upgrade
+- 27.1-rc.40 to 27.1-rc.41 rolls like any update, with no store layout
+  step.
+- To keep only the log file in a container, set `INBUXA_LOG_STDOUT=off`.
+- Docker's default `json-file` log driver doesn't rotate. If your host has
+  no `max-size` for it, set one (for example `--log-opt max-size=50m`), or
+  the container's log grows without limit.
+
 ## [27.1-rc.40] - 2026-11-22
 
 27.1-rc.39 with one cluster change.
