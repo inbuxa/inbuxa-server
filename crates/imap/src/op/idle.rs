@@ -50,6 +50,10 @@ impl<T: SessionStream> Session<T> {
         let is_utf8 = self.is_utf8;
         let is_uidonly = self.is_uidonly;
         let use_vanished = self.is_qresync || is_uidonly;
+        // inbuxa: with CONDSTORE on, unsolicited STATUS carries HIGHESTMODSEQ
+        // (RFC 7162 3.1)
+        let is_condstore = self.is_condstore
+            || matches!(&self.state, State::Selected { mailbox, .. } if mailbox.is_condstore);
 
         // Register with push manager
         let mut push_rx = self
@@ -73,6 +77,7 @@ impl<T: SessionStream> Session<T> {
                 is_uidonly,
                 is_rev2,
                 is_utf8,
+                is_condstore,
             )
             .await?;
         }
@@ -137,7 +142,7 @@ impl<T: SessionStream> Session<T> {
                         }
 
                         if has_mailbox_changes || has_email_changes {
-                            data.write_changes(&mailbox, has_mailbox_changes, has_email_changes, use_vanished, is_uidonly, is_rev2, is_utf8).await?;
+                            data.write_changes(&mailbox, has_mailbox_changes, has_email_changes, use_vanished, is_uidonly, is_rev2, is_utf8, is_condstore).await?;
                         }
                     } else {
                         self.write_bytes(&b"* BYE Server shutting down.\r\n"[..]).await.ok();
@@ -160,6 +165,7 @@ impl<T: SessionStream> SessionData<T> {
         is_uidonly: bool,
         is_rev2: bool,
         is_utf8: bool,
+        is_condstore: bool,
     ) -> trc::Result<()> {
         // Fetch all changed mailboxes
         if check_mailboxes {
@@ -191,19 +197,24 @@ impl<T: SessionStream> SessionData<T> {
                 .serialize(&mut buf, is_rev2, is_utf8, false);
             }
             // Obtain status of changed mailboxes
+            let items: &[Status] = if is_condstore {
+                &[
+                    Status::Messages,
+                    Status::Unseen,
+                    Status::UidNext,
+                    Status::UidValidity,
+                    Status::HighestModSeq,
+                ]
+            } else {
+                &[
+                    Status::Messages,
+                    Status::Unseen,
+                    Status::UidNext,
+                    Status::UidValidity,
+                ]
+            };
             for mailbox_name in changes.changed {
-                if let Ok(status) = self
-                    .status(
-                        mailbox_name,
-                        &[
-                            Status::Messages,
-                            Status::Unseen,
-                            Status::UidNext,
-                            Status::UidValidity,
-                        ],
-                    )
-                    .await
-                {
+                if let Ok(status) = self.status(mailbox_name, items).await {
                     status.serialize(&mut buf, is_utf8);
                 }
             }
