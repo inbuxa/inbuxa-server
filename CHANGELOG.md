@@ -15,6 +15,98 @@ https://github.com/inbuxa/inbuxa-server/security/advisories.
 Every version PR adds that version's entry here. CI refuses a version this
 file has no entry for (`tools/release/version.py --changelog`).
 
+## [27.1-rc.45] - 2026-11-24
+
+27.1-rc.44 with security fixes from security reviews (one high,
+eleven medium, two low). 27.1-rc.1 to 27.1-rc.44 are affected, and so is 2026.x
+up to and including 2026.11.24. The same fixes are in 2026.11.24.1.
+
+### Security
+High
+- Mail protocols: a client that sent commands and then stopped reading
+  kept its SMTP, IMAP, POP3 or ManageSieve session, and its place under the
+  connection limit, open forever. A session whose answer makes no progress
+  for the session's timeout is now closed. (GHSA-w5xx-gxq9-2vpv, #617)
+
+Medium
+- HTTP: any web page could get its visitors' addresses banned from every
+  service with images whose URLs are too long to parse. Requests refused
+  as too large (414, 431) no longer count toward the scan ban.
+  (GHSA-5xw5-x276-jfqr, #617)
+- HTTP: any web page could post wrong passwords to the sign-in API from
+  its visitors' browsers and get them banned. `/api/auth` and
+  `/api/passkey/register` now accept only `application/json` and answer
+  anything else with 415. (GHSA-j4p4-p27c-rxqq, #617)
+- JMAP: a signed-in user could make the server read far past its request
+  limit. Request bodies stop at the request size limit, also for accounts
+  with unlimited uploads; a WebSocket message over it is closed with code
+  1009; only the first KiB of a push error body is read.
+  (GHSA-4552-7cpj-q8xw, #617)
+- Security: an IPv6 client could change address within its /64 to walk
+  past bans and rate limits. IPv6 clients are now counted and banned by
+  their /64, and a network ban added at runtime works at once.
+  (GHSA-6wwx-hx9h-h77q, #617)
+- Sign-in: failures on a login whose bytes spell an IP address counted
+  toward that address, so anyone could make its owner's next typo ban
+  them. Login and recipient counts now have keys of their own.
+  (GHSA-7pg4-qvq9-wh3m, #617)
+- IMAP: one command could keep a core busy for minutes, or one FETCH hold
+  hundreds of copies of a message. Extreme FETCH, SEARCH, flag and
+  sequence-set requests are refused with BAD, and a FETCH answer over four
+  times the message size stops with NO [LIMIT]. (GHSA-95gr-gfhg-8vrx, #617)
+- Sign-in: very long passwords could keep the CPU busy against SHA-crypt
+  and MD5-crypt hashes. A password over 1,024 bytes fails before any hash
+  runs, and can't be set. (GHSA-8hjh-58j2-27q6, #617)
+- Sessions: open IMAP, POP3, ManageSieve, SMTP submission, EventSource and
+  WebSocket sessions kept working after a password change, token
+  revocation, lock or loss of access. They now end at the next command,
+  and streams end at once on a password change. (GHSA-r7c2-rhj2-h98x, #617)
+- Sieve: `reject` sent its notice to the return path, which anyone can
+  forge. A notice now goes only to a verified sender (signed in, SPF pass,
+  or mail this server generated); other rejected mail is discarded and
+  the discard is logged. (GHSA-pr42-7c58-rf2c, #617)
+- Calendar: one scheduling message could keep the server busy and grow
+  stored events. An object holds at most 32 time zone definitions, time
+  zones are merged in one pass, and at most four iMIP parts of a message
+  are processed. (GHSA-rc52-h8j5-h3v4, #617)
+- JMAP: any signed-in user could store uploads under another account and
+  use up its upload limits. `/jmap/upload/{accountId}` now answers 403
+  unless the user owns, belongs to or may impersonate that account.
+  (GHSA-p623-3g53-v7mc, #617)
+
+Low
+- Logs: the log viewer read every file in the Log tracer's directory. It
+  now reads only the tracer's own files. (GHSA-qqh8-qvfv-rxp9, #617)
+- Sieve: `+` built strings past the maximum variable size, and `enclose`
+  dropped Received headers, so enclose-and-redirect loops skipped the hop
+  limit. Both fixed. (GHSA-6mcv-hhxv-jq24, #617)
+
+### Changed
+- SMTP: at most five different EHLO domains per session; the sixth gets
+  421. (#617)
+- SMTP: an unparseable line gets exactly one reply; the rest of the line
+  is never run as a command. (#617)
+- SMTP: mailing-list expansion is linear in the list size, and a repeated
+  RCPT TO for a list already expanded isn't expanded again. (#617)
+- Audit: OAuth and directory-token sign-ins are logged as auth.success.
+  (#617)
+- Accounts: destroying an account removes all of its search index
+  entries. (#617)
+- Recovery mode: the new `INBUXA_RECOVERY_MODE_BIND` sets the address
+  recovery and bootstrap mode listen on. The default is still `[::]`.
+  (#617)
+
+### Upgrading
+- IPv6 bans now cover the whole /64, and lifting one lifts the /64.
+  Allowed IPs still win.
+- Sieve `reject` on mail from a sender that isn't verified discards it
+  without a notice. On listeners where SPF is off, such as LMTP, every
+  reject becomes a silent discard.
+- Scripts that post to `/api/auth` must send
+  `Content-Type: application/json`.
+- Passwords longer than 1,024 bytes can no longer be used or set.
+- Per-login and per-recipient failure counts start over once.
+
 ## [27.1-rc.44] - 2026-11-24
 
 27.1-rc.43 with 52 bug fixes from the 27.1 bug sweep (#572): mail
