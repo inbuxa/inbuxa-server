@@ -48,6 +48,7 @@ use tokio::{
     io::{AsyncBufReadExt, AsyncRead, AsyncWriteExt, BufReader},
     net::TcpStream,
 };
+use trc::{Collector, MetricType};
 use utils::tls::build_tls_connector;
 
 #[derive(Debug, serde::Deserialize)]
@@ -697,10 +698,17 @@ pub async fn test(test: &mut TestServer) {
     imap.assert_read(Type::Tagged, ResponseType::No)
         .await
         .assert_contains("PRIVACYREQUIRED");
+    // inbuxa: a bearer sign-in is logged as auth.success, as a password,
+    // app password or API key sign-in is
+    let successes = Collector::read_metric(MetricType::AuthSuccess);
     let reply = imap_tls_auth(&oauth_bearer_sasl).await;
     assert!(
         reply.starts_with("a OK"),
         "IMAP OAUTHBEARER over TLS: {reply}"
+    );
+    assert!(
+        Collector::read_metric(MetricType::AuthSuccess) > successes,
+        "an IMAP OAUTHBEARER sign-in logged no auth.success"
     );
 
     // Try POP3 OAUTHBEARER auth
