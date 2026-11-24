@@ -70,6 +70,14 @@ async fn spam_filter_maintenance(
             for key in [SPAM_CLASSIFIER_KEY, SPAM_TRAINER_KEY] {
                 server.blob_store().delete_blob(key).await?;
             }
+
+            // inbuxa: this node stops scoring with the deleted model, and
+            // the SpamClassifier reload that training sends makes every
+            // other node load the (now missing) stored model, dropping theirs
+            server.spam_model_reload().await?;
+            server
+                .cluster_broadcast(BroadcastEvent::reload(ObjectType::SpamClassifier))
+                .await;
         }
         TaskSpamFilterMaintenanceType::Abort => {
             if server.inner.ipc.train_task_controller.is_running() {

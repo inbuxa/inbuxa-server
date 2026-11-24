@@ -211,6 +211,12 @@ impl<T: SessionStream> Session<T> {
                 }),
             };
 
+            // inbuxa: SELECT or EXAMINE with CONDSTORE turns CONDSTORE on for
+            // the session, as ENABLE CONDSTORE does (RFC 7162 3.1)
+            if arguments.condstore {
+                self.is_condstore = true;
+            }
+
             // Update state
             self.state = State::Selected { data, mailbox };
 

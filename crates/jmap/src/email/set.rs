@@ -779,6 +779,15 @@ impl EmailSet for Server {
             let mut raw_message = Vec::with_capacity((4 * size_attachments / 3) + 1024);
             builder.write_to(&mut raw_message).unwrap_or_default();
 
+            // inbuxa: a created message trains the spam classifier only when
+            // the client says what it is ($Junk, $NotJunk) or puts it in Junk,
+            // as Email/import and IMAP APPEND do. A plain create in the Inbox
+            // (a migration, say) is no verdict on the message.
+            let train_classifier = keywords
+                .iter()
+                .any(|k| matches!(k, Keyword::Junk | Keyword::NotJunk))
+                || mailboxes.contains(&JUNK_ID);
+
             // Ingest message
             match self
                 .email_ingest(IngestEmail {
@@ -789,9 +798,7 @@ impl EmailSet for Server {
                     mailbox_ids: mailboxes,
                     keywords,
                     received_at,
-                    source: IngestSource::Jmap {
-                        train_classifier: true,
-                    },
+                    source: IngestSource::Jmap { train_classifier },
                     session_id: session.session_id,
                 })
                 .await

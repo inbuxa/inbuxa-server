@@ -6,7 +6,7 @@
  * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
-use crate::utils::smtp::SmtpConnection;
+use crate::utils::{server::TestServer, smtp::SmtpConnection};
 
 use super::{AssertResult, ImapConnection, Type};
 use imap_proto::ResponseType;
@@ -258,4 +258,93 @@ pub async fn test_pending_changes(imap: &mut ImapConnection, imap_check: &mut Im
     imap_check.send_ok("UNSELECT").await;
     imap.send_ok("UNSELECT").await;
     imap.send_ok("DELETE Fontina").await;
+}
+
+// inbuxa: once CONDSTORE is enabled, the STATUS sent during IDLE for another
+// mailbox carries HIGHESTMODSEQ (RFC 7162 3.1); without it, it does not.
+pub async fn test_condstore_status(test: &TestServer) {
+    println!("Running IDLE CONDSTORE status tests...");
+
+    let account = test.account("jdoe@example.com");
+    let mut imap = account.imap_client().await;
+    imap.send_ok("CREATE Gorgonzola").await;
+
+    let mut condstore = account.imap_client().await;
+    condstore.send_ok("ENABLE CONDSTORE").await;
+    let mut plain = account.imap_client().await;
+    for idle in [&mut condstore, &mut plain] {
+        idle.send("IDLE").await;
+        idle.assert_read(Type::Continuation, ResponseType::Ok).await;
+    }
+
+    imap.append(
+        "Gorgonzola",
+        "From: test@domain.com\nSubject: Modseq\n\nTest message\n",
+    )
+    .await;
+    condstore
+        .assert_read(Type::Status, ResponseType::Ok)
+        .await
+        .assert_contains("STATUS \"Gorgonzola\"")
+        .assert_contains("MESSAGES 1")
+        .assert_contains("HIGHESTMODSEQ ");
+    plain
+        .assert_read(Type::Status, ResponseType::Ok)
+        .await
+        .assert_contains("STATUS \"Gorgonzola\"")
+        .assert_contains("MESSAGES 1")
+        .assert_not_contains("HIGHESTMODSEQ");
+
+    for idle in [&mut condstore, &mut plain] {
+        idle.send_raw("DONE").await;
+        idle.assert_read(Type::Tagged, ResponseType::Ok).await;
+    }
+    imap.send_ok("DELETE Gorgonzola").await;
+}
+
+// inbuxa: #607: with CONDSTORE on, the flag changes sent during IDLE carry
+// MODSEQ (RFC 7162 3.2); without it, they do not.
+pub async fn test_condstore_fetch(test: &TestServer) {
+    println!("Running IDLE CONDSTORE flag change tests...");
+
+    let account = test.account("jdoe@example.com");
+    let mut imap = account.imap_client().await;
+    imap.send_ok("CREATE Taleggio").await;
+    imap.append(
+        "Taleggio",
+        "From: test@domain.com\nSubject: Modseq\n\nTest message\n",
+    )
+    .await;
+    imap.send_ok("SELECT Taleggio").await;
+
+    let mut condstore = account.imap_client().await;
+    condstore.send_ok("ENABLE CONDSTORE").await;
+    let mut plain = account.imap_client().await;
+    for idle in [&mut condstore, &mut plain] {
+        idle.send_ok("SELECT Taleggio").await;
+        idle.send("IDLE").await;
+        idle.assert_read(Type::Continuation, ResponseType::Ok).await;
+    }
+
+    imap.send_ok("STORE 1 +FLAGS (\\Flagged)").await;
+    condstore
+        .assert_read(Type::Status, ResponseType::Ok)
+        .await
+        .assert_contains("* 1 FETCH (")
+        .assert_contains("FLAGS (\\Flagged)")
+        .assert_contains("MODSEQ (");
+    plain
+        .assert_read(Type::Status, ResponseType::Ok)
+        .await
+        .assert_contains("* 1 FETCH (")
+        .assert_contains("FLAGS (\\Flagged)")
+        .assert_not_contains("MODSEQ");
+
+    for idle in [&mut condstore, &mut plain] {
+        idle.send_raw("DONE").await;
+        idle.assert_read(Type::Tagged, ResponseType::Ok).await;
+        idle.send_ok("UNSELECT").await;
+    }
+    imap.send_ok("UNSELECT").await;
+    imap.send_ok("DELETE Taleggio").await;
 }

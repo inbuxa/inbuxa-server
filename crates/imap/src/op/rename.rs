@@ -59,8 +59,22 @@ impl<T: SessionStream> SessionData<T> {
             .imap_ctx(&arguments.tag, trc::location!())?;
 
         // Validate mailbox name
-        let mut params = self
+        let params = self
             .validate_mailbox_create(&arguments.new_mailbox_name, None)
+            .await
+            .add_context(|err| err.id(arguments.tag.clone()))?;
+
+        // inbuxa: the new name is checked again under the account's
+        // mailbox-name lock, which is held until the rename is saved, so a
+        // create or rename to the same name in another session can't race it
+        let _lock = self
+            .lock_mailbox_names(params.account_id, &arguments.tag)
+            .await?;
+        self.synchronize_mailboxes(false)
+            .await
+            .imap_ctx(&arguments.tag, trc::location!())?;
+        let mut params = self
+            .validate_mailbox_create_locked(&arguments.new_mailbox_name, None, params.account_id)
             .await
             .add_context(|err| err.id(arguments.tag.clone()))?;
         params.is_rename = true;

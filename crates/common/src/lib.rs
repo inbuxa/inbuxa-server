@@ -73,6 +73,7 @@ pub mod expr;
 pub mod hold; // inbuxa: legal holds (audit-hold-lock spec, LH)
 pub mod i18n;
 pub mod ipc;
+pub mod mailbox_lock; // inbuxa: one mailbox create or rename at a time per account
 pub mod manager;
 pub mod migration_token; // inbuxa: migrations' run tokens (migrations spec, MG-10)
 pub mod network;

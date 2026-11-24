@@ -2,13 +2,18 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use imap_proto::ResponseType;
 
-use crate::imap::{
-    AssertResult,
-    append::{assert_append_message, build_messages},
+use crate::{
+    imap::{
+        AssertResult,
+        append::{assert_append_message, build_messages},
+    },
+    utils::server::TestServer,
 };
 
 use super::{ImapConnection, Type};
@@ -277,4 +282,45 @@ pub async fn test(imap: &mut ImapConnection, imap_check: &mut ImapConnection) {
         .await
         .assert_count("FETCH (", 3)
         .assert_contains("VANISHED (EARLIER) 2");
+}
+
+// inbuxa: #605: SELECT or EXAMINE with CONDSTORE turns CONDSTORE on for the
+// whole session (RFC 7162 3.1), so a mailbox selected later without it, and
+// IDLE outside any mailbox, still get MODSEQ data.
+pub async fn test_select_enables(test: &TestServer) {
+    println!("Running CONDSTORE enabled by SELECT tests...");
+
+    let message = "From: test@domain.com\nSubject: Modseq\n\nTest message\n";
+    let account = test.account("jdoe@example.com");
+    let mut other = account.imap_client().await;
+    for name in ["Brie", "Camembert", "Feta"] {
+        other.send_ok(&format!("CREATE {name}")).await;
+    }
+    other.append("Camembert", message).await;
+
+    let mut imap = account.imap_client().await;
+    imap.send_ok("SELECT Brie (CONDSTORE)").await;
+    imap.send("SELECT Camembert").await;
+    imap.assert_read(Type::Tagged, ResponseType::Ok)
+        .await
+        .assert_contains("HIGHESTMODSEQ");
+    imap.send("STORE 1 +FLAGS (\\Flagged)").await;
+    imap.assert_read(Type::Tagged, ResponseType::Ok)
+        .await
+        .assert_contains("MODSEQ (");
+    imap.send_ok("UNSELECT").await;
+
+    imap.send("IDLE").await;
+    imap.assert_read(Type::Continuation, ResponseType::Ok).await;
+    other.append("Feta", message).await;
+    imap.assert_read(Type::Status, ResponseType::Ok)
+        .await
+        .assert_contains("STATUS \"Feta\"")
+        .assert_contains("HIGHESTMODSEQ ");
+    imap.send_raw("DONE").await;
+    imap.assert_read(Type::Tagged, ResponseType::Ok).await;
+
+    for name in ["Brie", "Camembert", "Feta"] {
+        other.send_ok(&format!("DELETE {name}")).await;
+    }
 }

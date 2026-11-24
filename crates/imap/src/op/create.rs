@@ -11,7 +11,9 @@ use crate::{
     op::ImapContext,
     spawn_op,
 };
-use common::{network::SessionStream, storage::index::ObjectIndexBuilder};
+use common::{
+    mailbox_lock::MailboxNamesLock, network::SessionStream, storage::index::ObjectIndexBuilder,
+};
 use email::cache::{MessageCacheFetch, mailbox::MailboxCacheAccess};
 use imap_proto::{
     Command, ResponseCode, StatusResponse,
@@ -72,6 +74,24 @@ impl<T: SessionStream> SessionData<T> {
         // Validate mailbox name
         let params = self
             .validate_mailbox_create(&arguments.mailbox_name, arguments.mailbox_role)
+            .await
+            .imap_ctx(&arguments.tag, trc::location!())?;
+
+        // inbuxa: the name is checked again under the account's mailbox-name
+        // lock, which is held until the new mailbox is saved, so a create or
+        // rename to the same name in another session can't race it
+        let _lock = self
+            .lock_mailbox_names(params.account_id, &arguments.tag)
+            .await?;
+        self.synchronize_mailboxes(false)
+            .await
+            .imap_ctx(&arguments.tag, trc::location!())?;
+        let params = self
+            .validate_mailbox_create_locked(
+                &arguments.mailbox_name,
+                arguments.mailbox_role,
+                params.account_id,
+            )
             .await
             .imap_ctx(&arguments.tag, trc::location!())?;
         debug_assert!(!params.path.is_empty());
@@ -177,6 +197,47 @@ impl<T: SessionStream> SessionData<T> {
         } else {
             response
         })
+    }
+
+    // inbuxa: takes the account's mailbox-name lock, or refuses with INUSE
+    // when another write keeps holding it
+    pub async fn lock_mailbox_names(
+        &self,
+        account_id: u32,
+        tag: &str,
+    ) -> trc::Result<MailboxNamesLock> {
+        self.server
+            .lock_mailbox_names(account_id)
+            .await
+            .imap_ctx(tag, trc::location!())?
+            .ok_or_else(|| {
+                trc::ImapEvent::Error
+                    .into_err()
+                    .details(common::mailbox_lock::BUSY)
+                    .code(ResponseCode::InUse)
+                    .id(tag.to_string())
+            })
+    }
+
+    // inbuxa: validates again once the account's lock is held; the name
+    // must still point to that account
+    pub async fn validate_mailbox_create_locked<'x>(
+        &self,
+        mailbox_name: &'x str,
+        mailbox_role: Option<Attribute>,
+        locked_account_id: u32,
+    ) -> trc::Result<CreateParams<'x>> {
+        let params = self
+            .validate_mailbox_create(mailbox_name, mailbox_role)
+            .await?;
+        if params.account_id == locked_account_id {
+            Ok(params)
+        } else {
+            Err(trc::ImapEvent::Error
+                .into_err()
+                .details(common::mailbox_lock::BUSY)
+                .code(ResponseCode::InUse))
+        }
     }
 
     pub async fn validate_mailbox_create<'x>(
