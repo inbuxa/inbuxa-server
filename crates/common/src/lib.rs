@@ -154,6 +154,11 @@ pub const KV_OAUTH_DEVICE: u8 = 201;
 pub const KV_OAUTH_REVOKED: u8 = 202;
 // inbuxa: passkeys: a registration or sign-in between its two steps
 pub const KV_PASSKEY_CEREMONY: u8 = 203;
+// inbuxa: failures counted by login and by recipient, apart from the ones
+// counted by address: a login or recipient whose bytes are an address's key
+// would otherwise run up that address's count
+pub const KV_RATE_LIMIT_AUTH_LOGIN: u8 = 204;
+pub const KV_RATE_LIMIT_RCPT_ADDRESS: u8 = 205;
 
 #[derive(Clone)]
 pub struct Server {

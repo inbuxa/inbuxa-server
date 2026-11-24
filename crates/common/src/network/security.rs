@@ -7,7 +7,8 @@
  */
 
 use crate::{
-    KV_RATE_LIMIT_AUTH, KV_RATE_LIMIT_LOITER, KV_RATE_LIMIT_RCPT, KV_RATE_LIMIT_SCAN, Server,
+    KV_RATE_LIMIT_AUTH, KV_RATE_LIMIT_AUTH_LOGIN, KV_RATE_LIMIT_LOITER, KV_RATE_LIMIT_RCPT,
+    KV_RATE_LIMIT_RCPT_ADDRESS, KV_RATE_LIMIT_SCAN, Server,
     ipc::{BroadcastEvent, RegistryChange},
     network::{IPV6_PREFIX_MASK, ip_ban_scope, ip_rate_key},
 };
@@ -229,7 +230,7 @@ impl Server {
                     .is_none()
                     && self
                         .in_memory_store()
-                        .is_rate_allowed(KV_RATE_LIMIT_RCPT, rcpt.as_bytes(), rate, false)
+                        .is_rate_allowed(KV_RATE_LIMIT_RCPT_ADDRESS, rcpt.as_bytes(), rate, false)
                         .await?
                         .is_none());
 
@@ -320,7 +321,7 @@ impl Server {
             if let Some(login) = login.filter(|login| !login.is_empty())
                 && let Some(window_left) = self
                     .in_memory_store()
-                    .is_rate_first_exceeded(KV_RATE_LIMIT_AUTH, login.as_bytes(), rate)
+                    .is_rate_first_exceeded(KV_RATE_LIMIT_AUTH_LOGIN, login.as_bytes(), rate)
                     .await?
             {
                 let period = self
