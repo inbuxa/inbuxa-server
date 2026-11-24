@@ -12,7 +12,10 @@ use crate::{
     },
     pickle::{Pickle, PickledStream},
     schema::prelude::SocketAddr,
-    types::{EnumImpl, error::PatchError, ipaddr::IpAddr, ipmask::IpAddrOrMask},
+    types::{
+        EnumImpl, error::PatchError, ipaddr::IpAddr, ipmask::IpAddrOrMask,
+        string::StringValidatorResult,
+    },
 };
 use jmap_tools::{JsonPointerItem, Key, Value};
 use serde::{
@@ -167,7 +170,9 @@ impl<T: MapItem + Default> RegistryJsonPatch for Map<T> {
                 }
             }
             (Some(JsonPointerItem::Key(key)), Value::Bool(true)) => {
-                let key = T::try_from_string(key.to_string().as_ref());
+                let raw = key.to_string().into_owned();
+                let key = added_key::<T>(&pointer, raw.as_ref(), None)
+                    .map_err(|err| PatchError::new(pointer.clone(), err))?;
 
                 if !pointer.has_next()
                     && let Some(key) = key
@@ -180,7 +185,9 @@ impl<T: MapItem + Default> RegistryJsonPatch for Map<T> {
                 }
             }
             (Some(JsonPointerItem::Number(idx)), Value::Bool(true)) => {
-                let key = T::try_from_integer(*idx);
+                let idx = *idx;
+                let key = added_key::<T>(&pointer, &idx.to_string(), Some(idx))
+                    .map_err(|err| PatchError::new(pointer.clone(), err))?;
                 if !pointer.has_next()
                     && let Some(key) = key
                 {
@@ -192,19 +199,32 @@ impl<T: MapItem + Default> RegistryJsonPatch for Map<T> {
                 }
             }
             (None, Value::Object(items)) => {
-                self.0.clear();
+                // inbuxa: #608: a value the set already holds is kept as it
+                // is, so one stored before validation applied doesn't block
+                // every later edit; only values being added are validated.
+                let current = std::mem::take(&mut self.0);
                 for (key, value) in items.into_vec() {
-                    if let (Some(key), Value::Bool(is_set)) =
-                        (T::try_from_string(key.to_string().as_ref()), value)
-                    {
-                        if is_set && !self.0.contains(&key) {
-                            self.0.push(key);
-                        }
-                    } else {
+                    let Value::Bool(is_set) = value else {
                         return Err(PatchError::new(
                             pointer.clone(),
                             "Invalid key for object property",
                         ));
+                    };
+                    let raw = key.to_string();
+                    let key = match T::try_from_string(raw.as_ref()) {
+                        Some(key) if !is_set || current.contains(&key) => Some(key),
+                        _ if !is_set => None,
+                        _ => added_key::<T>(&pointer, raw.as_ref(), None)
+                            .map_err(|err| PatchError::new(pointer.clone(), err))?,
+                    };
+                    let Some(key) = key else {
+                        return Err(PatchError::new(
+                            pointer.clone(),
+                            "Invalid key for object property",
+                        ));
+                    };
+                    if is_set && !self.0.contains(&key) {
+                        self.0.push(key);
                     }
                 }
                 return Ok(MaybeUnpatched::Patched);
@@ -217,6 +237,34 @@ impl<T: MapItem + Default> RegistryJsonPatch for Map<T> {
             "Invalid value for object property",
         ))
     }
+}
+
+/// inbuxa: #608: a key being added to a set, after the field's validators
+/// (an email set takes only addresses, a domain set only domains). A
+/// validator may also rewrite the value (lowercase, trimmed). `Ok(None)` is
+/// a key the set's type can't hold.
+fn added_key<T: MapItem>(
+    pointer: &JsonPointerPatch<'_>,
+    raw: &str,
+    integer: Option<u64>,
+) -> Result<Option<T>, &'static str> {
+    let validators = pointer.validators();
+    if validators.is_empty() {
+        return Ok(match integer {
+            Some(idx) => T::try_from_integer(idx),
+            None => T::try_from_string(raw),
+        });
+    }
+
+    let mut value = raw.to_string();
+    for validator in validators {
+        match validator.validate(&value) {
+            StringValidatorResult::Valid => {}
+            StringValidatorResult::Replace(new_value) => value = new_value,
+            StringValidatorResult::Invalid(err) => return Err(err),
+        }
+    }
+    Ok(T::try_from_string(&value))
 }
 
 impl<T: MapItem> Serialize for Map<T> {
@@ -428,7 +476,9 @@ impl<T: MapItem> IntoIterator for Map<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{jmap::JsonPointerPatch, schema::prelude::Property};
+    use crate::{
+        jmap::JsonPointerPatch, schema::prelude::Property, types::string::StringValidator,
+    };
     use jmap_tools::JsonPointer;
 
     fn patch_member(ptr_str: &str) -> Map<Id> {
@@ -487,5 +537,158 @@ mod tests {
             let map = patch_member(&key);
             assert_eq!(map.0, vec![id], "id {} via key '{key}'", id.id());
         }
+    }
+
+    fn email_set(values: &[&str]) -> Map<String> {
+        Map::new(values.iter().map(|v| v.to_string()).collect())
+    }
+
+    fn patch_with(
+        map: &mut Map<String>,
+        ptr: &str,
+        validators: &[StringValidator],
+        value: JmapValue<'static>,
+    ) -> Result<(), String> {
+        // "" is the whole set: the pointer is past the property's name
+        let whole = ptr.is_empty();
+        let ptr = JsonPointer::<Property>::parse(if whole { "contact" } else { ptr });
+        let mut pointer = JsonPointerPatch::new(&ptr).with_validators(validators);
+        if whole {
+            pointer.next();
+        }
+        map.patch(pointer, value)
+            .map(|_| ())
+            .map_err(|err| format!("{err:?}"))
+    }
+
+    fn object(keys: &[(&str, bool)]) -> JmapValue<'static> {
+        let mut map = jmap_tools::Map::with_capacity(keys.len());
+        for (key, set) in keys {
+            map.insert_unchecked(Key::Owned(key.to_string()), Value::Bool(*set));
+        }
+        Value::Object(map)
+    }
+
+    /// #608: a set's validators apply to each value added, by key or as a
+    /// whole set, and may rewrite it.
+    #[test]
+    fn set_keys_are_validated() {
+        let email = [StringValidator::Email];
+        let mut map = Map::<String>::default();
+        patch_with(&mut map, "Admin@Example.org", &email, Value::Bool(true)).unwrap();
+        assert_eq!(map, email_set(&["admin@example.org"]));
+        assert!(patch_with(&mut map, "mailto:x@example.org", &email, Value::Bool(true)).is_err());
+        assert!(patch_with(&mut map, "not an address", &email, Value::Bool(true)).is_err());
+        assert!(patch_with(&mut map, "7", &email, Value::Bool(true)).is_err());
+        assert_eq!(map, email_set(&["admin@example.org"]));
+
+        let mut map = Map::<String>::default();
+        assert!(
+            patch_with(
+                &mut map,
+                "",
+                &email,
+                object(&[("ok@example.org", true), ("bad", true)])
+            )
+            .is_err()
+        );
+        let mut map = Map::<String>::default();
+        patch_with(&mut map, "", &email, object(&[("OK@example.org", true)])).unwrap();
+        assert_eq!(map, email_set(&["ok@example.org"]));
+
+        let domain = [StringValidator::Domain];
+        let mut map = Map::<String>::default();
+        patch_with(&mut map, "Example.ORG", &domain, Value::Bool(true)).unwrap();
+        assert_eq!(map, email_set(&["example.org"]));
+        assert!(patch_with(&mut map, "bad..name", &domain, Value::Bool(true)).is_err());
+
+        // A set with no validators takes what it always took
+        let mut map = Map::<String>::default();
+        patch_with(&mut map, "anything at all", &[], Value::Bool(true)).unwrap();
+        assert_eq!(map, email_set(&["anything at all"]));
+    }
+
+    /// #608 / #535: a value stored before validation applied stays through
+    /// an edit that sends the whole set back, and can still be removed.
+    #[test]
+    fn stored_values_survive_whole_set_edits() {
+        let email = [StringValidator::Email];
+        let mut map = email_set(&["mailto:old@example.org"]);
+        patch_with(
+            &mut map,
+            "",
+            &email,
+            object(&[("mailto:old@example.org", true), ("new@example.org", true)]),
+        )
+        .unwrap();
+        assert_eq!(
+            map,
+            email_set(&["mailto:old@example.org", "new@example.org"])
+        );
+
+        // A new invalid value is still refused alongside it
+        let mut map = email_set(&["mailto:old@example.org"]);
+        assert!(
+            patch_with(
+                &mut map,
+                "",
+                &email,
+                object(&[
+                    ("mailto:old@example.org", true),
+                    ("mailto:new@example.org", true)
+                ]),
+            )
+            .is_err()
+        );
+
+        // Removing it needs no validation, by key or as a whole set
+        let mut map = email_set(&["mailto:old@example.org", "a@example.org"]);
+        patch_with(&mut map, "mailto:old@example.org", &email, Value::Null).unwrap();
+        assert_eq!(map, email_set(&["a@example.org"]));
+        let mut map = email_set(&["mailto:old@example.org", "a@example.org"]);
+        patch_with(
+            &mut map,
+            "",
+            &email,
+            object(&[("mailto:old@example.org", false), ("a@example.org", true)]),
+        )
+        .unwrap();
+        assert_eq!(map, email_set(&["a@example.org"]));
+    }
+
+    /// #608: the generated property patch passes each set's validators on,
+    /// for an email set and a domain set.
+    #[test]
+    fn object_sets_apply_their_validators() {
+        use crate::{
+            jmap::RegistryJsonPropertyPatch,
+            schema::structs::{AcmeProvider, Domain},
+        };
+        let patch_acme = |provider: &mut AcmeProvider, ptr: &str| {
+            let ptr = JsonPointer::<Property>::parse(ptr);
+            provider
+                .patch_property(JsonPointerPatch::new(&ptr), Value::Bool(true))
+                .is_ok()
+        };
+        let mut provider = AcmeProvider::default();
+        assert!(patch_acme(&mut provider, "contact/Admin@Example.org"));
+        assert!(!patch_acme(
+            &mut provider,
+            "contact/mailto:admin@example.org"
+        ));
+        assert_eq!(provider.contact, email_set(&["admin@example.org"]));
+
+        let mut domain = Domain::default();
+        let ptr = JsonPointer::<Property>::parse("aliases/not a domain");
+        assert!(
+            domain
+                .patch_property(JsonPointerPatch::new(&ptr), Value::Bool(true))
+                .is_err()
+        );
+        let ptr = JsonPointer::<Property>::parse("aliases/Mail.Example.org");
+        domain
+            .patch_property(JsonPointerPatch::new(&ptr), Value::Bool(true))
+            .unwrap();
+        assert_eq!(domain.aliases, email_set(&["mail.example.org"]));
     }
 }

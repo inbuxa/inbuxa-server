@@ -1441,7 +1441,7 @@ async fn tenant_outbound_requests(admin: &Account, tenant: Id) {
         admin
             .registry_create_object_expect_err(AcmeProvider {
                 directory: directory.to_string(),
-                contact: Map::new(vec!["mailto:ops@t.example.org".to_string()]),
+                contact: Map::new(vec!["ops@t.example.org".to_string()]),
                 member_tenant_id: Some(tenant),
                 ..Default::default()
             })
@@ -1453,7 +1453,7 @@ async fn tenant_outbound_requests(admin: &Account, tenant: Id) {
     let err = admin
         .registry_create_object_expect_err(AcmeProvider {
             directory: "https://localhost:1/dir".to_string(),
-            contact: Map::new(vec!["mailto:ops@t.example.org".to_string()]),
+            contact: Map::new(vec!["ops@t.example.org".to_string()]),
             member_tenant_id: Some(tenant),
             ..Default::default()
         })
@@ -1464,7 +1464,7 @@ async fn tenant_outbound_requests(admin: &Account, tenant: Id) {
     let err = admin
         .registry_create_object_expect_err(AcmeProvider {
             directory: "https://127.0.0.1:1/dir".to_string(),
-            contact: Map::new(vec!["mailto:ops@example.org".to_string()]),
+            contact: Map::new(vec!["ops@example.org".to_string()]),
             ..Default::default()
         })
         .await;

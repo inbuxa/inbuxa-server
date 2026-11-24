@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
@@ -72,6 +74,11 @@ impl<'x> JsonPointerPatch<'x> {
     pub fn with_validators(mut self, validators: &'x [StringValidator]) -> Self {
         self.validators = validators;
         self
+    }
+
+    /// inbuxa: the field's validators, for a set that checks each key (#608)
+    pub fn validators(&self) -> &'x [StringValidator] {
+        self.validators
     }
 
     #[allow(clippy::should_implement_trait)]
