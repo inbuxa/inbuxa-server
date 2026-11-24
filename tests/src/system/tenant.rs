@@ -289,6 +289,10 @@ pub async fn test(test: &mut TestServer) {
         .not_updated(&t_domain.to_string());
     assert_eq!(admin.tenant_of(t_user.id()).await, Some(t_id), "test 5");
 
+    // A tenant's domain names only the tenant's own names in its
+    // certificates: not the server's host name or another tenant's domain
+    tenant_certificate_names(test, &admin, &t_admin, t_id, t_domain).await;
+
     // Acceptance test 4: mail between tenants is delivered (MT-4)
     let mut lmtp = SmtpConnection::connect().await;
     lmtp.ingest(
@@ -1417,6 +1421,128 @@ pub async fn test(test: &mut TestServer) {
             .assert_destroyed(&[tenant]);
     }
     let _ = u_domain;
+}
+
+/// A tenant's domain orders certificates only for names that are the
+/// tenant's own: the domain, or a name under one of the tenant's domains.
+/// Anything else is refused when the domain is saved.
+async fn tenant_certificate_names(
+    test: &TestServer,
+    admin: &Account,
+    t_admin: &Account,
+    t_id: Id,
+    t_domain: Id,
+) {
+    use registry::schema::{
+        enums::AcmeChallengeType,
+        structs::{AcmeProvider, CertificateManagementProperties},
+    };
+    use registry::types::id::ObjectId;
+    use store::registry::write::{RegistryWrite, RegistryWriteResult};
+
+    // The tenant's ACME provider, stored as it is: saving one through the
+    // API asks its directory for an account, and this test has no network
+    let registry = test.server.registry();
+    let provider = match registry
+        .write(RegistryWrite::insert(
+            &AcmeProvider {
+                directory: "https://acme.t.example.org/dir".to_string(),
+                contact: Map::new(vec!["mailto:ops@t.example.org".to_string()]),
+                account_key: "not-a-key".to_string(),
+                account_uri: "https://acme.t.example.org/acct/1".to_string(),
+                challenge_type: AcmeChallengeType::Http01,
+                member_tenant_id: Some(t_id),
+                ..Default::default()
+            }
+            .into(),
+        ))
+        .await
+        .unwrap()
+    {
+        RegistryWriteResult::Success(id) => id,
+        other => panic!("ACME provider not stored: {other:?}"),
+    };
+    let automatic = |names: &[&str]| {
+        CertificateManagement::Automatic(CertificateManagementProperties {
+            acme_provider_id: provider,
+            subject_alternative_names: Map::new(names.iter().map(|n| n.to_string()).collect()),
+        })
+    };
+
+    // Refused: the server's own host name, another tenant's domain, and a
+    // name that only ends like the tenant's domain
+    let server_name = test.server.core.network.server_name.to_string();
+    for name in [
+        server_name.as_str(),
+        "u.example.org",
+        "mail.u.example.org",
+        "*.u.example.org",
+        "evilt.example.org",
+    ] {
+        t_admin
+            .registry_update_object_expect_err(
+                ObjectType::Domain,
+                t_domain,
+                json!({ Property::CertificateManagement: automatic(&["mail.t.example.org", name]) }),
+            )
+            .await
+            .assert_type(SetErrorType::InvalidProperties)
+            .assert_description_contains(name);
+        // ... whoever saves the tenant's domain
+        admin
+            .registry_update_object_expect_err(
+                ObjectType::Domain,
+                t_domain,
+                json!({ Property::CertificateManagement: automatic(&[name]) }),
+            )
+            .await
+            .assert_type(SetErrorType::InvalidProperties)
+            .assert_description_contains(name);
+    }
+
+    // Allowed: the domain itself and names under it, here stored as they
+    // are so that saving them orders nothing; a later save keeps them
+    let old = registry
+        .get(ObjectId::new(ObjectType::Domain, t_domain))
+        .await
+        .unwrap()
+        .unwrap();
+    let mut domain = Domain::from(old.clone());
+    domain.certificate_management = automatic(&[
+        "t.example.org",
+        "mail.t.example.org",
+        "*.t.example.org",
+        "webmail",
+    ]);
+    assert!(matches!(
+        registry
+            .write(RegistryWrite::update(t_domain, &domain.into(), &old))
+            .await
+            .unwrap(),
+        RegistryWriteResult::Success(_)
+    ));
+    t_admin
+        .registry_update(
+            ObjectType::Domain,
+            [(t_domain, json!({ Property::Description: "T's own names" }))],
+        )
+        .await
+        .updated_id(t_domain);
+
+    t_admin
+        .registry_update(
+            ObjectType::Domain,
+            [(
+                t_domain,
+                json!({ Property::CertificateManagement: CertificateManagement::Manual }),
+            )],
+        )
+        .await
+        .updated_id(t_domain);
+    admin
+        .registry_destroy(ObjectType::AcmeProvider, [provider])
+        .await
+        .assert_destroyed(&[provider]);
 }
 
 /// A tenant's own ACME and DNS providers only reach public HTTPS addresses,
