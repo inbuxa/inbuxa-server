@@ -12,8 +12,10 @@ use crate::{
     utils::{imap::AssertResult, server::TestServer, smtp::SmtpConnection},
 };
 use common::{
-    Server, config::mailstore::spamfilter::SpamClassifier as SpamClassifierModel,
-    ipc::RegistryChange, manager::SPAM_TRAINER_KEY,
+    Server,
+    config::mailstore::spamfilter::SpamClassifier as SpamClassifierModel,
+    ipc::RegistryChange,
+    manager::{SPAM_CLASSIFIER_KEY, SPAM_TRAINER_KEY},
 };
 use email::mailbox::JUNK_ID;
 use imap_proto::ResponseType;
@@ -267,6 +269,45 @@ pub async fn test(test: &TestServer) {
     response.copied("moved");
     test.wait_for_tasks().await;
     assert_eq!(samples_for(support_id, true).await, 2);
+
+    // inbuxa: #595: a Reset stops the node that ran it scoring with the
+    // deleted model
+    let trained = test.server.inner.data.spam_classifier.load_full();
+    assert!(trained.is_active());
+    admin
+        .registry_create_object(Task::SpamFilterMaintenance(TaskSpamFilterMaintenance {
+            maintenance_type: TaskSpamFilterMaintenanceType::Reset,
+            status: TaskStatus::now(),
+        }))
+        .await;
+    test.wait_for_tasks().await;
+    for key in [SPAM_CLASSIFIER_KEY, SPAM_TRAINER_KEY] {
+        assert!(
+            test.server
+                .blob_store()
+                .get_blob(key, 0..usize::MAX)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+    assert!(
+        !test.server.inner.data.spam_classifier.load().is_active(),
+        "the Reset left this node scoring with the deleted model"
+    );
+
+    // inbuxa: #595: so does every other node, through the SpamClassifier
+    // reload the Reset broadcasts. Simulate a node still on the old model,
+    // and run that reload.
+    test.server.inner.data.spam_classifier.store(trained);
+    test.server
+        .reload_registry(RegistryChange::Reload(ObjectType::SpamClassifier))
+        .await
+        .unwrap();
+    assert!(
+        !test.server.inner.data.spam_classifier.load().is_active(),
+        "the SpamClassifier reload kept a model that's no longer stored"
+    );
 }
 
 pub async fn spam_classifier_model(server: &Server) -> SpamTrainer {

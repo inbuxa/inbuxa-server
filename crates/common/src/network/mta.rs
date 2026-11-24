@@ -498,7 +498,13 @@ impl Server {
                 );
                 self.inner.data.spam_classifier.store(Arc::new(model));
             } else {
+                // inbuxa: a model that's no longer stored (a Reset deleted
+                // it) isn't scored with any more
                 trc::event!(Spam(SpamEvent::ModelNotFound));
+                self.inner
+                    .data
+                    .spam_classifier
+                    .store(Arc::new(SpamClassifier::Disabled));
             }
         }
 
