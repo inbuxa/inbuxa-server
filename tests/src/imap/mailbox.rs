@@ -77,6 +77,32 @@ pub async fn test(
     imap.send("CREATE \"Second trash\" (USE (\\Trash))").await;
     imap.assert_read(Type::Tagged, ResponseType::No).await;
 
+    // inbuxa: a name with no separator is held to the length limit (255
+    // bytes by default) too, whether it is quoted or sent as a literal, on
+    // CREATE and on RENAME
+    imap.send(&format!("CREATE \"{}\"", "n".repeat(256))).await;
+    imap.assert_read(Type::Tagged, ResponseType::No)
+        .await
+        .assert_contains("too long");
+    imap.send(&format!("CREATE {{100000+}}\r\n{}", "n".repeat(100_000)))
+        .await;
+    imap.assert_read(Type::Tagged, ResponseType::No)
+        .await
+        .assert_contains("too long");
+    imap.send(&format!("CREATE \"{}\"", "n".repeat(255))).await;
+    imap.assert_read(Type::Tagged, ResponseType::Ok).await;
+    imap.send(&format!(
+        "RENAME \"{}\" \"{}\"",
+        "n".repeat(255),
+        "m".repeat(256)
+    ))
+    .await;
+    imap.assert_read(Type::Tagged, ResponseType::No)
+        .await
+        .assert_contains("too long");
+    imap.send(&format!("DELETE \"{}\"", "n".repeat(255))).await;
+    imap.assert_read(Type::Tagged, ResponseType::Ok).await;
+
     // Every command in a pipelined batch is answered, even after a failure
     imap.send_raw(concat!(
         "_p1 STATUS \"Tofu\" (MESSAGES)\r\n",

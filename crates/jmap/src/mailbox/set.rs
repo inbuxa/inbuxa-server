@@ -428,7 +428,9 @@ impl MailboxSet for Server {
                                 "Mailbox name cannot contain control characters.",
                             )));
                     } else if !value.is_empty()
-                        && value.len() < self.core.email.mailbox_name_max_len
+                        // inbuxa: a name of exactly the limit is allowed, as on
+                        // IMAP and in Sieve
+                        && value.len() <= self.core.email.mailbox_name_max_len
                     {
                         changes.name = value.into();
                     } else {

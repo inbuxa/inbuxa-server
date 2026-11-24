@@ -264,30 +264,27 @@ impl<T: SessionStream> SessionData<T> {
         }
 
         // Build path
+        // inbuxa: a name with no separator is one path item, held to the
+        // same length limit; before, only names with a '/' were checked
         let mut path = Vec::new();
-        if name.contains('/') {
-            // Locate parent mailbox
-            for path_item in name.split('/') {
-                let path_item = path_item.trim();
-                if path_item.is_empty() {
-                    return Err(trc::ImapEvent::Error
-                        .into_err()
-                        .details("Invalid empty path item."));
-                } else if path_item.len() > self.server.core.email.mailbox_name_max_len {
-                    return Err(trc::ImapEvent::Error
-                        .into_err()
-                        .details("Mailbox name is too long."));
-                }
-                path.push(path_item);
-            }
-
-            if path.len() > self.server.core.email.mailbox_max_depth {
+        for path_item in name.split('/') {
+            let path_item = path_item.trim();
+            if path_item.is_empty() {
                 return Err(trc::ImapEvent::Error
                     .into_err()
-                    .details("Mailbox path is too deep."));
+                    .details("Invalid empty path item."));
+            } else if path_item.len() > self.server.core.email.mailbox_name_max_len {
+                return Err(trc::ImapEvent::Error
+                    .into_err()
+                    .details("Mailbox name is too long."));
             }
-        } else {
-            path.push(name);
+            path.push(path_item);
+        }
+
+        if path.len() > self.server.core.email.mailbox_max_depth {
+            return Err(trc::ImapEvent::Error
+                .into_err()
+                .details("Mailbox path is too deep."));
         }
 
         // Validate special folders
