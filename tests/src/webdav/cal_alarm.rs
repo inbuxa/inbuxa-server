@@ -98,6 +98,25 @@ pub async fn test(test: &TestServer) {
             "alarm logo must be referenced as a cid: URI: {html}"
         );
 
+        // inbuxa: #564: the description keeps its line break, in both parts
+        if idx == 0 {
+            assert!(
+                html.contains("What mirror where?!<br>The one on the wall."),
+                "alarm description must keep its line break: {html}"
+            );
+            let text = message
+                .text_bodies()
+                .next()
+                .unwrap()
+                .text_contents()
+                .unwrap();
+            assert!(
+                text.replace("\r\n", "\n")
+                    .contains("What mirror where?!\nThe one on the wall."),
+                "alarm text must keep the line break: {text}"
+            );
+        }
+
         // A conference URI is rendered as a hyperlink
         assert!(
             html.contains("href=\"https://meet.example.com/west-side\""),
@@ -228,7 +247,7 @@ VERSION:2.0
 BEGIN:VEVENT
 UID: 2371c2d9-a136-43b0-bba3-f6ab249ad46e
 SUMMARY:See the pretty girl in that mirror there
-DESCRIPTION:What mirror where?!
+DESCRIPTION:What mirror where?!\nThe one on the wall.
 DTSTART:$START
 DTEND;TZID=America/New_York:21250221T180000
 LOCATION:West Side

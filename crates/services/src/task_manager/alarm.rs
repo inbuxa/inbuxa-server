@@ -640,7 +640,8 @@ async fn build_template(
     }
     variables.insert_single(CalendarTemplateVariable::LogoCid, logo_cid.as_str());
     if let Some(description) = description {
-        variables.insert_single(CalendarTemplateVariable::EventDescription, description);
+        // inbuxa: #564: its line breaks show in the email
+        variables.insert_text(CalendarTemplateVariable::EventDescription, description);
     }
     variables.insert_block(
         CalendarTemplateVariable::EventDetails,

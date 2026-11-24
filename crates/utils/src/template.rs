@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use ahash::AHashMap;
@@ -25,6 +27,8 @@ pub enum TemplateItem<T> {
 pub enum Variable<T: Eq + Hash, V: AsRef<str>> {
     Single(V),
     Block(Vec<AHashMap<T, V>>),
+    // inbuxa: #564: text whose line breaks show: escaped, each break a <br>
+    Text(V),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -137,15 +141,23 @@ impl<T: FromStr + Eq + Hash + std::fmt::Debug> Template<T> {
             let idx = idx + base_offset;
             match item {
                 TemplateItem::Static(s) => result.push_str(s),
-                TemplateItem::Variable { name, escape } => {
-                    if let Some(Variable::Single(variable)) = variables.items.get(name) {
+                TemplateItem::Variable { name, escape } => match variables.items.get(name) {
+                    Some(Variable::Single(variable)) => {
                         if *escape {
                             html_escape(&mut result, variable.as_ref())
                         } else {
                             result.push_str(variable.as_ref());
                         }
                     }
-                }
+                    Some(Variable::Text(variable)) => {
+                        if *escape {
+                            html_escape_lines(&mut result, variable.as_ref())
+                        } else {
+                            result.push_str(variable.as_ref());
+                        }
+                    }
+                    _ => {}
+                },
                 TemplateItem::If {
                     variable,
                     block_end,
@@ -209,6 +221,18 @@ fn html_escape(result: &mut String, input: &str) {
     }
 }
 
+/// inbuxa: #564: escapes text and shows its line breaks as `<br>`, which
+/// mail clients honor without CSS. A CR is dropped, so CRLF is one break.
+fn html_escape_lines(result: &mut String, input: &str) {
+    for c in input.chars() {
+        match c {
+            '\n' => result.push_str("<br>"),
+            '\r' => {}
+            _ => html_escape(result, c.encode_utf8(&mut [0; 4])),
+        }
+    }
+}
+
 impl<T: Eq + Hash, V: AsRef<str>> Variables<T, V> {
     pub fn new() -> Self {
         Self {
@@ -218,6 +242,12 @@ impl<T: Eq + Hash, V: AsRef<str>> Variables<T, V> {
 
     pub fn insert_single(&mut self, key: T, value: V) {
         self.items.insert(key, Variable::Single(value));
+    }
+
+    /// inbuxa: #564: a value of several lines, for a multi-line text such as
+    /// an event description.
+    pub fn insert_text(&mut self, key: T, value: V) {
+        self.items.insert(key, Variable::Text(value));
     }
 
     pub fn insert_block<V1, V2>(&mut self, key: T, value: V1)
@@ -534,6 +564,21 @@ Best regards"#;
 
         let result = template.eval(&vars);
         assert_eq!(result, "Item1: Item2: ");
+    }
+
+    // inbuxa: #564
+    #[test]
+    fn test_text_keeps_line_breaks() {
+        let template = Template::parse("<div>{{text}}</div>|{{single}}").unwrap();
+        let mut vars = Variables::<String, String>::new();
+        vars.insert_text("text".to_string(), "a\nb\r\n<c> & 'd'\n".to_string());
+        vars.insert_single("single".to_string(), "a\nb".to_string());
+
+        let result = template.eval(&vars);
+        assert_eq!(
+            result,
+            "<div>a<br>b<br>&lt;c&gt; &amp; &#39;d&#39;<br></div>|a\nb"
+        );
     }
 
     /*#[test]
