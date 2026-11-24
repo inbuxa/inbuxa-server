@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: Apache-2.0 OR MIT
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use super::{
@@ -15,7 +17,11 @@ use crate::{
 };
 use chrono::{Datelike, NaiveDate, NaiveDateTime, Offset, TimeZone, Timelike, Utc, Weekday};
 use chrono_tz::{OffsetComponents, OffsetName};
-use std::{collections::HashMap, ops::Range, str::FromStr};
+use std::{
+    collections::{HashMap, HashSet},
+    ops::Range,
+    str::FromStr,
+};
 
 pub struct TzResolver<T> {
     tzs: HashMap<T, Tz>,
@@ -124,6 +130,10 @@ const TZ_MAX_FUTURE_YEARS: i32 = 100;
 const TZ_RANGE_MARGIN: i64 = 86400;
 const TZ_SCAN_STEP: i64 = 3 * 86400;
 const TZ_RULE_ACTIVE_SECONDS: i64 = 366 * 86400;
+// inbuxa: the most time zone definitions an object holds after
+// add_missing_timezones. One event and its overrides name one to three zones;
+// each definition costs a scan of the zone's rules over the event's years.
+pub const MAX_ADDED_TIMEZONES: usize = 32;
 
 impl ICalendar {
     pub fn add_timezone(&mut self, tz_id: &str, from: i64, to: i64) -> Option<u32> {
@@ -188,18 +198,20 @@ impl ICalendar {
     }
 
     pub fn add_missing_timezones(&mut self) -> usize {
-        let mut defined: Vec<&str> = Vec::new();
+        // inbuxa: sets, not lists: an object can name thousands of zones
+        let mut defined: HashSet<&str> = HashSet::new();
         for component in self.timezones() {
             for entry in &component.entries {
                 if entry.name == ICalendarProperty::Tzid
                     && let Some(ICalendarValue::Text(tz_id)) = entry.values.first()
                 {
-                    defined.push(tz_id.as_str());
+                    defined.insert(tz_id.as_str());
                 }
             }
         }
 
-        let mut referenced: Vec<String> = Vec::new();
+        let mut referenced: Vec<&str> = Vec::new();
+        let mut seen: HashSet<&str> = HashSet::new();
         let mut range: Option<(i64, i64)> = None;
         let mut recurrence_span = 0;
         let mut is_unbounded = false;
@@ -218,10 +230,10 @@ impl ICalendar {
                 for param in &entry.params {
                     if param.name == ICalendarParameterName::Tzid
                         && let Some(tz_id) = param.value.as_text()
-                        && !defined.contains(&tz_id)
-                        && !referenced.iter().any(|id| id == tz_id)
+                        && !defined.contains(tz_id)
+                        && seen.insert(tz_id)
                     {
-                        referenced.push(tz_id.to_string());
+                        referenced.push(tz_id);
                     }
                 }
 
@@ -272,9 +284,17 @@ impl ICalendar {
             }
         }
 
-        if referenced.is_empty() {
+        // inbuxa: the object ends up with at most MAX_ADDED_TIMEZONES
+        // definitions; zones it names beyond that get none (a client then
+        // resolves the TZID by name, as it does for any zone left undefined)
+        let room = MAX_ADDED_TIMEZONES.saturating_sub(defined.len());
+        if referenced.is_empty() || room == 0 {
             return 0;
         }
+        let referenced = referenced
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
 
         let now = Utc::now().timestamp();
         let (min, max) = range.unwrap_or((now, now));
@@ -294,6 +314,9 @@ impl ICalendar {
 
         let mut added = 0;
         for tz_id in referenced {
+            if added == room {
+                break;
+            }
             if self.add_timezone(&tz_id, from, to).is_some() {
                 added += 1;
             }
@@ -960,6 +983,39 @@ mod tests {
             ICalendar::default().add_timezone("Europe/Berlin", 0, TZ_RANGE_MARGIN),
             None
         );
+    }
+
+    // inbuxa: an object naming hundreds of zones ends up with definitions for
+    // at most MAX_ADDED_TIMEZONES of them, the first it names
+    #[test]
+    fn test_add_missing_timezones_is_capped() {
+        let names = chrono_tz::TZ_VARIANTS
+            .iter()
+            .map(|tz| tz.name())
+            .filter(|name| !name.starts_with("Etc/") && *name != "UTC")
+            .take(300)
+            .collect::<Vec<_>>();
+        let mut properties = String::new();
+        for name in &names {
+            properties.push_str(&format!("RDATE;TZID={name}:20260822T163000\r\n"));
+        }
+        // and many names that resolve to nothing, which add nothing
+        for i in 0..2000 {
+            properties.push_str(&format!("X-NOTE;TZID=Nowhere/Place-{i}:x\r\n"));
+        }
+        let mut ical = ICalendar::parse(event(&properties)).unwrap();
+        let added = ical.add_missing_timezones();
+        assert_eq!(added, MAX_ADDED_TIMEZONES, "added {added} definitions");
+        assert_eq!(ical.timezones().count(), MAX_ADDED_TIMEZONES);
+        let defined = ical
+            .timezones()
+            .filter_map(|tz| tz.property(&ICalendarProperty::Tzid))
+            .filter_map(|entry| entry.values.first().and_then(|v| v.as_text()))
+            .collect::<Vec<_>>();
+        assert_eq!(defined, names[..MAX_ADDED_TIMEZONES]);
+
+        // the object holds as many as it may, so another pass adds none
+        assert_eq!(ical.add_missing_timezones(), 0);
     }
 
     #[test]
