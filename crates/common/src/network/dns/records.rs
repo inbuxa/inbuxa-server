@@ -445,13 +445,11 @@ impl Pacc {
 #[inline(always)]
 #[allow(unused)]
 fn provider_domain(url: &Url) -> Option<&str> {
-    #[cfg(feature = "test_mode")]
-    {
+    // inbuxa: test builds name the local Pebble, whose URL has no public
+    // suffix; cfg! keeps `url` in use there, so the build has no warning
+    if cfg!(feature = "test_mode") {
         Some("pebble.letsencrypt.org")
-    }
-
-    #[cfg(not(feature = "test_mode"))]
-    {
+    } else {
         url.host_str().and_then(psl::domain_str)
     }
 }
