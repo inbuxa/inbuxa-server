@@ -6,6 +6,7 @@
  * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
+use crate::changes::state::StateManager;
 use common::{Server, storage::index::ObjectIndexBuilder};
 use email::identity::{EmailAddress, Identity};
 use jmap_proto::{
@@ -47,7 +48,13 @@ impl IdentitySet for Server {
         let identity_ids = self
             .document_ids(account_id, Collection::Identity, IdentityField::DocumentId)
             .await?;
-        let mut response = SetResponse::from_request(&request, self.core.jmap.set_max_objects)?;
+        // inbuxa: ifInState is honored, and oldState/newState are the state
+        // Identity/get returns, also when nothing changes
+        let mut response = SetResponse::from_request(&request, self.core.jmap.set_max_objects)?
+            .with_state(
+                self.assert_state(account_id, SyncCollection::Identity, &request.if_in_state)
+                    .await?,
+            );
         let will_destroy = response.collect_will_destroy(request.unwrap_destroy());
         let account_info = self
             .account_info(account_id)

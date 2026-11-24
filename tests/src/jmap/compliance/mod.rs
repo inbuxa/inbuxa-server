@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::utils::account::Account;
@@ -240,6 +242,61 @@ impl<'x> CompCtx<'x> {
         println!("========================================================\n");
         fail as usize
     }
+}
+
+// inbuxa: a /set whose ifInState is stale fails with stateMismatch
+// (RFC 8620 §5.3).
+pub async fn set_honors_if_in_state(ctx: &CompCtx<'_>, object: &str) -> TestOutcome {
+    let state = ctx
+        .primary
+        .jmap_get(object, Vec::<String>::new(), Vec::<String>::new())
+        .await
+        .state()
+        .to_string();
+    if state == "n" {
+        return skip(format!(
+            "No {object} changes yet, so no stale state to send"
+        ));
+    }
+    let resp = ctx
+        .primary
+        .jmap_method_call(
+            &format!("{object}/set"),
+            json!({ "accountId": ctx.account_id(), "ifInState": "n" }),
+        )
+        .await;
+    check_eq(
+        resp.name_at(0),
+        "error",
+        "a stale ifInState must fail the call",
+    )?;
+    check_eq(
+        resp.error_type_at(0).unwrap_or(""),
+        "stateMismatch",
+        "error type",
+    )
+}
+
+// inbuxa: a /set always reports oldState and newState, both the state
+// /get returns, even when it changes nothing (RFC 8620 §5.3).
+pub async fn set_reports_states(ctx: &CompCtx<'_>, object: &str) -> TestOutcome {
+    let state = ctx
+        .primary
+        .jmap_get(object, Vec::<String>::new(), Vec::<String>::new())
+        .await
+        .state()
+        .to_string();
+    let resp = ctx
+        .primary
+        .jmap_method_call(
+            &format!("{object}/set"),
+            json!({ "accountId": ctx.account_id(), "ifInState": state }),
+        )
+        .await;
+    check_eq(resp.name_at(0), format!("{object}/set").as_str(), "method")?;
+    let r = resp.method_response();
+    check_eq(r["oldState"].as_str(), Some(state.as_str()), "oldState")?;
+    check_eq(r["newState"].as_str(), Some(state.as_str()), "newState")
 }
 
 fn panic_to_string(e: Box<dyn std::any::Any + Send>) -> String {

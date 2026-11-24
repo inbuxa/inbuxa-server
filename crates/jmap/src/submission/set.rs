@@ -6,6 +6,7 @@
  * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
+use crate::changes::state::StateManager;
 use common::{
     Server,
     auth::AccessToken,
@@ -44,7 +45,11 @@ use store::{
     write::{AlignedBytes, Archive, BatchBuilder, now},
 };
 use trc::AddContext;
-use types::{collection::Collection, field::EmailField, id::Id};
+use types::{
+    collection::{Collection, SyncCollection},
+    field::EmailField,
+    id::Id,
+};
 use utils::{map::vec_map::VecMap, sanitize_recipient};
 
 pub trait EmailSubmissionSet: Sync + Send {
@@ -77,7 +82,17 @@ impl EmailSubmissionSet for Server {
         next_call: &mut Option<Call<RequestMethod<'x>>>,
     ) -> trc::Result<SetResponse<email_submission::EmailSubmission>> {
         let account_id = request.account_id.document_id();
-        let mut response = SetResponse::from_request(&request, self.core.jmap.set_max_objects)?;
+        // inbuxa: ifInState is honored before anything is sent, and
+        // oldState/newState are the state EmailSubmission/get returns
+        let mut response = SetResponse::from_request(&request, self.core.jmap.set_max_objects)?
+            .with_state(
+                self.assert_state(
+                    account_id,
+                    SyncCollection::EmailSubmission,
+                    &request.if_in_state,
+                )
+                .await?,
+            );
         let will_destroy = response.collect_will_destroy(request.unwrap_destroy());
 
         // Process creates
