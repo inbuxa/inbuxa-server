@@ -41,7 +41,8 @@ impl Authenticator for Server {
                     )?
                     // inbuxa: AU-5
                     .with_origin_arc(http_cache.origin.clone())
-                    .with_expires_at(http_cache.expires_at);
+                    .with_expires_at(http_cache.expires_at)
+                    .with_oauth_token_id(http_cache.oauth_token_id);
 
                     if access_token.revision() == http_cache.revision {
                         // Enforce authenticated rate limit
@@ -119,6 +120,7 @@ impl Authenticator for Server {
                         expires: Instant::now() + lifetime,
                         origin: access_token.origin_arc(),
                         expires_at: access_token.expires_at(),
+                        oauth_token_id: access_token.oauth_token_id(),
                     },
                 );
             }

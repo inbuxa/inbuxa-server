@@ -892,6 +892,7 @@ pub async fn test(test: &mut TestServer) {
         "code".to_string(),
         obtain_auth_code(&http, &confidential_id, confidential_redirect).await,
     );
+    let issued = Instant::now();
     let granted: TokenResponse = post_form_basic(
         &metadata.token_endpoint,
         &confidential_id,
@@ -901,6 +902,19 @@ pub async fn test(test: &mut TestServer) {
     .await;
     let (revoke_access, revoke_refresh, _) = unwrap_token_response(granted);
     let revoke_refresh = revoke_refresh.expect("offline_access grants a refresh token");
+
+    // inbuxa: an EventSource stream opened with the token, to see it end
+    // when the token is revoked rather than when it expires
+    let mut revoked_stream = Client::new()
+        .credentials(Credentials::bearer(&revoke_access))
+        .accept_invalid_certs(true)
+        .follow_redirects(["127.0.0.1"])
+        .connect("https://127.0.0.1:8899")
+        .await
+        .unwrap()
+        .event_source(None::<Vec<_>>, false, None, None)
+        .await
+        .unwrap();
 
     // ------------------------
     // inbuxa: K-S4: token revocation (RFC 7009)
@@ -966,6 +980,15 @@ pub async fn test(test: &mut TestServer) {
         (200, Bytes::new())
     );
     assert_unauthorized("https://127.0.0.1:8899", &revoke_access).await;
+    let ended = tokio::time::timeout(Duration::from_secs(3), async {
+        while let Some(Ok(_)) = revoked_stream.next().await {}
+    })
+    .await;
+    assert!(
+        ended.is_ok() && issued.elapsed() < Duration::from_secs(5),
+        "the EventSource stream outlived the revocation of its token ({:?} after it was issued)",
+        issued.elapsed()
+    );
     // Again, and a token that was never valid: both answered as revoked
     for revoked in [revoke_access.as_str(), "sw1.not-a-token"] {
         assert_eq!(

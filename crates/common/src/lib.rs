@@ -338,6 +338,8 @@ pub struct HttpAuthCache {
     pub origin: Option<Arc<inbuxa_features::audit::Via>>,
     // inbuxa: when the cached bearer token expires
     pub expires_at: Option<u64>,
+    // inbuxa: the cached OAuth access token, for its revocation
+    pub oauth_token_id: Option<u128>,
 }
 
 pub struct Ipc {

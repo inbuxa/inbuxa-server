@@ -467,6 +467,7 @@ impl Server {
                 }
 
                 // Internal OAuth
+                let oauth_token_id = crate::auth::oauth::revoke::oauth_token_id(token);
                 match self
                     .validate_access_token(GrantType::AccessToken.into(), token)
                     .await
@@ -497,6 +498,8 @@ impl Server {
                                 })
                                 // inbuxa: the sign-in lasts no longer than the token
                                 .with_expires_at(Some(token_info.expiry))
+                                // inbuxa: and ends when the token is revoked
+                                .with_oauth_token_id(Some(oauth_token_id))
                         }),
                     Err(err) => {
                         if let Some(external_error) = external_error {

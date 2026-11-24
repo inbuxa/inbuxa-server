@@ -23,6 +23,7 @@ pub mod objectid;
 pub mod pipelining;
 pub mod pop;
 pub mod search;
+pub mod session_checks; // inbuxa: sessions end when their sign-in does
 pub mod store;
 pub mod thread;
 pub mod uidbatches;
@@ -313,6 +314,9 @@ pub async fn imap_tests() {
 
     // Run POP3 tests
     pop::test(&test).await;
+
+    // inbuxa: open sessions end when their sign-in stops being valid
+    session_checks::test(&test).await;
 
     // Bearer tokens on clear-text connections
     bearer_tls::test().await;
