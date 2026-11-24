@@ -17,16 +17,23 @@ use email::{
     mailbox::{INBOX_ID, JUNK_ID, TRASH_ID},
 };
 use imap_proto::ResponseType;
-use registry::schema::{
-    enums::{TaskAccountMaintenanceType, TaskStoreMaintenanceType},
-    prelude::Property,
-    structs::{
-        DataRetention, SpamClassifier, Task, TaskAccountMaintenance, TaskStatus,
-        TaskStoreMaintenance,
+use registry::{
+    schema::{
+        enums::{TaskAccountMaintenanceType, TaskStoreMaintenanceType},
+        prelude::{ObjectType, Property},
+        structs::{
+            DataRetention, SpamClassifier, SpamTrainingSample, Task, TaskAccountMaintenance,
+            TaskStatus, TaskStoreMaintenance,
+        },
     },
+    types::id::ObjectId,
 };
-use store::{IterateParams, LogKey, U32_LEN, U64_LEN, write::key::DeserializeBigEndian};
-use types::id::Id;
+use store::{
+    IterateParams, LogKey, U32_LEN, U64_LEN, ValueKey,
+    registry::RegistryQuery,
+    write::{BlobLink, BlobOp, ValueClass, key::DeserializeBigEndian},
+};
+use types::{blob_hash::BlobHash, id::Id};
 
 const EXPUNGE_TRASH_AFTER: std::time::Duration = std::time::Duration::from_secs(10);
 
@@ -206,6 +213,45 @@ pub async fn test(test: &mut TestServer) {
         }))
         .await;
 
+    // inbuxa: a sample trained just before the account goes, held for a
+    // month, so nothing but the destroy could remove it
+    test.wait_for_tasks().await;
+    admin
+        .registry_update_setting(
+            SpamClassifier {
+                hold_samples_for: (30 * 86_400_000u64).into(), // milliseconds
+                ..Default::default()
+            },
+            &[Property::HoldSamplesFor],
+        )
+        .await;
+    admin.reload_settings().await;
+    client
+        .email_import(
+            concat!(
+                "From: bill@example.org\r\n",
+                "To: jdoe@example.org\r\n",
+                "Subject: TPS Report, held\r\n",
+                "\r\n",
+                "This one stays in the training samples for a month."
+            )
+            .as_bytes()
+            .to_vec(),
+            [&junk_id],
+            None::<Vec<&str>>,
+            None,
+        )
+        .await
+        .unwrap();
+    let account_id = account.id().document_id();
+    let samples = account_samples(&test.server, account_id).await;
+    assert!(
+        samples
+            .iter()
+            .any(|(_, hash, until)| *until > store::write::now() + 86400 && !hash.is_empty()),
+        "no held sample to check: {samples:?}"
+    );
+
     // Delete account
     // inbuxa: an index task that runs while the account is destroyed, after
     // its index was first cleared, leaves nothing of it in the index
@@ -217,6 +263,27 @@ pub async fn test(test: &mut TestServer) {
         !services::task_manager::destroy_account::test_hooks::is_pending(account_id),
         "the account was destroyed without indexing it on the way"
     );
+    // inbuxa: the destroyed account's samples and the links that kept their
+    // messages are gone
+    let left = account_samples(&test.server, account_id).await;
+    assert!(left.is_empty(), "samples left after the destroy: {left:?}");
+    for (id, hash, until) in samples {
+        let link = test
+            .server
+            .store()
+            .get_value::<ObjectId>(ValueKey {
+                account_id,
+                collection: 0,
+                document_id: 0,
+                class: ValueClass::Blob(BlobOp::Link {
+                    hash,
+                    to: BlobLink::Temporary { until },
+                }),
+            })
+            .await
+            .unwrap();
+        assert!(link.is_none(), "sample {id}'s blob link was left");
+    }
     test.assert_is_empty().await;
 
     // Reset settings
@@ -262,4 +329,33 @@ async fn get_changes(server: &Server) -> (AHashSet<(u64, u8)>, bool) {
         .await
         .unwrap();
     (changes, is_truncated)
+}
+
+// inbuxa: an account's spam training samples: id, blob and hold
+async fn account_samples(server: &Server, account_id: u32) -> Vec<(Id, BlobHash, u64)> {
+    let mut samples = Vec::new();
+    for id in server
+        .registry()
+        .query::<Vec<Id>>(
+            RegistryQuery::new(ObjectType::SpamTrainingSample).with_account(account_id),
+        )
+        .await
+        .unwrap()
+    {
+        if let Some(sample) = server
+            .registry()
+            .object::<SpamTrainingSample>(id)
+            .await
+            .unwrap()
+        {
+            samples.push((
+                id,
+                sample.blob_id.hash,
+                sample.expires_at.timestamp() as u64,
+            ));
+        } else {
+            samples.push((id, BlobHash::default(), 0));
+        }
+    }
+    samples
 }
