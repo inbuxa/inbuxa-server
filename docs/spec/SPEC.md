@@ -276,7 +276,8 @@ Done 2026-09-18:
   `types::brand!()`).
 - Settings come from `INBUXA_*` environment variables
   (`types::branding::env_var`): `HOSTNAME`, `RECOVERY_MODE`, `RECOVERY_ADMIN`,
-  `RECOVERY_MODE_PORT`, `RECOVERY_MODE_LOG_LEVEL`, `ROLE`, `PUSH_SHARD`,
+  `RECOVERY_MODE_PORT`, `RECOVERY_MODE_BIND` (the recovery and bootstrap listener's
+  address, `[::]` when unset), `RECOVERY_MODE_LOG_LEVEL`, `ROLE`, `PUSH_SHARD`,
   `PUBLIC_URL`, `HTTPS_PORT`, and the front-end variables of contract C-6.
   Until 2026-09-22 each fell back to its `STALWART_*` name with a warning.
   Now a `STALWART_*` name that's set where its `INBUXA_*` one isn't stops the

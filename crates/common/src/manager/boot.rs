@@ -265,17 +265,20 @@ impl BootManager {
                  console.",
             );
         }
-        // inbuxa: #571: a recovery-mode port that isn't one stops the start,
-        // rather than the listener moving to 8080
-        let recovery_port = if registry.is_recovery_mode() {
-            super::listener_ports::recovery_mode_port(
+        // inbuxa: #571: a recovery-mode port or bind address that isn't one
+        // stops the start, rather than the listener moving somewhere else
+        let recovery_addr = if registry.is_recovery_mode() {
+            super::listener_ports::recovery_mode_addr(
+                types::branding::env_var("RECOVERY_MODE_BIND")
+                    .ok()
+                    .as_deref(),
                 types::branding::env_var("RECOVERY_MODE_PORT")
                     .ok()
                     .as_deref(),
             )
             .unwrap_or_else(|err| failed(&err))
         } else {
-            super::listener_ports::DEFAULT_RECOVERY_PORT
+            super::listener_ports::recovery_mode_addr(None, None).unwrap()
         };
         let mut bootstrap = Bootstrap::new(registry).await;
 
@@ -343,7 +346,7 @@ impl BootManager {
                         Server(trc::ServerEvent::BootstrapMode),
                         Hostname = bootstrap.registry.local_hostname().to_string(),
                         Details = format!(
-                            "No configuration file was found. Port {recovery_port} is open for \
+                            "No configuration file was found. {recovery_addr} is open for \
                              initial setup."
                         ),
                         Version = types::brand_version!(),
@@ -351,9 +354,8 @@ impl BootManager {
                 } else if bootstrap.registry.is_recovery_mode() {
                     trc::event!(
                         Server(trc::ServerEvent::RecoveryMode),
-                        Details = format!(
-                            "Port {recovery_port} is open for troubleshooting and recovery."
-                        ),
+                        Details =
+                            format!("{recovery_addr} is open for troubleshooting and recovery."),
                         Hostname = bootstrap.registry.local_hostname().to_string(),
                         Version = types::brand_version!(),
                     );

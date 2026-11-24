@@ -117,20 +117,22 @@ impl Listeners {
                 RegistryObject {
                     id: ObjectId::new(ObjectType::NetworkListener, Id::singleton()),
                     object: NetworkListener {
-                        bind: Map::new(vec![
-                            SocketAddr::from_str(&format!(
-                                "[::]:{}",
-                                // inbuxa: #571: boot has refused a value that
-                                // isn't a port
-                                crate::manager::listener_ports::recovery_mode_port(
-                                    types::branding::env_var("RECOVERY_MODE_PORT")
-                                        .ok()
-                                        .as_deref()
-                                )
-                                .unwrap_or(crate::manager::listener_ports::DEFAULT_RECOVERY_PORT)
-                            ))
-                            .unwrap(),
-                        ]),
+                        bind: Map::new(vec![SocketAddr(
+                            // inbuxa: #571: boot has refused a bind address or
+                            // port that isn't one
+                            crate::manager::listener_ports::recovery_mode_addr(
+                                types::branding::env_var("RECOVERY_MODE_BIND")
+                                    .ok()
+                                    .as_deref(),
+                                types::branding::env_var("RECOVERY_MODE_PORT")
+                                    .ok()
+                                    .as_deref(),
+                            )
+                            .unwrap_or_else(|_| {
+                                crate::manager::listener_ports::recovery_mode_addr(None, None)
+                                    .unwrap()
+                            }),
+                        )]),
                         name: "http-recovery".to_string(),
                         protocol: NetworkListenerProtocol::Http,
                         tls_implicit: false,
