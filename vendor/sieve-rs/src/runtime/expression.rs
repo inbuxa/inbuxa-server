@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use std::{cmp::Ordering, fmt::Display};
@@ -35,7 +37,10 @@ impl Context<'_> {
                     let right = self.expr_stack.pop().unwrap_or_default();
                     let left = self.expr_stack.pop().unwrap_or_default();
                     self.expr_stack.push(match op {
-                        BinaryOperator::Add => left.op_add(right),
+                        // inbuxa: no longer than a variable may be
+                        BinaryOperator::Add => {
+                            left.op_add_limited(right, self.runtime.max_variable_size)
+                        }
                         BinaryOperator::Subtract => left.op_subtract(right),
                         BinaryOperator::Multiply => left.op_multiply(right),
                         BinaryOperator::Divide => left.op_divide(right),
@@ -107,32 +112,38 @@ impl Context<'_> {
 
 impl Variable {
     pub fn op_add(self, other: Variable) -> Variable {
+        self.op_add_limited(other, usize::MAX)
+    }
+
+    // inbuxa: a string or array that `+` builds holds at most `max_len`
+    // bytes (as `len` counts them), cut at a character or an item. One
+    // expression can add up thousands of terms, and upstream built each
+    // whole sum before `let` truncated it.
+    pub fn op_add_limited(self, other: Variable, max_len: usize) -> Variable {
         match (self, other) {
             (Variable::Integer(a), Variable::Integer(b)) => Variable::Integer(a.saturating_add(b)),
             (Variable::Float(a), Variable::Float(b)) => Variable::Float(a + b),
             (Variable::Integer(i), Variable::Float(f))
             | (Variable::Float(f), Variable::Integer(i)) => Variable::Float(i as f64 + f),
             (Variable::Array(a), Variable::Array(b)) => {
-                Variable::Array(a.iter().chain(b.iter()).cloned().collect::<Vec<_>>().into())
+                limited_array(a.iter().chain(b.iter()).cloned(), max_len)
             }
-            (Variable::Array(a), b) => a.iter().cloned().chain([b]).collect::<Vec<_>>().into(),
-            (a, Variable::Array(b)) => [a]
-                .into_iter()
-                .chain(b.iter().cloned())
-                .collect::<Vec<_>>()
-                .into(),
+            (Variable::Array(a), b) => limited_array(a.iter().cloned().chain([b]), max_len),
+            (a, Variable::Array(b)) => {
+                limited_array([a].into_iter().chain(b.iter().cloned()), max_len)
+            }
             (Variable::String(a), b) => {
                 if !a.is_empty() {
-                    Variable::String(format!("{}{}", a, b).into())
+                    limited_string(&a, b.to_string().as_ref(), max_len)
                 } else {
-                    b
+                    limited(b, max_len)
                 }
             }
             (a, Variable::String(b)) => {
                 if !b.is_empty() {
-                    Variable::String(format!("{}{}", a, b).into())
+                    limited_string(a.to_string().as_ref(), &b, max_len)
                 } else {
-                    a
+                    limited(a, max_len)
                 }
             }
         }
@@ -366,6 +377,52 @@ impl From<i32> for Number {
     fn from(n: i32) -> Self {
         Number::Integer(n as i64)
     }
+}
+
+// inbuxa: `a` followed by `b`, cut to `max_len` bytes at a character
+fn limited_string(a: &str, b: &str, max_len: usize) -> Variable {
+    let mut result = String::with_capacity(a.len().saturating_add(b.len()).min(max_len));
+    for part in [a, b] {
+        let room = max_len - result.len();
+        if part.len() <= room {
+            result.push_str(part);
+        } else {
+            let mut end = room;
+            while !part.is_char_boundary(end) {
+                end -= 1;
+            }
+            result.push_str(&part[..end]);
+            break;
+        }
+    }
+    Variable::String(result.into())
+}
+
+// inbuxa: the items, up to the last one that fits in `max_len`
+fn limited_array(items: impl Iterator<Item = Variable>, max_len: usize) -> Variable {
+    let mut total = 0usize;
+    let mut result = Vec::new();
+    for item in items {
+        total = total.saturating_add(item.len()).saturating_add(2);
+        if total > max_len {
+            break;
+        }
+        result.push(item);
+    }
+    Variable::Array(result.into())
+}
+
+// inbuxa: a value `+` passes on unchanged, cut like the ones it builds
+fn limited(value: Variable, max_len: usize) -> Variable {
+    match value {
+        Variable::String(s) if s.len() > max_len => limited_string(&s, "", max_len),
+        Variable::Array(a) if value_len(&a) > max_len => limited_array(a.iter().cloned(), max_len),
+        value => value,
+    }
+}
+
+fn value_len(items: &[Variable]) -> usize {
+    items.iter().map(|v| v.len() + 2).sum()
 }
 
 impl<'x> From<&'x Constant> for Variable {
@@ -637,5 +694,85 @@ mod test {
         .parse()
         .unwrap()
         .output
+    }
+}
+
+// inbuxa: `+` builds strings and arrays no longer than the runtime's
+// max_variable_size, however many terms one expression adds up
+#[cfg(test)]
+mod concat_limit_tests {
+    use mail_parser::MessageParser;
+
+    use crate::{
+        Context, Runtime,
+        compiler::{
+            VariableType,
+            grammar::expr::{Token, parser::ExpressionParser, tokenizer::Tokenizer},
+        },
+        runtime::Variable,
+    };
+
+    const MAX: usize = 64;
+
+    fn eval(expr: &str, value: Variable) -> Variable {
+        let runtime = Runtime::new().with_max_variable_size(MAX);
+        let mut ctx = Context::new(
+            &runtime,
+            MessageParser::new()
+                .parse(b"From: a@example.org\r\n\r\nhi\r\n")
+                .unwrap(),
+        );
+        ctx.vars_global.insert("x".into(), value);
+        let expr = ExpressionParser::from_tokenizer(Tokenizer::new(expr, |name: &str, _: bool| {
+            Ok::<_, String>(Token::Variable(VariableType::Global(name.to_string())))
+        }))
+        .parse()
+        .unwrap()
+        .output;
+        ctx.eval_expression(&expr).unwrap()
+    }
+
+    fn terms(term: &str, n: usize) -> String {
+        vec![term; n].join(" + ")
+    }
+
+    #[test]
+    fn concatenation_is_capped_at_max_variable_size() {
+        let full = Variable::from("é".repeat(MAX / 2));
+
+        let result = eval(&terms("x", 50), full.clone());
+        assert!(
+            result.len() <= MAX,
+            "50 strings of {MAX} bytes made {} bytes",
+            result.len()
+        );
+        // the cut keeps whole characters, and as much as fits
+        assert_eq!(result.to_string().as_ref(), "é".repeat(MAX / 2));
+        assert_eq!(eval("x + 'b'", Variable::from("a")).to_string(), "ab");
+        assert_eq!(eval("x + 1", Variable::from("a")).to_string(), "a1");
+
+        let result = eval(&terms("[x, x]", 50), full.clone());
+        assert!(
+            result.len() <= MAX,
+            "50 arrays of two {MAX}-byte strings made {} bytes",
+            result.len()
+        );
+        let result = eval(&terms("x", 50), Variable::Array(vec![full.clone()].into()));
+        assert!(
+            result.len() <= MAX,
+            "an array grown 50 times made {} bytes",
+            result.len()
+        );
+        let result = eval(&format!("'a' + {}", terms("[x]", 50)), full);
+        assert!(
+            result.len() <= MAX,
+            "a string joined to 50 arrays made {} bytes",
+            result.len()
+        );
+
+        // short values add up as before
+        let result = eval("[x] + [x] + x", Variable::from("a"));
+        assert_eq!(result.as_array().map(|a| a.len()), Some(3));
+        assert_eq!(eval("x + x", Variable::Integer(2)), Variable::Integer(4));
     }
 }
