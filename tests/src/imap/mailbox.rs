@@ -6,6 +6,7 @@
  * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
+use email::cache::MessageCacheFetch;
 use imap::op::list::matches_pattern;
 use imap_proto::ResponseType;
 use serde_json::json;
@@ -543,4 +544,111 @@ pub async fn test_failed_select(imap: &mut ImapConnection) {
     imap.send_ok("UNSELECT").await;
 
     imap.send_ok("DELETE Gruyere").await;
+}
+
+// inbuxa: #541: creates and renames of one name from many sessions at the
+// same moment leave exactly one mailbox with that name; every other session
+// is told it already exists.
+pub async fn test_concurrent_create(test: &TestServer) {
+    println!("Running concurrent mailbox create tests...");
+
+    const SESSIONS: usize = 10;
+    let account = test.account("jdoe@example.com");
+    let account_id = account.id().document_id();
+    let mut sessions = Vec::with_capacity(SESSIONS);
+    for _ in 0..SESSIONS {
+        sessions.push(account.imap_client().await);
+    }
+
+    // CREATE from every session at once, a few times over
+    for round in 0..3 {
+        let name = format!("Raclette {round}");
+        for imap in &mut sessions {
+            imap.send(&format!("CREATE \"{name}\"")).await;
+        }
+        assert_eq!(
+            count_ok(&mut sessions).await,
+            1,
+            "concurrent CREATE \"{name}\""
+        );
+        assert_eq!(mailboxes_named(test, account_id, &name).await, 1);
+    }
+
+    // RENAME of a different mailbox in every session to one name
+    for (num, imap) in sessions.iter_mut().enumerate() {
+        imap.send_ok(&format!("CREATE \"Comte {num}\"")).await;
+    }
+    for (num, imap) in sessions.iter_mut().enumerate() {
+        imap.send(&format!("RENAME \"Comte {num}\" Comte")).await;
+    }
+    assert_eq!(count_ok(&mut sessions).await, 1, "concurrent RENAME");
+    assert_eq!(mailboxes_named(test, account_id, "Comte").await, 1);
+
+    // IMAP CREATE and JMAP Mailbox/set create at once
+    let mut clients = Vec::with_capacity(SESSIONS);
+    for _ in 0..SESSIONS {
+        clients.push(account.jmap_client().await);
+    }
+    for imap in &mut sessions {
+        imap.send("CREATE Emmental").await;
+    }
+    let jmap_created = futures::future::join_all(clients.iter().map(|client| {
+        client.mailbox_create("Emmental", None::<String>, jmap_client::mailbox::Role::None)
+    }))
+    .await
+    .into_iter()
+    .filter(|result| result.is_ok())
+    .count();
+    assert_eq!(
+        count_ok(&mut sessions).await + jmap_created,
+        1,
+        "concurrent IMAP and JMAP create"
+    );
+    assert_eq!(mailboxes_named(test, account_id, "Emmental").await, 1);
+
+    // Clean up
+    let imap = &mut sessions[0];
+    for name in [
+        "Raclette 0",
+        "Raclette 1",
+        "Raclette 2",
+        "Comte",
+        "Emmental",
+    ] {
+        imap.send_ok(&format!("DELETE \"{name}\"")).await;
+    }
+    for num in 0..SESSIONS {
+        imap.send(&format!("DELETE \"Comte {num}\"")).await;
+        imap.read(Type::Tagged).await;
+    }
+}
+
+// How many sessions got OK; every other one must have got ALREADYEXISTS
+async fn count_ok(sessions: &mut [ImapConnection]) -> usize {
+    let mut ok = 0;
+    for imap in sessions {
+        let lines = imap.read(Type::Tagged).await;
+        let last = lines.last().unwrap();
+        if last.starts_with("_x OK") {
+            ok += 1;
+        } else {
+            assert!(
+                last.starts_with("_x NO [ALREADYEXISTS]"),
+                "expected OK or NO [ALREADYEXISTS]: {lines:?}"
+            );
+        }
+    }
+    ok
+}
+
+async fn mailboxes_named(test: &TestServer, account_id: u32, path: &str) -> usize {
+    test.server
+        .get_cached_messages(account_id)
+        .await
+        .unwrap()
+        .mailboxes
+        .items
+        .iter()
+        .filter(|mailbox| mailbox.path == path)
+        .count()
 }

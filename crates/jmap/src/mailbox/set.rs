@@ -82,6 +82,36 @@ impl MailboxSet for Server {
         // Prepare response
         let account_id = request.account_id.document_id();
         let on_destroy_remove_emails = request.arguments.on_destroy_remove_emails.unwrap_or(false);
+
+        // inbuxa: creates, renames and moves are checked against the account's
+        // mailboxes and saved under its mailbox-name lock, so a create or
+        // rename to the same name elsewhere can't race them
+        let _lock = if request.create.as_ref().is_some_and(|c| !c.is_empty())
+            || request.update.as_ref().is_some_and(|u| {
+                u.values().any(|object| {
+                    object.as_object().is_none_or(|object| {
+                        object.keys().any(|key| {
+                            matches!(
+                                key,
+                                Key::Property(
+                                    MailboxProperty::Name
+                                        | MailboxProperty::ParentId
+                                        | MailboxProperty::Role
+                                )
+                            )
+                        })
+                    })
+                })
+            }) {
+            Some(self.lock_mailbox_names(account_id).await?.ok_or_else(|| {
+                trc::JmapEvent::Forbidden
+                    .into_err()
+                    .details(common::mailbox_lock::BUSY)
+            })?)
+        } else {
+            None
+        };
+
         let cache = self.get_cached_messages(account_id).await?;
         let mut response = SetResponse::from_request(&request, self.core.jmap.set_max_objects)?
             .with_state(cache.assert_state(true, &request.if_in_state)?);

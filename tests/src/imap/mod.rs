@@ -281,6 +281,7 @@ pub async fn imap_tests() {
     idle::test_pending_changes(&mut imap, &mut imap_check).await;
     idle::test_condstore_status(&test).await;
     mailbox::test_failed_select(&mut imap).await;
+    mailbox::test_concurrent_create(&test).await;
     condstore::test(&mut imap, &mut imap_check).await;
     acl::test(&mut imap, &mut imap_check, &test).await;
     uidbatches::test(&mut imap, &mut imap_check).await;

@@ -8,7 +8,7 @@
 
 use super::*;
 use crate::cache::MessageCacheFetch;
-use common::{Server, storage::index::ObjectIndexBuilder};
+use common::{MessageStoreCache, Server, storage::index::ObjectIndexBuilder};
 use registry::schema::enums::StorageQuota;
 use std::future::Future;
 use store::write::BatchBuilder;
@@ -86,42 +86,28 @@ impl MailboxFnc for Server {
     }
 
     async fn mailbox_create_path(&self, account_id: u32, path: &str) -> trc::Result<Option<u32>> {
-        let cache = self
-            .get_cached_messages(account_id)
-            .await
-            .caused_by(trc::location!())?;
-
-        let mut next_parent_id = 0;
-        let mut create_paths = Vec::with_capacity(2);
-
-        let mut path = path.split('/').map(|v| v.trim());
-        let mut found_path = String::with_capacity(16);
-        {
-            while let Some(name) = path.next() {
-                if !found_path.is_empty() {
-                    found_path.push('/');
-                }
-
-                for ch in name.chars() {
-                    for ch in ch.to_lowercase() {
-                        found_path.push(ch);
-                    }
-                }
-
-                if let Some(item) = cache
-                    .mailboxes
-                    .items
-                    .iter()
-                    .find(|item| item.path.to_lowercase() == found_path)
-                {
-                    next_parent_id = item.document_id + 1;
-                } else {
-                    create_paths.push(name.to_string());
-                    create_paths.extend(path.map(|v| v.to_string()));
-                    break;
-                }
+        // inbuxa: missing folders are looked up again and created under the
+        // account's mailbox-name lock, so a create of the same folder
+        // elsewhere can't race it; when it stays held, nothing is created
+        let mut name_lock = None;
+        let (cache, mut next_parent_id, create_paths) = loop {
+            let cache = self
+                .get_cached_messages(account_id)
+                .await
+                .caused_by(trc::location!())?;
+            let (next_parent_id, create_paths) = find_mailbox_path(&cache, path);
+            if create_paths.is_empty() || name_lock.is_some() {
+                break (cache, next_parent_id, create_paths);
             }
-        }
+            match self
+                .lock_mailbox_names(account_id)
+                .await
+                .caused_by(trc::location!())?
+            {
+                Some(lock) => name_lock = Some(lock),
+                None => return Ok(None),
+            }
+        };
 
         // Create missing folders
         if !create_paths.is_empty() {
@@ -165,4 +151,40 @@ impl MailboxFnc for Server {
 
         Ok(Some(next_parent_id - 1))
     }
+}
+
+// The document id + 1 of the deepest folder of `path` that exists, and the
+// names of the folders below it that don't
+fn find_mailbox_path(cache: &MessageStoreCache, path: &str) -> (u32, Vec<String>) {
+    let mut next_parent_id = 0;
+    let mut create_paths = Vec::with_capacity(2);
+
+    let mut path = path.split('/').map(|v| v.trim());
+    let mut found_path = String::with_capacity(16);
+    while let Some(name) = path.next() {
+        if !found_path.is_empty() {
+            found_path.push('/');
+        }
+
+        for ch in name.chars() {
+            for ch in ch.to_lowercase() {
+                found_path.push(ch);
+            }
+        }
+
+        if let Some(item) = cache
+            .mailboxes
+            .items
+            .iter()
+            .find(|item| item.path.to_lowercase() == found_path)
+        {
+            next_parent_id = item.document_id + 1;
+        } else {
+            create_paths.push(name.to_string());
+            create_paths.extend(path.map(|v| v.to_string()));
+            break;
+        }
+    }
+
+    (next_parent_id, create_paths)
 }
