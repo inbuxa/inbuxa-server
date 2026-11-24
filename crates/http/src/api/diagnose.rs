@@ -22,6 +22,7 @@ use smtp::outbound::{
         dnssec::{TlsaLookup, TlsaResult},
         verify::TlsaVerify,
     },
+    delivery::checks_web_pki,
     error::ClientError,
     lookup::{DnsLookup, SourceIp, ToNextHop},
     mta_sts::lookup::MtaStsLookup,
@@ -246,6 +247,8 @@ async fn delivery_diagnose(
 ) -> Result<(), mpsc::error::SendError<DeliveryStage>> {
     let local_host = &server.core.network.server_name;
     let conn_strategy = server.get_connection_or_default("default", 0);
+    // inbuxa (#530): a first delivery attempt uses the default TLS strategy
+    let tls_strategy = server.get_tls_or_default("default", 0);
 
     tx.send(DeliveryStage::MxLookupStart {
         domain: domain.to_string(),
@@ -456,10 +459,15 @@ async fn delivery_diagnose(
         tx.send(DeliveryStage::TlsaLookupStart).await?;
 
         let now = Instant::now();
+        let mut dane_requires_encryption = false;
         let dane_policy = match host.dane_status(addresses_dnssec_status) {
             (DnssecStatus::Secure, _) => {
                 match server.tlsa_lookup(format!("_25._tcp.{hostname}.")).await {
-                    Ok(TlsaResult::Secure(tlsa)) if tlsa.has_end_entities => {
+                    // inbuxa (#530): delivery uses trust anchors as well as
+                    // end entities
+                    Ok(TlsaResult::Secure(tlsa))
+                        if tlsa.has_end_entities || tlsa.has_intermediates =>
+                    {
                         tx.send(DeliveryStage::TlsaLookupSuccess {
                             record: tlsa.as_ref().clone(),
                             elapsed: now.elapsed_ms(),
@@ -471,10 +479,13 @@ async fn delivery_diagnose(
                     Ok(TlsaResult::Secure(_)) => {
                         tx.send(DeliveryStage::TlsaLookupError {
                             elapsed: now.elapsed_ms(),
-                            reason: "TLSA record does not have end entities".to_string(),
+                            reason: "TLSA record has no usable entries".to_string(),
                         })
                         .await?;
 
+                        // inbuxa (#530): delivery still encrypts, without
+                        // checking the certificate
+                        dane_requires_encryption = true;
                         None
                     }
                     Ok(TlsaResult::Bogus) => {
@@ -623,13 +634,25 @@ async fn delivery_diagnose(
                     // Start TLS
                     tx.send(DeliveryStage::StartTlsStart).await?;
 
+                    // inbuxa (#530): the certificate check delivery would use.
+                    // The test only reaches MX hosts, which never allow
+                    // invalid certificates.
+                    let tls_connector = if checks_web_pki(
+                        tls_strategy,
+                        dane_policy.is_some() || dane_requires_encryption,
+                        false,
+                        tls_strategy.try_mta_sts()
+                            && mta_sts_policy
+                                .as_ref()
+                                .is_some_and(|policy| policy.enforce()),
+                    ) {
+                        &server.inner.data.smtp_connectors.pki_verify
+                    } else {
+                        &server.inner.data.smtp_connectors.dummy_verify
+                    };
                     let now = Instant::now();
                     let mut client = match client
-                        .try_start_tls(
-                            &server.inner.data.smtp_connectors.pki_verify,
-                            hostname,
-                            &capabilities,
-                        )
+                        .try_start_tls(tls_connector, hostname, &capabilities)
                         .await
                     {
                         StartTlsResult::Success { smtp_client } => {

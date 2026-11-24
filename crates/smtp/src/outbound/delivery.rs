@@ -28,7 +28,7 @@ use crate::reporting::send::MtaReportSend;
 use crate::{queue::ErrorDetails, reporting::tls::TlsRptOptions};
 use ahash::AHashMap;
 use common::Server;
-use common::config::smtp::queue::RoutingStrategy;
+use common::config::smtp::queue::{RoutingStrategy, TlsStrategy};
 use common::config::{server::ServerProtocol, smtp::report::AggregateFrequency};
 use common::ipc::{PolicyType, QueueEvent, QueueEventStatus, TlsEvent};
 use compact_str::ToCompactString;
@@ -1247,14 +1247,15 @@ impl QueuedMessage {
                         || is_mta_sts_enforced
                         || dane_policy.is_some()
                         || dane_requires_encryption;
-                    let tls_connector = if dane_policy.is_some()
-                        || dane_requires_encryption
-                        || remote_host.allow_invalid_certs()
-                        || (tls_strategy.allow_invalid_certs && !is_mta_sts_enforced)
-                    {
-                        &server.inner.data.smtp_connectors.dummy_verify
-                    } else {
+                    let tls_connector = if checks_web_pki(
+                        tls_strategy,
+                        dane_policy.is_some() || dane_requires_encryption,
+                        remote_host.allow_invalid_certs(),
+                        is_mta_sts_enforced,
+                    ) {
                         &server.inner.data.smtp_connectors.pki_verify
+                    } else {
+                        &server.inner.data.smtp_connectors.dummy_verify
                     };
 
                     if !remote_host.implicit_tls() {
@@ -1757,5 +1758,59 @@ impl MessageWrapper {
             entity: "localhost".into(),
             details: Error::RateLimited,
         });
+    }
+}
+
+/// inbuxa (#530): whether STARTTLS to a host checks its certificate against
+/// the web PKI. Where DANE applies, the TLSA records are checked instead
+/// (RFC 7672, Section 3.1), and TLSA records that can't be used still call
+/// for encryption, just without authentication (Section 2.2). Otherwise the
+/// web PKI is checked unless invalid certificates are allowed for the host,
+/// or by the TLS strategy when no MTA-STS policy is enforced. The Delivery
+/// Test asks the same question, so it reports what delivery does.
+pub fn checks_web_pki(
+    tls_strategy: &TlsStrategy,
+    uses_dane: bool,
+    host_allows_invalid_certs: bool,
+    is_mta_sts_enforced: bool,
+) -> bool {
+    !(uses_dane
+        || host_allows_invalid_certs
+        || (tls_strategy.allow_invalid_certs && !is_mta_sts_enforced))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::checks_web_pki;
+    use common::config::smtp::queue::{RequireOptional, TlsStrategy};
+    use std::time::Duration;
+
+    fn strategy(allow_invalid_certs: bool) -> TlsStrategy {
+        TlsStrategy {
+            dane: RequireOptional::Optional,
+            mta_sts: RequireOptional::Optional,
+            tls: RequireOptional::Optional,
+            allow_invalid_certs,
+            timeout_tls: Duration::from_secs(1),
+            timeout_mta_sts: Duration::from_secs(1),
+        }
+    }
+
+    #[test]
+    fn web_pki_is_checked_unless_dane_or_invalid_certs_apply() {
+        // No DANE and nothing allows invalid certificates
+        assert!(checks_web_pki(&strategy(false), false, false, false));
+        assert!(checks_web_pki(&strategy(false), false, false, true));
+
+        // DANE decides, whatever else is set
+        assert!(!checks_web_pki(&strategy(false), true, false, false));
+        assert!(!checks_web_pki(&strategy(false), true, false, true));
+
+        // A relay host that allows invalid certificates
+        assert!(!checks_web_pki(&strategy(false), false, true, true));
+
+        // The TLS strategy allows them, unless MTA-STS is enforced
+        assert!(!checks_web_pki(&strategy(true), false, false, false));
+        assert!(checks_web_pki(&strategy(true), false, false, true));
     }
 }
