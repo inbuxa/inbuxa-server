@@ -6,14 +6,17 @@
 
 //! Who an OAuth sign-in may be for. A client a tenant registered signs in,
 //! approves devices for and gets tokens for that tenant's accounts only, and
-//! can't take one of the server's own client ids.
+//! can't take one of the server's own client ids. The sign-in and device
+//! pages take an account's password, never an app password or API key.
 
-use crate::utils::{account::Account, registry::UnwrapRegistryId, server::TestServer};
+use crate::utils::{
+    account::Account, jmap::JmapUtils, registry::UnwrapRegistryId, server::TestServer,
+};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use jmap_proto::error::set::SetErrorType;
 use registry::schema::{
     prelude::{ObjectType, Property},
-    structs::{Http, OAuthClient, OidcProvider, Rate},
+    structs::{ApiKey, AppPassword, Http, OAuthClient, OidcProvider, Rate},
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -31,6 +34,9 @@ const TENANT_APP_REDIRECT: &str = "https://app.oauth-t.example.org/cb";
 const MOVED_APP: &str = "oauth-sign-in-moved-app";
 const MOVED_APP_REDIRECT: &str = "https://app.oauth-moved.example.org/cb";
 const CONSOLE: &str = "https://console.oauth-sign-in.example.org";
+const SERVER_APP: &str = "oauth-sign-in-server-app";
+const SERVER_APP_REDIRECT: &str = "https://app.oauth-sign-in.example.org/cb";
+const PASSWORD: &str = "oauth sign-in account's own passphrase";
 
 pub async fn test(test: &mut TestServer) {
     println!("Running OAuth sign-in tests...");
@@ -50,6 +56,7 @@ pub async fn test(test: &mut TestServer) {
     set_anonymous_rate(admin, 1000, 61_000).await;
 
     tenant_clients(test).await;
+    secondary_credentials(test).await;
 
     set_anonymous_rate(admin, 100, 60_000).await;
 }
@@ -361,6 +368,88 @@ async fn tenant_clients(test: &TestServer) {
             .await
             .assert_destroyed(&[tenant]);
     }
+
+    assert!(failed.is_empty(), "{}", failed.join("\n"));
+}
+
+/// An app password or API key is for one app: it doesn't sign in to get a
+/// code or approve a device, which would give the client the whole account
+/// without the second factor.
+async fn secondary_credentials(test: &TestServer) {
+    let admin = test.account("admin@example.org");
+    let user = admin
+        .create_user_account(
+            "oauthapp@example.org",
+            PASSWORD,
+            "OAuth app password",
+            &[],
+            vec![],
+        )
+        .await;
+    let app_password = user
+        .registry_create([AppPassword {
+            description: "A mail client".to_string(),
+            ..Default::default()
+        }])
+        .await
+        .created(0)
+        .text_field("secret")
+        .to_string();
+    let api_key = user
+        .registry_create([ApiKey {
+            description: "A script".to_string(),
+            ..Default::default()
+        }])
+        .await
+        .created(0)
+        .text_field("secret")
+        .to_string();
+    let server_app = admin
+        .registry_create_object(OAuthClient {
+            client_id: SERVER_APP.to_string(),
+            redirect_uris: vec![SERVER_APP_REDIRECT.to_string()].into(),
+            ..Default::default()
+        })
+        .await;
+
+    let mut failed = Vec::new();
+    for (what, secret) in [("an app password", &app_password), ("an API key", &api_key)] {
+        let response = auth_code(user.name(), secret, SERVER_APP, SERVER_APP_REDIRECT).await;
+        if response.code().is_some() {
+            failed.push(format!("code flow: {what} got a code: {response}"));
+        }
+        let device = device_code(SERVER_APP).await;
+        let response = approve_device(user.name(), secret, &device.1).await;
+        if response["type"] != "failure" {
+            failed.push(format!("device flow: {what} approved a device: {response}"));
+        }
+    }
+
+    // The account's password still signs in, for a code and a device
+    match auth_code(user.name(), PASSWORD, SERVER_APP, SERVER_APP_REDIRECT)
+        .await
+        .code()
+    {
+        Some(code) => {
+            let granted = redeem_code(&code, SERVER_APP, SERVER_APP_REDIRECT).await;
+            if !granted["access_token"].is_string() {
+                failed.push(format!("code flow: the password got no token: {granted}"));
+            }
+        }
+        None => failed.push("code flow: the password got no code".to_string()),
+    }
+    let device = device_code(SERVER_APP).await;
+    let response = approve_device(user.name(), PASSWORD, &device.1).await;
+    if response["type"] != "verified" {
+        failed.push(format!(
+            "device flow: the password couldn't approve: {response}"
+        ));
+    }
+
+    admin
+        .registry_destroy(ObjectType::OAuthClient, [server_app])
+        .await;
+    admin.destroy_account(user).await;
 
     assert!(failed.is_empty(), "{}", failed.join("\n"));
 }

@@ -1068,6 +1068,19 @@ impl AccessToken {
         self.origin.as_deref()
     }
 
+    /// inbuxa: whether this session signed in with an app password or an
+    /// API key, which act with that credential's own permissions.
+    pub fn is_app_credential(&self) -> bool {
+        self.scope_idx > 0
+            || matches!(
+                self.origin(),
+                Some(
+                    inbuxa_features::audit::Via::AppPassword { .. }
+                        | inbuxa_features::audit::Via::ApiKey { .. }
+                )
+            )
+    }
+
     /// inbuxa: records how this session signed in (AU-5).
     pub fn with_origin(mut self, origin: inbuxa_features::audit::Via) -> Self {
         self.origin = Some(Arc::new(origin));
