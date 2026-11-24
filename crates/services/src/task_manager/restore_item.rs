@@ -14,7 +14,10 @@ use email::{
 };
 use inbuxa_features::undelete;
 use mail_parser::MessageParser;
-use registry::schema::{enums::ArchivedItemType, structs::TaskRestoreArchivedItem};
+use registry::schema::{
+    enums::ArchivedItemType,
+    structs::{Account, TaskRestoreArchivedItem},
+};
 use store::write::BatchBuilder;
 use trc::AddContext;
 use types::keyword::Keyword;
@@ -32,6 +35,18 @@ impl RestoreItemTask for Server {
     async fn restore_item(&self, task: &TaskRestoreArchivedItem) -> TaskResult {
         match restore_item(self, task).await {
             Ok(result) => result,
+            // inbuxa: #569: an account that no longer exists won't come back,
+            // so its restore isn't retried
+            Err(err) if account_gone(self, task).await => {
+                trc::event!(
+                    TaskManager(trc::TaskManagerEvent::TaskIgnored),
+                    Reason = "Account no longer exists",
+                    AccountId = task.account_id.document_id(),
+                    Details = "Restore of an archived item",
+                    CausedBy = err,
+                );
+                TaskResult::Ignored
+            }
             Err(err) => {
                 let result = TaskResult::temporary(err.to_string());
                 trc::error!(
@@ -42,6 +57,38 @@ impl RestoreItemTask for Server {
             }
         }
     }
+}
+
+/// inbuxa: #569: whether the restore's account is gone. Its item, if still
+/// kept, no longer waits for a restore.
+async fn account_gone(server: &Server, task: &TaskRestoreArchivedItem) -> bool {
+    let account_id = task.account_id.document_id();
+    if !matches!(
+        server.registry().object::<Account>(account_id.into()).await,
+        Ok(None)
+    ) {
+        return false;
+    }
+    let data = &server.core.storage.data;
+    if let Ok(Some((item_id, _, _))) = undelete::records::for_restore(
+        data,
+        server.registry(),
+        account_id,
+        task.blob_id.hash.as_slice(),
+    )
+    .await
+    {
+        let mut batch = BatchBuilder::new();
+        undelete::data::clear_restore_requested(&mut batch, item_id);
+        if let Err(err) = data.write(batch.build_all()).await {
+            trc::error!(
+                err.account_id(account_id)
+                    .caused_by(trc::location!())
+                    .details("Failed to clear an archived item's restore request")
+            );
+        }
+    }
+    true
 }
 
 async fn restore_item(server: &Server, task: &TaskRestoreArchivedItem) -> trc::Result<TaskResult> {
