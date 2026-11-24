@@ -1511,6 +1511,55 @@ mod tests {
         );
     }
 
+    // inbuxa: a refused WebSocket request carries its id, so the client can
+    // match the RequestError to it (RFC 8887 §4.3.4).
+    #[test]
+    fn refused_websocket_request_keeps_its_id() {
+        let too_many_calls = format!(
+            r#"{{"@type": "Request", "id": "r1", "using": ["urn:ietf:params:jmap:core"],
+                 "methodCalls": [{}]}}"#,
+            (0..11)
+                .map(|n| format!(r#"["Core/echo", {{}}, "{n}"]"#))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        for (message, expected) in [
+            (
+                r#"{"@type": "Request", "id": "r1", "using": ["urn:example:nope"],
+                    "methodCalls": [["Core/echo", {}, "0"]]}"#
+                    .to_string(),
+                trc::EventType::Jmap(trc::JmapEvent::UnknownCapability),
+            ),
+            (
+                too_many_calls,
+                trc::EventType::Limit(trc::LimitEvent::CallsIn),
+            ),
+            (
+                r#"{"@type": "Request", "id": "r1", "methodCalls": 1}"#.to_string(),
+                trc::EventType::Jmap(trc::JmapEvent::NotRequest),
+            ),
+        ] {
+            let err =
+                crate::request::websocket::WebSocketMessage::parse(message.as_bytes(), 10, 10240)
+                    .unwrap_err();
+            assert_eq!(*err.as_ref(), expected, "{message}");
+            assert_eq!(
+                err.value(trc::Key::Id).and_then(|v| v.as_str()),
+                Some("r1"),
+                "{message}"
+            );
+        }
+
+        // Without an id there is nothing to carry
+        let err = crate::request::websocket::WebSocketMessage::parse(
+            br#"{"@type": "Request", "using": ["urn:example:nope"], "methodCalls": []}"#,
+            10,
+            10240,
+        )
+        .unwrap_err();
+        assert!(err.value(trc::Key::Id).is_none());
+    }
+
     #[test]
     fn parse_method_name_with_escaped_solidus() {
         let request = Request::parse(TEST_ESCAPED_SOLIDUS.as_bytes(), 10, 10240)

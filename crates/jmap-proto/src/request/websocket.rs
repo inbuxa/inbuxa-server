@@ -110,29 +110,56 @@ impl<'x> WebSocketMessage<'x> {
         if json.len() <= max_size {
             match serde_json::from_slice::<Self>(json) {
                 Ok(WebSocketMessage::Request(WebSocketRequest {
+                    id,
                     request:
                         Request {
                             unknown_capability: Some(capability),
                             ..
                         },
-                    ..
-                })) => Err(trc::JmapEvent::UnknownCapability
-                    .into_err()
-                    .details(capability)),
+                })) => Err(with_request_id(
+                    trc::JmapEvent::UnknownCapability
+                        .into_err()
+                        .details(capability),
+                    id,
+                )),
                 Ok(WebSocketMessage::Request(req))
                     if req.request.method_calls.len() > max_calls =>
                 {
-                    Err(trc::LimitEvent::CallsIn.into_err())
+                    Err(with_request_id(trc::LimitEvent::CallsIn.into_err(), req.id))
                 }
                 Ok(msg) => Ok(msg),
-                Err(err) => Err(trc::JmapEvent::NotRequest
-                    .into_err()
-                    .details(format!("Invalid WebSocket JMAP request {err}"))),
+                Err(err) => Err(with_request_id(
+                    trc::JmapEvent::NotRequest
+                        .into_err()
+                        .details(format!("Invalid WebSocket JMAP request {err}")),
+                    message_id(json),
+                )),
             }
         } else {
             Err(trc::LimitEvent::SizeRequest.into_err())
         }
     }
+}
+
+/// inbuxa: a refused request's error carries the request's `id` as
+/// `Key::Id`, for the RequestError's `requestId` (RFC 8887 §4.3.4).
+fn with_request_id(err: trc::Error, id: Option<String>) -> trc::Error {
+    match id {
+        Some(id) => err.ctx(trc::Key::Id, id),
+        None => err,
+    }
+}
+
+/// inbuxa: the `id` of a JSON message that isn't a valid WebSocket message,
+/// when it has a string one.
+fn message_id(json: &[u8]) -> Option<String> {
+    #[derive(Deserialize)]
+    struct MessageId {
+        id: Option<String>,
+    }
+    serde_json::from_slice::<MessageId>(json)
+        .ok()
+        .and_then(|message| message.id)
 }
 
 impl<'de: 'x, 'x: 'de> Deserialize<'de> for WebSocketMessage<'x> {
