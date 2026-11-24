@@ -15,6 +15,21 @@ https://github.com/inbuxa/inbuxa-server/security/advisories.
 Every version PR adds that version's entry here. CI refuses a version this
 file has no entry for (`tools/release/version.py --changelog`).
 
+## [27.1-rc.46] - 2026-11-24
+
+27.1-rc.45 with a build fix and a settings fix. 27.1-rc.45's binaries and
+images could not be built, so 27.1-rc.46 is the first release that carries
+its security fixes (see 27.1-rc.45 below).
+
+### Fixed
+- Build: the EventSource session check made the stream's body lose `Sync`
+  with the SQL and Redis store backends, so the release build failed. The
+  check now runs as its own task, and CI builds those backends. (#623)
+- Settings: set fields (email, domain and trimmed lists) now validate each
+  value added; values already stored are kept on edit. ACME providers
+  store contacts as plain addresses, and ones saved as `mailto:` are
+  rewritten at start. (#608, #621)
+
 ## [27.1-rc.45] - 2026-11-24
 
 27.1-rc.44 with security fixes from security reviews (one high,
