@@ -52,8 +52,7 @@ impl<T: SessionStream> Session<T> {
         let use_vanished = self.is_qresync || is_uidonly;
         // inbuxa: with CONDSTORE on, unsolicited STATUS carries HIGHESTMODSEQ
         // (RFC 7162 3.1)
-        let is_condstore = self.is_condstore
-            || matches!(&self.state, State::Selected { mailbox, .. } if mailbox.is_condstore);
+        let is_condstore = self.is_condstore;
 
         // Register with push manager
         let mut push_rx = self

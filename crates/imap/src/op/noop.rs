@@ -25,7 +25,7 @@ impl<T: SessionStream> Session<T> {
                 self.is_uidonly,
                 self.version.is_rev2(),
                 self.is_utf8,
-                self.is_condstore || mailbox.is_condstore,
+                self.is_condstore,
             )
             .await?;
         }
