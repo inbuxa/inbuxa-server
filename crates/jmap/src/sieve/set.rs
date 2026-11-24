@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{blob::download::BlobDownload, changes::state::StateManager};
@@ -341,7 +343,7 @@ impl SieveScriptSet for Server {
                 } else {
                     ctx.response.not_destroyed.append(
                         id,
-                        SetError::new(SetErrorType::ScriptIsActive)
+                        SetError::new(SetErrorType::SieveIsActive)
                             .with_description("Deactivate Sieve script before deletion."),
                     );
                 }

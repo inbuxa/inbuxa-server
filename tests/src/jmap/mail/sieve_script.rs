@@ -27,6 +27,7 @@ use registry::{
     },
     types::float::Float,
 };
+use serde_json::json;
 use std::{
     fs,
     path::PathBuf,
@@ -130,16 +131,24 @@ pub async fn test(test: &TestServer) {
         vec![script_ids.first().unwrap().to_string()]
     );
 
-    // Destroying an active script should not work
-    assert!(matches!(
-        client
-            .sieve_script_destroy(script_ids.first().unwrap())
-            .await,
-        Err(Error::Set(SetError {
-            type_: SetErrorType::ScriptIsActive,
-            ..
-        }))
-    ));
+    // Destroying an active script should not work, and the error is the
+    // sieveIsActive of RFC 9661 (jmap-client only knows the draft's name,
+    // so the response is read as JSON)
+    let account_id = account.id_string();
+    let response = account
+        .jmap_method_call(
+            "SieveScript/set",
+            json!({"accountId": account_id, "destroy": [&script_ids[0]]}),
+        )
+        .await;
+    assert_eq!(
+        response
+            .method_response()
+            .pointer(&format!("/notDestroyed/{}/type", script_ids[0]))
+            .and_then(|v| v.as_str()),
+        Some("sieveIsActive"),
+        "{response:?}"
+    );
 
     // Deactivate all scripts
     client.sieve_script_deactivate().await.unwrap();

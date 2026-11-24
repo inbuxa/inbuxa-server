@@ -123,8 +123,9 @@ pub enum SetErrorType {
     AlreadyExists,
     #[serde(rename = "invalidScript")]
     InvalidScript,
-    #[serde(rename = "scriptIsActive")]
-    ScriptIsActive,
+    // inbuxa: RFC 9661's name; the draft's scriptIsActive is still read
+    #[serde(rename = "sieveIsActive", alias = "scriptIsActive")]
+    SieveIsActive,
     #[serde(rename = "addressBookHasContents")]
     AddressBookHasContents,
     #[serde(rename = "nodeHasChildren")]
@@ -180,7 +181,7 @@ impl SetErrorType {
             SetErrorType::CannotUnsend => "cannotUnsend",
             SetErrorType::AlreadyExists => "alreadyExists",
             SetErrorType::InvalidScript => "invalidScript",
-            SetErrorType::ScriptIsActive => "scriptIsActive",
+            SetErrorType::SieveIsActive => "sieveIsActive",
             SetErrorType::AddressBookHasContents => "addressBookHasContents",
             SetErrorType::NodeHasChildren => "nodeHasChildren",
             SetErrorType::CalendarHasEvent => "calendarHasEvent",
