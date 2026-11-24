@@ -1138,6 +1138,7 @@ impl EmailSet for Server {
                     account_id,
                     document_id,
                     train_spam,
+                    true,
                     session.session_id,
                 )
                 .await

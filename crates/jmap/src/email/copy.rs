@@ -250,12 +250,16 @@ impl JmapEmailCopy for Server {
                         destroy_ids.push(MaybeInvalid::Value(from_message_id));
                     }
 
+                    // inbuxa: #589: destroying the original ends the
+                    // sample's hold with it (UD-14a), so a moved message's
+                    // sample is trained once instead of held
                     if train_spam {
                         self.add_account_spam_sample(
                             &mut train_batch,
                             from_account_id,
                             from_message_id.document_id(),
                             true,
+                            !on_success_delete,
                             session.session_id,
                         )
                         .await

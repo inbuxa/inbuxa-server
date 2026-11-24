@@ -891,6 +891,27 @@ pub async fn test(test: &mut TestServer) {
 
     // Acceptance test 13: the tenant's disk limit bounds all its members
     // together (MT-19, MT-20)
+    // MT-20: accounts and tenants are numbered by counters of their own, so
+    // tenant D only shares an account's number if the test sees to it. Skip
+    // tenant numbers until D takes the number of an account destroyed at
+    // clean-up, wherever earlier tests left either counter.
+    let shared_number = [
+        &t_admin, &t_user, &t_group, &u_admin, &u_user, &u_group, &p_admin, &p_user, &s_user,
+    ]
+    .iter()
+    .map(|account| account.id().document_id())
+    .max()
+    .unwrap();
+    for skipped in 0.. {
+        let skip_id = admin.create_tenant(&format!("Skipped {skipped}")).await;
+        admin
+            .registry_destroy(ObjectType::Tenant, [skip_id])
+            .await
+            .assert_destroyed(&[skip_id]);
+        if skip_id.document_id() + 1 >= shared_number {
+            break;
+        }
+    }
     let d_id = admin.create_tenant("Tenant D").await;
     let d_domain = admin
         .create_tenant_domain("d.example.org", Some(d_id))
@@ -1335,13 +1356,19 @@ pub async fn test(test: &mut TestServer) {
     let cleanup = [
         t_admin, t_user, t_group, u_admin, u_user, u_group, p_admin, p_user, s_user, d_admin,
     ];
-    // MT-20: accounts and tenants are numbered apart, so one of these has
-    // tenant D's number, and destroying it leaves D's usage alone
+    // MT-20: accounts and tenants are numbered apart, and tenant D was given
+    // one of these accounts' numbers above; destroying it leaves D's usage
+    // alone
     assert!(
         cleanup
             .iter()
             .any(|account| account.id().document_id() == d_id.document_id()),
-        "MT-20: no account shares tenant D's number"
+        "MT-20: no account shares tenant D's number {}: {:?}",
+        d_id.document_id(),
+        cleanup
+            .iter()
+            .map(|account| account.id().document_id())
+            .collect::<Vec<_>>()
     );
     for account in cleanup {
         admin.destroy_account(account).await;

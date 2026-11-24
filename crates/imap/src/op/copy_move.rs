@@ -386,6 +386,7 @@ impl<T: SessionStream> SessionData<T> {
                                 account_id,
                                 id,
                                 true,
+                                true,
                                 self.session_id,
                             )
                             .await
@@ -399,6 +400,7 @@ impl<T: SessionStream> SessionData<T> {
                                 account_id,
                                 id,
                                 false,
+                                true,
                                 self.session_id,
                             )
                             .await
@@ -586,6 +588,10 @@ impl<T: SessionStream> SessionData<T> {
                     }
                 };
 
+                // inbuxa: #589: a move takes the message out of the source
+                // account, which ends the sample's hold on its blob with it
+                // (UD-14a) and would drop the sample before it's trained. A
+                // moved message's sample is trained once instead of held.
                 if let Some(is_spam) = train_spam {
                     self.server
                         .add_account_spam_sample(
@@ -593,6 +599,7 @@ impl<T: SessionStream> SessionData<T> {
                             src_account_id,
                             id,
                             is_spam,
+                            !is_move,
                             self.session_id,
                         )
                         .await
