@@ -27,6 +27,7 @@ pub mod store;
 pub mod thread;
 pub mod uidbatches;
 pub mod uidonly;
+pub mod write_stall;
 
 use crate::utils::{
     imap::{AssertResult, ImapConnection, Type},
@@ -301,6 +302,9 @@ pub async fn imap_tests() {
 
     // Bearer tokens on clear-text connections
     bearer_tls::test().await;
+
+    // inbuxa: clients that stop reading are dropped
+    write_stall::test(&test).await;
 
     // Print elapsed time
     let elapsed = start_time.elapsed();
