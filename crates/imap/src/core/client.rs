@@ -120,6 +120,9 @@ impl<T: SessionStream> Session<T> {
             // inbuxa: a command handled here rather than in a spawned task
             // waits for every operation in flight and holds the whole gate
             // while it runs; the others take their permit in their handler
+            // inbuxa: an error a handler returns before giving it the
+            // command's tag (a permission denial) still completes the command
+            let tag = request.tag.clone();
             let inline_permit = if takes_own_permit(&request.command) {
                 None
             } else {
@@ -319,6 +322,11 @@ impl<T: SessionStream> Session<T> {
                 Ok(SessionResult::Continue) => (),
                 Ok(result) => return result,
                 Err(err) => {
+                    let err = if err.key(trc::Key::Id).is_none() {
+                        err.id(tag)
+                    } else {
+                        err
+                    };
                     if !self.write_error(err).await {
                         return SessionResult::Close;
                     }

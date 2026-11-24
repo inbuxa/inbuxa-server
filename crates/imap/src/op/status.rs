@@ -31,7 +31,9 @@ use types::{acl::Acl, id::Id, keyword::Keyword};
 impl<T: SessionStream> Session<T> {
     pub async fn handle_status(&mut self, requests: Vec<Request<Command>>) -> trc::Result<()> {
         // Validate access
-        self.assert_has_permission(Permission::ImapStatus)?;
+        if let Err(err) = self.assert_has_permission(Permission::ImapStatus) {
+            return self.refuse_each(&requests, err).await;
+        }
         let permit = self.op_gate.acquire(OpKind::Read).await;
 
         let is_utf8 = self.is_utf8;

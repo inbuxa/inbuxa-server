@@ -517,12 +517,20 @@ pub async fn test_failed_select(imap: &mut ImapConnection) {
         .await
         .assert_contains("MESSAGES 1");
 
-    // QRESYNC arguments without ENABLE QRESYNC
+    // QRESYNC arguments without ENABLE QRESYNC are a protocol error, BAD
+    // (RFC 7162 3.2.5), and still leave no mailbox selected
     imap.send_ok("EXAMINE Gruyere").await;
     imap.send("EXAMINE Gruyere (QRESYNC (1 1))").await;
-    imap.assert_read(Type::Tagged, ResponseType::No)
+    imap.assert_read(Type::Tagged, ResponseType::Bad)
         .await
-        .assert_contains("* OK [CLOSED]");
+        .assert_contains("* OK [CLOSED]")
+        .assert_contains("QRESYNC is not enabled.");
+    imap.send("FETCH 1 (FLAGS)").await;
+    imap.assert_read(Type::Tagged, ResponseType::Bad).await;
+    imap.send("SELECT Gruyere (QRESYNC (1 1))").await;
+    imap.assert_read(Type::Tagged, ResponseType::Bad)
+        .await
+        .assert_contains("QRESYNC is not enabled.");
     imap.send("FETCH 1 (FLAGS)").await;
     imap.assert_read(Type::Tagged, ResponseType::Bad).await;
 

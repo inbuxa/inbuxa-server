@@ -12,6 +12,15 @@ use crate::{
     utils::{server::TestServer, smtp::SmtpConnection},
 };
 use imap_proto::ResponseType;
+use registry::{
+    schema::{
+        enums::Permission,
+        prelude::{ObjectType, Property},
+        structs::{Permissions, PermissionsList},
+    },
+    types::map::Map,
+};
+use serde_json::json;
 
 pub async fn test(
     mut imap_john: &mut ImapConnection,
@@ -509,4 +518,81 @@ pub async fn test(
     imap_off.assert_read(Type::Tagged, ResponseType::Ok).await;
     set_directory_queries(test, true).await;
     admin.destroy_account(stranger).await;
+}
+
+// inbuxa: a command the account isn't allowed to use is refused with a
+// tagged NO [NOPERM] (RFC 9051 7.1) and the session goes on. Before, the
+// denial was never answered and the connection was dropped.
+pub async fn test_permissions(test: &TestServer) {
+    println!("Running IMAP permission denial tests...");
+
+    let admin = test.account("admin");
+    let account = admin
+        .create_user_account(
+            "denied@example.com",
+            "denied-secret-1234",
+            "Denied",
+            &[],
+            vec![],
+        )
+        .await;
+    admin
+        .registry_update_object(
+            ObjectType::Account,
+            account.id(),
+            json!({
+                Property::Permissions: Permissions::Merge(PermissionsList {
+                    enabled_permissions: Map::default(),
+                    disabled_permissions: Map::new(vec![
+                        Permission::ImapAclGet,
+                        Permission::ImapCreate,
+                        Permission::ImapFetch,
+                        Permission::ImapIdle,
+                    ]),
+                })
+            }),
+        )
+        .await;
+    let mut imap = account.imap_client().await;
+
+    imap.send("GETACL INBOX").await;
+    imap.assert_read(Type::Tagged, ResponseType::No)
+        .await
+        .assert_response_code("NOPERM");
+    imap.send("CREATE Denied").await;
+    imap.assert_read(Type::Tagged, ResponseType::No)
+        .await
+        .assert_response_code("NOPERM");
+
+    // Commands run together as one batch are each refused with their own tag
+    imap.send_raw("c1 CREATE Denied1\r\n_x CREATE Denied2\r\n")
+        .await;
+    imap.assert_read(Type::Tagged, ResponseType::No)
+        .await
+        .assert_contains("c1 NO [NOPERM]")
+        .assert_response_code("NOPERM");
+
+    imap.send_ok("SELECT INBOX").await;
+    imap.send_raw("f1 FETCH 1 (FLAGS)\r\n_x FETCH 1 (FLAGS)\r\n")
+        .await;
+    imap.assert_read(Type::Tagged, ResponseType::No)
+        .await
+        .assert_contains("f1 NO [NOPERM]")
+        .assert_response_code("NOPERM");
+    imap.send("IDLE").await;
+    imap.assert_read(Type::Tagged, ResponseType::No)
+        .await
+        .assert_response_code("NOPERM");
+
+    // The session is still usable
+    imap.send_ok("NOOP").await;
+    imap.send("LIST \"\" \"*\"").await;
+    imap.assert_read(Type::Tagged, ResponseType::Ok)
+        .await
+        .assert_contains("INBOX")
+        .assert_not_contains("Denied");
+    imap.send("LOGOUT").await;
+    imap.assert_read(Type::Untagged, ResponseType::Bye).await;
+
+    admin.destroy_account(account).await;
 }

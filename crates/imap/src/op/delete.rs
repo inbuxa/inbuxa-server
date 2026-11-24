@@ -22,7 +22,9 @@ use std::time::Instant;
 impl<T: SessionStream> Session<T> {
     pub async fn handle_delete(&mut self, requests: Vec<Request<Command>>) -> trc::Result<()> {
         // Validate access
-        self.assert_has_permission(Permission::ImapDelete)?;
+        if let Err(err) = self.assert_has_permission(Permission::ImapDelete) {
+            return self.refuse_each(&requests, err).await;
+        }
         let permit = self.op_gate.acquire(OpKind::Write).await;
 
         let data = self.state.session_data();
