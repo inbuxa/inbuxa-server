@@ -104,6 +104,17 @@ Every changed file carries the AGPL 5(a) notice in its header.
   Upstream answered once for every `vacation` the script reached, up to
   `max_out_messages`. The `sieve_one_vacation_reply_per_message` test in
   `crates/common` covers it.
+- `src/runtime/actions/action_notify.rs`: a notify `mailto:` URI can't set
+  the header fields RFC 5436 (2.7) says to ignore, `From`,
+  `Auto-Submitted`, `Received`, `Date` and `Message-ID`, or the ones the
+  runtime writes about the message itself, `X-Sieve`, `Content-Type` and
+  `Content-Transfer-Encoding` (`URI_HEADERS_IGNORED`, compared by name, so a
+  parameter without a value is caught too). The notification always has
+  one `Auto-Submitted: auto-notified` and its own `Date` and `Message-ID`.
+  Upstream skipped only `From`, copied the rest (`?auto-submitted=no` gave
+  a second `Auto-Submitted`), and let a URI's `Date` or `Message-ID`
+  replace the generated one. The `sieve_notify_mailto_ignores_unsafe_uri_headers`
+  test in `crates/common` covers it.
 - `Cargo.toml`: the example target is dropped, with the top-level
   `examples/` and `tests/`, which the server never builds. (`src/` keeps its
   own `tests` modules: the crate declares them.)

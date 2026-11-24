@@ -656,4 +656,66 @@ if header :regex "x-h" "${p}" { discard; }
             assert!(created[0].ends_with("\r\n\r\naway"), "{}", created[0]);
         }
     }
+
+    // inbuxa: #581: a notify mailto URI doesn't set the header fields RFC 5436
+    // (2.7) says to ignore (From, Auto-Submitted, Received, Date, Message-ID)
+    // or the ones the server writes about the body itself (X-Sieve,
+    // Content-Type, Content-Transfer-Encoding); other URI headers still pass
+    #[test]
+    fn sieve_notify_mailto_ignores_unsafe_uri_headers() {
+        for uri in [
+            concat!(
+                "mailto:alerts@example.net?auto-submitted=no&received=from%20relay.example.net",
+                "&x-sieve=no&content-type=text/html&content-transfer-encoding=base64",
+                "&date=Mon,%201%20Jan%202001%2000:00:00%20+0000&message-id=<fixed@example.net>",
+                "&from=other@example.net&x-custom=kept"
+            ),
+            "mailto:alerts@example.net?x-custom=kept&received",
+            "mailto:alerts@example.net?x-custom=kept&Auto-Submitted",
+        ] {
+            let script = format!("require \"enotify\";\nnotify :message \"hi\" \"{uri}\";\n");
+            let (created, sent) = sieve_created_messages(&script);
+            assert_eq!((created.len(), sent), (1, 1), "{uri}");
+            let headers = created[0].split("\r\n\r\n").next().unwrap();
+            let lines = |name: &str| {
+                headers
+                    .split("\r\n")
+                    .filter(|line| {
+                        line.split_once(':')
+                            .is_some_and(|(n, _)| n.trim().eq_ignore_ascii_case(name))
+                    })
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(
+                lines("auto-submitted"),
+                ["Auto-Submitted: auto-notified"],
+                "{uri}\n{headers}"
+            );
+            assert_eq!(lines("x-sieve"), ["X-Sieve: yes"], "{uri}\n{headers}");
+            assert_eq!(
+                lines("content-type"),
+                ["Content-type: text/plain; charset=utf-8"],
+                "{uri}\n{headers}"
+            );
+            assert_eq!(
+                lines("from"),
+                ["From: john@example.com"],
+                "{uri}\n{headers}"
+            );
+            for name in ["received", "content-transfer-encoding"] {
+                assert!(lines(name).is_empty(), "{uri}\n{headers}");
+            }
+            let date = lines("date");
+            assert!(
+                date.len() == 1 && !date[0].contains("2001"),
+                "{uri}\n{headers}"
+            );
+            let message_id = lines("message-id");
+            assert!(
+                message_id.len() == 1 && !message_id[0].contains("fixed@"),
+                "{uri}\n{headers}"
+            );
+            assert_eq!(lines("x-custom"), ["x-custom: kept"], "{uri}\n{headers}");
+        }
+    }
 }
