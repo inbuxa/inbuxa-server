@@ -9,7 +9,7 @@
 use common::{
     config::server::ServerProtocol,
     expr::{self, functions::ResolveVariable, *},
-    network::SessionStream,
+    network::{SessionStream, write_stall::write_all_or_stall},
 };
 
 use compact_str::ToCompactString;
@@ -21,22 +21,49 @@ use smtp_proto::{
     },
     *,
 };
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
 use trc::{NetworkEvent, SecurityEvent, SmtpEvent};
 
 use crate::core::{Session, State};
 
 use super::auth::{AUTH_BEARER, SaslToken};
 
+/// inbuxa: how long a reply may stand still before the session's own
+/// timeout is known (a refusal at connect); the timeout's default
+const WRITE_STALL_BEFORE_PARAMS: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+
 impl<T: SessionStream> Session<T> {
     pub async fn ingest(&mut self, bytes: &[u8]) -> Result<bool, ()> {
         let mut iter = bytes.iter();
         let mut state = std::mem::replace(&mut self.state, State::None);
+        // inbuxa: a line the parser refused is answered once; what it left
+        // unread of the line (after AUTH and a tab, say) is dropped, not
+        // read as another command
+        let mut skip_rest = false;
 
         'outer: loop {
             match &mut state {
                 State::Request(receiver) => loop {
-                    match receiver.ingest(&mut iter) {
+                    if std::mem::take(&mut skip_rest) {
+                        let mut rest = DummyLineReceiver::default();
+                        if !rest.ingest(&mut iter) {
+                            state = State::SkipLine(rest);
+                            continue 'outer;
+                        }
+                    }
+                    // inbuxa: where this read starts, to tell whether the
+                    // parser stopped before the end of a line it refused
+                    let line_start = iter.as_slice();
+                    let result = receiver.ingest(&mut iter);
+                    skip_rest = matches!(
+                        &result,
+                        Err(err) if !matches!(
+                            err,
+                            Error::NeedsMoreData { .. } | Error::ResponseTooLong
+                        )
+                    ) && line_start[..line_start.len() - iter.as_slice().len()].last()
+                        != Some(&b'\n');
+                    match result {
                         Ok(request) => match request {
                             Request::Rcpt { to } => {
                                 self.handle_rcpt_to(to).await?;
@@ -116,6 +143,10 @@ impl<T: SessionStream> Session<T> {
 
                                     self.write(b"503 5.5.1 AUTH not allowed.\r\n").await?;
                                 } else if let Some(authenticated_as) = self.authenticated_as() {
+                                    // inbuxa: a session whose sign-in no longer
+                                    // holds is closed rather than told it is in
+                                    let authenticated_as = authenticated_as.to_string();
+                                    self.assert_sign_in_current().await?;
                                     trc::event!(
                                         Smtp(SmtpEvent::AlreadyAuthenticated),
                                         SpanId = self.data.session_id,
@@ -498,6 +529,13 @@ impl<T: SessionStream> Session<T> {
                         break 'outer;
                     }
                 }
+                State::SkipLine(receiver) => {
+                    if receiver.ingest(&mut iter) {
+                        state = State::default();
+                    } else {
+                        break 'outer;
+                    }
+                }
                 State::None | State::Accepted(_) => unreachable!(),
             }
         }
@@ -512,6 +550,7 @@ impl<T: AsyncWrite + AsyncRead + Unpin> Session<T> {
         self.data.mail_from = None;
         self.data.spf_mail_from = None;
         self.data.rcpt_to.clear();
+        self.data.expanded_lists.clear();
         self.data.message = Vec::with_capacity(0);
         self.data.priority = 0;
         self.data.delivery_by = 0;
@@ -533,27 +572,32 @@ impl<T: AsyncWrite + AsyncRead + Unpin> Session<T> {
 
     #[inline(always)]
     pub async fn write(&mut self, bytes: &[u8]) -> Result<(), ()> {
-        match self.stream.write_all(bytes).await {
-            Ok(_) => match self.stream.flush().await {
-                Ok(_) => {
-                    trc::event!(
-                        Smtp(SmtpEvent::RawOutput),
-                        SpanId = self.data.session_id,
-                        Size = bytes.len(),
-                        Contents = trc::Value::from_maybe_string(bytes),
-                    );
+        // inbuxa: a client that stops reading is dropped once the reply has
+        // stood still for the session's read timeout (SMTP-3)
+        let stall = if self.params.timeout.is_zero() {
+            WRITE_STALL_BEFORE_PARAMS
+        } else {
+            self.params.timeout
+        };
+        match write_all_or_stall(&mut self.stream, bytes, stall).await {
+            Ok(_) => {
+                trc::event!(
+                    Smtp(SmtpEvent::RawOutput),
+                    SpanId = self.data.session_id,
+                    Size = bytes.len(),
+                    Contents = trc::Value::from_maybe_string(bytes),
+                );
 
-                    Ok(())
-                }
-                Err(err) => {
-                    trc::event!(
-                        Network(NetworkEvent::FlushError),
-                        SpanId = self.data.session_id,
-                        Reason = err.to_string(),
-                    );
-                    Err(())
-                }
-            },
+                Ok(())
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::TimedOut => {
+                trc::event!(
+                    Network(NetworkEvent::Timeout),
+                    SpanId = self.data.session_id,
+                    Reason = err.to_string(),
+                );
+                Err(())
+            }
             Err(err) => {
                 trc::event!(
                     Network(NetworkEvent::WriteError),

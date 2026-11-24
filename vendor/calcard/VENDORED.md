@@ -45,6 +45,17 @@ Every changed file carries a Coffey Labs notice in its header.
   `dates.rs` cover it, and `rule_expansion_shares_one_budget` in
   `crates/groupware` fails to build if the server stops using this copy.
 
+- `src/icalendar/timezone.rs`: `add_missing_timezones` leaves an object
+  with at most `MAX_ADDED_TIMEZONES` (32) time zone definitions: it adds
+  definitions for the zones it names first, until the object holds 32,
+  and none for the rest. One event and its overrides name one to three
+  zones. The zones defined and named are looked up in sets. Upstream
+  generated a definition, a scan of the zone's rules over the event's
+  years, for every zone an object named, and checked each name against
+  lists, so an iTIP message naming hundreds of zones cost seconds and grew
+  the stored event by hundreds of definitions. The
+  `test_add_missing_timezones_is_capped` test in `timezone.rs` covers it.
+
 ## Updating
 
 When the server's `Cargo.lock` moves calcard to a new version, Cargo stops

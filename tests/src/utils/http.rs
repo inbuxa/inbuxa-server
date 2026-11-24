@@ -2,12 +2,19 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use hyper::Method;
 use reqwest::header::HeaderMap;
 use serde::{Serialize, de::DeserializeOwned};
 use std::time::Duration;
+use tokio::{
+    io::{AsyncRead, AsyncReadExt},
+    net::TcpStream,
+};
+use tokio_rustls::client::TlsStream;
 
 pub struct HttpRequest {
     pub port: u16,
@@ -169,8 +176,12 @@ impl HttpRequest {
             .unwrap()
             .request(method, format!("https://127.0.0.1:{}{query}", self.port));
 
+        // inbuxa: every body here is JSON, and the sign-in routes take no
+        // other type
         if let Some(body) = body {
-            request = request.body(body);
+            request = request
+                .header(hyper::header::CONTENT_TYPE, "application/json")
+                .body(body);
         }
 
         if let (Some(username), Some(password)) = (&self.username, &self.password) {
@@ -186,4 +197,44 @@ impl HttpRequest {
             .map(|bytes| String::from_utf8(bytes.to_vec()).unwrap())
             .map_err(|err| err.to_string())
     }
+}
+
+/// inbuxa: a TLS connection to the test HTTP listener, for requests no HTTP
+/// client sends: a head over the server's limits, a body that stops.
+pub async fn raw_https_connect() -> std::io::Result<TlsStream<TcpStream>> {
+    utils::tls::build_tls_connector(true)
+        .unwrap()
+        .connect(
+            rustls_pki_types::ServerName::try_from("localhost")
+                .unwrap()
+                .to_owned(),
+            TcpStream::connect("127.0.0.1:8899").await?,
+        )
+        .await
+}
+
+/// inbuxa: the status code of the HTTP response that arrives on `stream`
+/// within `wait`, or None when none does
+pub async fn read_http_status(
+    stream: &mut (impl AsyncRead + Unpin),
+    wait: Duration,
+) -> Option<u16> {
+    let mut head = Vec::new();
+    let mut byte = [0u8; 1];
+    tokio::time::timeout(wait, async {
+        while !head.ends_with(b"\r\n") && head.len() < 1024 {
+            match stream.read(&mut byte).await {
+                Ok(1) => head.push(byte[0]),
+                _ => break,
+            }
+        }
+    })
+    .await
+    .ok()?;
+    std::str::from_utf8(&head)
+        .ok()?
+        .strip_prefix("HTTP/1.1 ")?
+        .get(..3)?
+        .parse()
+        .ok()
 }

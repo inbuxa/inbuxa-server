@@ -126,7 +126,16 @@ pub struct Tracers {
 pub struct Metrics {
     pub prometheus: Option<PrometheusMetrics>,
     pub otel: Option<Arc<OtelMetrics>>,
-    pub log_path: Option<String>,
+    // inbuxa: where the log viewer reads, and which files there are the log
+    pub log_files: Option<LogFiles>,
+}
+
+/// inbuxa: the directory the first enabled Log tracer writes to, and the
+/// name its files start with
+#[derive(Debug, Clone, Default)]
+pub struct LogFiles {
+    pub path: String,
+    pub prefix: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -702,7 +711,7 @@ impl Metrics {
                 }
                 structs::MetricsOtel::Disabled => None,
             },
-            log_path: bp
+            log_files: bp
                 .list_infallible::<Tracer>()
                 .await
                 .into_iter()
@@ -710,7 +719,10 @@ impl Metrics {
                     if let Tracer::Log(log_tracer) = tracer.object
                         && log_tracer.enable
                     {
-                        Some(log_tracer.path)
+                        Some(LogFiles {
+                            path: log_tracer.path,
+                            prefix: log_tracer.prefix,
+                        })
                     } else {
                         None
                     }

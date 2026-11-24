@@ -21,10 +21,12 @@ use jmap_proto::{
 use std::future::Future;
 use std::net::IpAddr;
 use std::time::Instant;
-use store::write::now;
 use tokio_tungstenite::WebSocketStream;
 use trc::JmapEvent;
-use tungstenite::Message;
+use tungstenite::{
+    Message,
+    protocol::{CloseFrame, frame::coding::CloseCode},
+};
 use types::type_state::{DataType, StateChange};
 use utils::map::bitmap::Bitmap;
 
@@ -182,6 +184,22 @@ impl WebSocketHandler for Server {
                             last_request = Instant::now();
                             last_heartbeat = Instant::now();
                         }
+                        // inbuxa: over the size limit, told with 1009
+                        // (RFC 6455 §7.4.1) before the socket closes
+                        Ok(Some(Err(tungstenite::Error::Capacity(err)))) => {
+                            trc::event!(Jmap(JmapEvent::WebsocketError),
+                                                    Details = "Websocket message too big",
+                                                    SpanId = session.session_id,
+                                                    Reason = err.to_string()
+                                        );
+                            let _ = stream
+                                .close(Some(CloseFrame {
+                                    code: CloseCode::Size,
+                                    reason: "Message too big".into(),
+                                }))
+                                .await;
+                            break;
+                        }
                         Ok(Some(Err(err))) => {
                             trc::event!(Jmap(JmapEvent::WebsocketError),
                                                     Details = "Websocket error",
@@ -262,9 +280,11 @@ impl WebSocketHandler for Server {
                 // Send any queued changes
                 let elapsed = last_changes_sent.elapsed();
                 if elapsed >= throttle {
-                    // inbuxa: only while the session is still valid
-                    if let Err(err) =
-                        current_websocket_token(self, &access_token, session.remote_ip).await
+                    // inbuxa: only while the session is still valid and holds
+                    // what it held
+                    if let Err(err) = self
+                        .assert_session_current(&access_token, session.remote_ip)
+                        .await
                     {
                         end_websocket(&mut stream, err, session.session_id).await;
                         break;
@@ -318,32 +338,7 @@ async fn current_websocket_token(
     signed_in: &AccessToken,
     remote_ip: IpAddr,
 ) -> trc::Result<AccessToken> {
-    if signed_in
-        .expires_at()
-        .is_some_and(|expires_at| expires_at <= now())
-    {
-        return Err(trc::AuthEvent::TokenExpired.into_err());
-    }
-    let inner = server.access_token(signed_in.account_id()).await?;
-    if inner.is_locked() {
-        return Err(trc::AuthEvent::Failed
-            .into_err()
-            .details("Account is locked"));
-    }
-    // A session that signed in with an app password or API key ends when
-    // that credential goes, which renewing it below checks
-    if signed_in.credential_id().is_none()
-        && inner.credential_version() != signed_in.credential_version()
-    {
-        return Err(trc::AuthEvent::TokenExpired
-            .into_err()
-            .details("Credentials changed"));
-    }
-    AccessToken::renew(inner, signed_in.credential_id(), remote_ip).map(|access_token| {
-        access_token
-            .with_origin_arc(signed_in.origin_arc())
-            .with_expires_at(signed_in.expires_at())
-    })
+    server.renew_session_token(signed_in, remote_ip).await
 }
 
 /// inbuxa: tells the client its session is over and closes the socket.

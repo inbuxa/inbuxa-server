@@ -11,6 +11,7 @@ use crate::{
     core::{Session, SessionAddress},
     scripts::ScriptResult,
 };
+use ahash::AHashSet;
 use common::{
     KV_GREYLIST,
     config::smtp::session::Stage,
@@ -97,7 +98,11 @@ impl<T: SessionStream> Session<T> {
             dsn_info: to.orcpt.map(|e| e.into_owned()),
         };
 
-        if self.data.rcpt_to.contains(&rcpt) {
+        // inbuxa: a list this transaction already expanded is a duplicate
+        // too; its members are in the envelope and aren't looked up again
+        if self.data.rcpt_to.contains(&rcpt)
+            || self.data.expanded_lists.contains(&rcpt.address_lcase)
+        {
             trc::event!(
                 Smtp(SmtpEvent::RcptToDuplicate),
                 SpanId = self.data.session_id,
@@ -106,6 +111,7 @@ impl<T: SessionStream> Session<T> {
             self.data.rcpt_oks += 1;
             return self.write(b"250 2.1.5 OK\r\n").await;
         }
+        let rcpt_named = rcpt.address_lcase.clone();
         self.data.rcpt_to.push(rcpt);
 
         // Address rewriting and Sieve filtering
@@ -371,6 +377,7 @@ impl<T: SessionStream> Session<T> {
         // Expand list
         if let Some(members) = rcpt_members {
             let list_addr = self.data.rcpt_to.pop().unwrap();
+            let mut expanded = Vec::with_capacity(members.len());
             for member in members.as_ref() {
                 let member_lcase = member.to_lowercase();
                 let is_local = match self
@@ -412,15 +419,17 @@ impl<T: SessionStream> Session<T> {
                     }
                 };
 
-                let mut member_addr = SessionAddress::new(address);
-                if !self.data.rcpt_to.contains(&member_addr)
-                    && member_addr.address_lcase != list_addr.address_lcase
-                {
-                    member_addr.dsn_info = list_addr.address_lcase.clone().into();
-                    member_addr.flags = list_addr.flags;
-                    self.data.rcpt_to.push(member_addr);
-                }
+                expanded.push(SessionAddress::new(address));
             }
+
+            // release/2026 has no #529 refusal of a list that names no one
+            // but itself, so what this says about that isn't used here
+            add_list_members(&mut self.data.rcpt_to, &list_addr, expanded);
+
+            if list_addr.address_lcase != rcpt_named {
+                self.data.expanded_lists.push(rcpt_named);
+            }
+            self.data.expanded_lists.push(list_addr.address_lcase);
         }
 
         self.data.rcpt_oks += 1;
@@ -470,6 +479,77 @@ impl<T: SessionStream> Session<T> {
             self.write(b"451 4.3.0 Too many errors, disconnecting.\r\n")
                 .await?;
             Err(())
+        }
+    }
+}
+
+/// inbuxa: adds a mailing list's members to the envelope, in order,
+/// leaving out the list itself and anyone the envelope already has. Says
+/// whether the list named anyone but itself. The envelope's addresses go in
+/// a set once, so a list costs time in proportion to its size; comparing
+/// each member with the whole envelope made it the square.
+fn add_list_members(
+    rcpt_to: &mut Vec<SessionAddress>,
+    list_addr: &SessionAddress,
+    members: Vec<SessionAddress>,
+) -> bool {
+    let mut has_members = false;
+    let mut in_envelope = rcpt_to
+        .iter()
+        .map(|rcpt| rcpt.address_lcase.clone())
+        .collect::<AHashSet<_>>();
+    for mut member_addr in members {
+        if member_addr.address_lcase == list_addr.address_lcase {
+            continue;
+        }
+        has_members = true;
+        if in_envelope.insert(member_addr.address_lcase.clone()) {
+            member_addr.dsn_info = list_addr.address_lcase.clone().into();
+            member_addr.flags = list_addr.flags;
+            rcpt_to.push(member_addr);
+        }
+    }
+    has_members
+}
+
+#[cfg(test)]
+mod tests {
+    use super::add_list_members;
+    use crate::core::SessionAddress;
+    use std::time::{Duration, Instant};
+
+    // A large list is expanded in time in proportion to its size, keeping
+    // its order and leaving out the list itself and repeated addresses
+    #[test]
+    fn list_expansion_is_linear() {
+        const MEMBERS: usize = 50_000;
+        let list = SessionAddress::new("list@example.org".to_string());
+        let mut rcpt_to = vec![SessionAddress::new("Member7@example.org".to_string())];
+        let mut members = vec![SessionAddress::new("list@example.org".to_string())];
+        for i in 0..MEMBERS {
+            members.push(SessionAddress::new(format!("member{i}@example.org")));
+            if i % 10 == 0 {
+                members.push(SessionAddress::new(format!("MEMBER{i}@example.org")));
+            }
+        }
+
+        let started = Instant::now();
+        assert!(add_list_members(&mut rcpt_to, &list, members));
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "expanding {MEMBERS} members took {elapsed:?}"
+        );
+
+        assert_eq!(rcpt_to.len(), MEMBERS);
+        assert_eq!(rcpt_to[0].address, "Member7@example.org");
+        assert!(rcpt_to[0].dsn_info.is_none());
+        let expected = (0..MEMBERS)
+            .filter(|&i| i != 7)
+            .map(|i| format!("member{i}@example.org"));
+        for (member, expected) in rcpt_to[1..].iter().zip(expected) {
+            assert_eq!(member.address, expected);
+            assert_eq!(member.dsn_info.as_deref(), Some("list@example.org"));
         }
     }
 }

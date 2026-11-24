@@ -14,14 +14,15 @@ use registry::{
     schema::{
         enums::MtaInboundThrottleKey,
         structs::{
-            Expression, ExpressionMatch, MtaExtensions, MtaInboundThrottle, MtaStageRcpt, Rate,
+            Expression, ExpressionMatch, MailingList, MtaExtensions, MtaInboundThrottle,
+            MtaStageRcpt, Rate,
         },
     },
     types::{list::List, map::Map},
 };
 use smtp::core::State;
 use smtp_proto::{RCPT_NOTIFY_DELAY, RCPT_NOTIFY_FAILURE, RCPT_NOTIFY_SUCCESS};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[tokio::test]
 async fn rcpt() {
@@ -61,6 +62,21 @@ async fn rcpt() {
             .create_user_account(name, secret, description, aliases, vec![])
             .await;
     }
+
+    // inbuxa: a list large enough that expanding it takes measurable time
+    let domain_id = admin.find_or_create_domain("foobar.org").await;
+    admin
+        .registry_create_object(MailingList {
+            domain_id,
+            name: "big-list".into(),
+            recipients: Map::new(
+                (0..2000)
+                    .map(|i| format!("member{i}@example.com"))
+                    .collect::<Vec<_>>(),
+            ),
+            ..Default::default()
+        })
+        .await;
 
     // Add test settings
     admin.mta_no_auth().await;
@@ -257,4 +273,30 @@ async fn rcpt() {
     session
         .rcpt_to("nobody@xn--stra6-oqa.de", "550 5.1.2")
         .await;
+
+    // inbuxa: naming a list the transaction already expanded is answered as
+    // before, without looking up its members again
+    let mut session = test.new_mta_session();
+    session.data.remote_ip_str = "10.0.0.2".into();
+    session.eval_session_params().await;
+    session.ehlo("mx1.foobar.org").await;
+    session.mail_from("lists@example.net", "250").await;
+    let started = Instant::now();
+    session.rcpt_to("big-list@foobar.org", "250").await;
+    let first = started.elapsed();
+    let started = Instant::now();
+    for _ in 0..3 {
+        session.rcpt_to("Big-List@foobar.org", "250").await;
+    }
+    let repeats = started.elapsed();
+    assert_eq!(session.data.rcpt_to.len(), 2000);
+    assert!(
+        repeats < first / 2,
+        "expanding the list took {first:?}, naming it three more times {repeats:?}"
+    );
+    // A new transaction expands it again
+    session.rset().await;
+    session.mail_from("lists@example.net", "250").await;
+    session.rcpt_to("big-list@foobar.org", "250").await;
+    assert_eq!(session.data.rcpt_to.len(), 2000);
 }

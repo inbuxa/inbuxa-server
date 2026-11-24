@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use base64::{Engine, engine::general_purpose};
@@ -89,6 +91,16 @@ impl Pop3Connection {
                 }
                 Err(_) => panic!("Timeout while waiting for server response: {:?}", lines),
             }
+        }
+    }
+
+    /// inbuxa: the server has closed the connection (a TLS stream may end
+    /// without a close_notify, which reads as an error).
+    pub async fn assert_disconnect(&mut self) {
+        match tokio::time::timeout(Duration::from_millis(1500), self.reader.next_line()).await {
+            Ok(Ok(None)) | Ok(Err(_)) => {}
+            Ok(Ok(Some(line))) => panic!("Expected the connection to close, got {line:?}"),
+            Err(_) => panic!("Timeout while waiting for the connection to close."),
         }
     }
 

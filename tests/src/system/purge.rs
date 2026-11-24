@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::utils::{
@@ -205,8 +207,16 @@ pub async fn test(test: &mut TestServer) {
         .await;
 
     // Delete account
+    // inbuxa: an index task that runs while the account is destroyed, after
+    // its index was first cleared, leaves nothing of it in the index
+    let account_id = account.id().document_id();
+    services::task_manager::destroy_account::test_hooks::index_while_destroying(account_id);
     admin.destroy_account(account).await;
     test.wait_for_tasks().await;
+    assert!(
+        !services::task_manager::destroy_account::test_hooks::is_pending(account_id),
+        "the account was destroyed without indexing it on the way"
+    );
     test.assert_is_empty().await;
 
     // Reset settings

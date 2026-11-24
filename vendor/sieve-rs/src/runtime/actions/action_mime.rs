@@ -189,6 +189,33 @@ impl Enclose {
             })
             .unwrap_or_default();
 
+        // inbuxa: the new top level carries the Received headers of the
+        // message it encloses, so a redirect of it still counts their hops
+        // against the loop limit. Upstream started it with none, and a
+        // script that encloses and redirects looped between two accounts.
+        let received = ctx
+            .message
+            .parts
+            .first()
+            .map(|part| {
+                part.headers
+                    .iter()
+                    .filter(|header| header.name == HeaderName::Received)
+                    .filter_map(|header| {
+                        if header.offset_end != 0 {
+                            ctx.message
+                                .raw_message
+                                .get(header.offset_start as usize..header.offset_end as usize)
+                                .map(String::from_utf8_lossy)
+                        } else {
+                            header.value.as_text().map(Into::into)
+                        }
+                    })
+                    .map(|value| value.trim().remove_crlf(ctx.runtime.max_header_size))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
         let message = std::mem::take(&mut ctx.message);
         #[cfg(test)]
         let boundary = make_test_boundary();
@@ -241,6 +268,9 @@ impl Enclose {
             raw_message: b""[..].into(),
         };
 
+        for value in received {
+            ctx.insert_header(0, HeaderName::Received, value, true);
+        }
         ctx.insert_header(
             0,
             HeaderName::Other("Content-Type".into()),
@@ -593,4 +623,101 @@ pub(crate) fn make_test_boundary() -> String {
 #[cfg(test)]
 pub(crate) fn reset_test_boundary() {
     COUNTER.with(|c| c.replace(0));
+}
+
+// inbuxa: a message enclose builds keeps the Received headers of the message
+// it encloses, so the hop count goes with it when it's redirected
+#[cfg(test)]
+mod enclose_hop_tests {
+    use mail_parser::{HeaderName, MessageParser};
+
+    use crate::{Compiler, Context, Event, Input, Runtime};
+
+    const RECEIVED: &str = concat!(
+        "Received: from mx1.example.org (mx1.example.org [192.0.2.1])\r\n",
+        "\tby mx.example.com; Mon, 23 Nov 2026 10:00:00 +0000\r\n",
+        "Received: from a.example.org by mx1.example.org;\r\n",
+        " Mon, 23 Nov 2026 09:59:00 +0000\r\n",
+        "Received: by a.example.org; Mon, 23 Nov 2026 09:58:00 +0000\r\n",
+    );
+
+    // the messages a script sends, as the server receives them
+    fn sent(script: &str) -> Vec<Vec<u8>> {
+        let script = std::sync::Arc::new(Compiler::new().compile(script.as_bytes()).unwrap());
+        let raw = format!(
+            "{RECEIVED}From: sender@example.org\r\nTo: john@example.com\r\n\
+             Subject: hi\r\n\r\nbody\r\n"
+        );
+        let runtime = Runtime::new();
+        let mut ctx = Context::new(
+            &runtime,
+            MessageParser::new().parse(raw.as_bytes()).unwrap(),
+        )
+        .with_envelope(crate::Envelope::From, "sender@example.org")
+        .with_envelope(crate::Envelope::To, "john@example.com")
+        .with_user_address("john@example.com");
+        let mut input = Input::script("test", script);
+        let mut created = vec![raw.clone().into_bytes()];
+        let mut sent = Vec::new();
+        while let Some(event) = ctx.run(input) {
+            input = match event.unwrap() {
+                Event::CreatedMessage { message, .. } => {
+                    created.push(message);
+                    Input::True
+                }
+                Event::SendMessage { message_id, .. } => {
+                    sent.push(created[message_id].clone());
+                    Input::True
+                }
+                _ => Input::True,
+            };
+        }
+        sent
+    }
+
+    fn top_level_received(message: &[u8]) -> Vec<String> {
+        MessageParser::new()
+            .parse(message)
+            .unwrap()
+            .headers()
+            .iter()
+            .filter(|h| h.name == HeaderName::Received)
+            .map(|h| {
+                String::from_utf8_lossy(&message[h.offset_start as usize..h.offset_end as usize])
+                    .trim()
+                    .to_string()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn enclosed_and_redirected_message_keeps_the_hop_count() {
+        for script in [
+            "require \"enclose\";\nenclose \"wrapped\";\nredirect \"loop@example.net\";\n",
+            // twice over, the count doesn't double or vanish
+            "require \"enclose\";\nenclose \"one\";\nenclose \"two\";\nredirect \"loop@example.net\";\n",
+        ] {
+            let sent = sent(script);
+            assert_eq!(sent.len(), 1, "{script}");
+            let received = top_level_received(&sent[0]);
+            assert_eq!(
+                received.len(),
+                3,
+                "{script}\n{}",
+                String::from_utf8_lossy(&sent[0])
+            );
+            assert!(
+                received[0].starts_with("from mx1.example.org"),
+                "{received:?}"
+            );
+            assert!(received[2].starts_with("by a.example.org"), "{received:?}");
+            // each is one header line, no folding left that could break it
+            let text = String::from_utf8_lossy(&sent[0]).into_owned();
+            let headers = text.split("\r\n\r\n").next().unwrap();
+            assert!(
+                headers.lines().all(|l| !l.starts_with([' ', '\t'])),
+                "{headers}"
+            );
+        }
+    }
 }

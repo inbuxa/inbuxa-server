@@ -24,6 +24,8 @@ use types::id::Id;
 #[derive(Debug, Default)]
 pub struct CacheInvalidationBuilder {
     changes: AHashSet<CacheInvalidation>,
+    // inbuxa: accounts whose open sessions end here and on every node
+    end_sessions: AHashSet<u32>,
 }
 
 impl CacheInvalidationBuilder {
@@ -73,6 +75,13 @@ impl CacheInvalidationBuilder {
 
                 if was_renamed {
                     self.invalidate(CacheInvalidation::DavResources(id));
+                }
+
+                // inbuxa: sessions opened with the old password end at once
+                if current.password_credential().map(|c| &c.secret)
+                    != new.password_credential().map(|c| &c.secret)
+                {
+                    self.end_sessions(id);
                 }
             }
 
@@ -199,6 +208,7 @@ impl CacheInvalidationBuilder {
                 self.invalidate(CacheInvalidation::AccessToken(id));
                 self.invalidate(CacheInvalidation::Account(id));
                 self.invalidate(CacheInvalidation::DavResources(id));
+                self.end_sessions(id); // inbuxa
             }
             ObjectInner::Domain(_) => {
                 self.invalidate(CacheInvalidation::Domain(id));
@@ -258,6 +268,13 @@ impl CacheInvalidationBuilder {
         self.changes.insert(change);
     }
 
+    /// inbuxa: the account's open sessions end once the caches are
+    /// invalidated: IMAP IDLE, EventSource streams and WebSockets at once,
+    /// and other sessions at their next command, which finds the change.
+    pub fn end_sessions(&mut self, account_id: u32) {
+        self.end_sessions.insert(account_id);
+    }
+
     pub fn with_invalidation(mut self, change: CacheInvalidation) -> Self {
         self.invalidate(change);
         self
@@ -266,7 +283,10 @@ impl CacheInvalidationBuilder {
 
 impl Server {
     pub async fn invalidate_caches(&self, changes: CacheInvalidationBuilder) -> trc::Result<()> {
-        let mut changes = changes.changes;
+        let CacheInvalidationBuilder {
+            mut changes,
+            end_sessions,
+        } = changes;
         if changes.is_empty() {
             return Ok(());
         }
@@ -337,6 +357,18 @@ impl Server {
         self.invalidate_local_caches(&changes).await;
         self.cluster_broadcast(BroadcastEvent::CacheInvalidate(changes))
             .await;
+
+        // inbuxa: after the caches, so a session that checks finds the change
+        for account_id in end_sessions {
+            let _ = self
+                .inner
+                .ipc
+                .push_tx
+                .send(crate::ipc::PushEvent::Revoke { account_id })
+                .await;
+            self.cluster_broadcast(BroadcastEvent::EndSessions(account_id))
+                .await;
+        }
         Ok(())
     }
 

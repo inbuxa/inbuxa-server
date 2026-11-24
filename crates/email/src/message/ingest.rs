@@ -23,7 +23,7 @@ use groupware::{
     scheduling::{ItipError, ItipMessages},
 };
 use mail_parser::{
-    Header, HeaderName, HeaderValue, Message, MessageParser, MimeHeaders, PartType,
+    Header, HeaderName, HeaderValue, Message, MessageParser, MessagePart, MimeHeaders, PartType,
     parsers::fields::thread::thread_name,
 };
 use registry::{
@@ -395,15 +395,20 @@ impl EmailIngest for Server {
                         .build_account_info(account.clone())
                         .await
                         .caused_by(trc::location!())?;
-                    for part in &message.parts {
-                        if part.content_type().is_some_and(|ct| {
-                            ct.ctype().eq_ignore_ascii_case("text")
-                                && ct
-                                    .subtype()
-                                    .is_some_and(|st| st.eq_ignore_ascii_case("calendar"))
-                                && ct.has_attribute("method")
-                        }) && let Some(itip_message) = part.text_contents()
-                        {
+                    let (imip_parts, ignored) = imip_parts(&message.parts);
+                    if ignored > 0 {
+                        trc::event!(
+                            Calendar(trc::CalendarEvent::ItipMessageError),
+                            SpanId = params.session_id,
+                            From = sender.to_string(),
+                            AccountId = account_id,
+                            Details = "Too many iMIP parts, the rest are ignored",
+                            Limit = MAX_IMIP_PARTS,
+                            Total = MAX_IMIP_PARTS + ignored,
+                        );
+                    }
+                    for part in imip_parts {
+                        if let Some(itip_message) = part.text_contents() {
                             if itip_message.len() < self.core.groupware.itip_inbound_max_ical_size {
                                 match self
                                     .itip_ingest(&account_info, sender, deliver_to, itip_message)
@@ -987,6 +992,30 @@ impl EmailIngest for Server {
 // account slower than the last.
 pub const THREAD_SCAN_LIMIT: usize = 512;
 
+/// inbuxa: the most iMIP parts one message has processed.
+pub const MAX_IMIP_PARTS: usize = 4;
+
+/// inbuxa: the parts of a message that carry an iMIP message (a
+/// `text/calendar` part with a `method`), and how many more there were.
+fn imip_parts<'x>(parts: &'x [MessagePart<'x>]) -> (Vec<&'x MessagePart<'x>>, usize) {
+    let found = parts
+        .iter()
+        .filter(|part| {
+            part.content_type().is_some_and(|ct| {
+                ct.ctype().eq_ignore_ascii_case("text")
+                    && ct
+                        .subtype()
+                        .is_some_and(|st| st.eq_ignore_ascii_case("calendar"))
+                    && ct.has_attribute("method")
+            })
+        })
+        .collect::<Vec<_>>();
+    // inbuxa: real iMIP mail carries one, or the same one twice (inline and
+    // attached); every part found costs a full iTIP run
+    let ignored = found.len().saturating_sub(MAX_IMIP_PARTS);
+    (found.into_iter().take(MAX_IMIP_PARTS).collect(), ignored)
+}
+
 pub fn has_message_id(a: &[CheekyHash], b: &[u8]) -> bool {
     let mut i = 0;
     let mut j = 0;
@@ -1108,5 +1137,54 @@ impl ThreadMerge {
             thread_id: max_thread_id,
             merge_ids,
         }
+    }
+}
+
+#[cfg(test)]
+mod imip_tests {
+    use super::{MAX_IMIP_PARTS, imip_parts};
+    use mail_parser::MessageParser;
+
+    fn message(calendar_parts: usize) -> String {
+        let mut raw = String::from(concat!(
+            "From: organizer@example.org\r\nTo: john@example.com\r\n",
+            "Subject: invitations\r\nMIME-Version: 1.0\r\n",
+            "Content-Type: multipart/mixed; boundary=\"b\"\r\n\r\n",
+            "--b\r\nContent-Type: text/plain\r\n\r\nhello\r\n",
+            "--b\r\nContent-Type: text/calendar\r\n\r\nno method\r\n",
+        ));
+        for i in 0..calendar_parts {
+            raw.push_str(&format!(
+                "--b\r\nContent-Type: text/calendar; method=REQUEST; charset=utf-8\r\n\r\n\
+                 BEGIN:VCALENDAR\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nUID:event-{i}\r\n\
+                 END:VEVENT\r\nEND:VCALENDAR\r\n"
+            ));
+        }
+        raw.push_str("--b--\r\n");
+        raw
+    }
+
+    // inbuxa: one message runs at most MAX_IMIP_PARTS iTIP messages
+    #[test]
+    fn imip_parts_per_message_are_capped() {
+        let raw = message(20);
+        let parsed = MessageParser::new().parse(raw.as_bytes()).unwrap();
+        let (parts, ignored) = imip_parts(&parsed.parts);
+        assert_eq!(
+            parts.len(),
+            MAX_IMIP_PARTS,
+            "{} iMIP parts run",
+            parts.len()
+        );
+        assert_eq!(ignored, 20 - MAX_IMIP_PARTS);
+        // the first ones, in order
+        let first = parts[0].text_contents().unwrap();
+        assert!(first.contains("UID:event-0"), "{first}");
+
+        // an invitation sent the usual way, inline and attached, runs both
+        let raw = message(2);
+        let parsed = MessageParser::new().parse(raw.as_bytes()).unwrap();
+        let (parts, ignored) = imip_parts(&parsed.parts);
+        assert_eq!((parts.len(), ignored), (2, 0));
     }
 }

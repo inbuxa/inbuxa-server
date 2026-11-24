@@ -35,6 +35,14 @@ pub mod permissions;
 pub mod rate_limit;
 
 pub const RECOVERY_ADMIN_ID: u32 = u32::MAX;
+
+/// inbuxa: how often a session that waits without commands (IMAP IDLE, an
+/// EventSource stream) checks that its sign-in is still valid.
+pub const SESSION_RECHECK_INTERVAL: std::time::Duration = if cfg!(feature = "test_mode") {
+    std::time::Duration::from_secs(1)
+} else {
+    std::time::Duration::from_secs(60)
+};
 const PERMISSIONS_BITSET_SIZE: usize = Permission::COUNT.div_ceil(std::mem::size_of::<usize>());
 pub type Permissions = Bitset<PERMISSIONS_BITSET_SIZE>;
 

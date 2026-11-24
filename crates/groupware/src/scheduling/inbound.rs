@@ -741,28 +741,16 @@ fn merge_timezones(ical: &mut ICalendar, itip: &ICalendar) {
         })
         .unwrap_or(root.component_ids.len());
 
+    let mut tz_ids = TimezoneIds::of(ical);
     for tz in itip.timezones() {
         let Some(tz_id) = timezone_id(tz) else {
             continue;
         };
 
-        let mut is_referenced = false;
-        for component in &ical.components {
-            if component.component_type == ICalendarComponentType::VTimezone {
-                if timezone_id(component) == Some(tz_id) {
-                    is_referenced = false;
-                    break;
-                }
-            } else if !is_referenced {
-                is_referenced = component
-                    .entries
-                    .iter()
-                    .any(|entry| entry.tz_id() == Some(tz_id));
-            }
-        }
-        if !is_referenced {
+        if !tz_ids.is_missing(tz_id) {
             continue;
         }
+        tz_ids.defined.insert(tz_id.to_string());
 
         let tz_component_id = ical.components.len() as u32;
         ical.components.reserve(tz.component_ids.len() + 1);
@@ -794,6 +782,44 @@ fn merge_timezones(ical: &mut ICalendar, itip: &ICalendar) {
     ical.add_missing_timezones();
 }
 
+// inbuxa: the time zones a calendar defines and the ones it refers to,
+// gathered in one pass. Looking a zone up by scanning the calendar again for
+// every VTIMEZONE of an iTIP message took time in the product of their sizes.
+struct TimezoneIds {
+    defined: AHashSet<String>,
+    referenced: AHashSet<String>,
+}
+
+impl TimezoneIds {
+    fn of(ical: &ICalendar) -> Self {
+        let mut ids = TimezoneIds {
+            defined: AHashSet::new(),
+            referenced: AHashSet::new(),
+        };
+        for component in &ical.components {
+            if component.component_type == ICalendarComponentType::VTimezone {
+                if let Some(tz_id) = timezone_id(component) {
+                    ids.defined.insert(tz_id.to_string());
+                }
+            } else {
+                ids.referenced.extend(
+                    component
+                        .entries
+                        .iter()
+                        .filter_map(|entry| entry.tz_id())
+                        .map(str::to_string),
+                );
+            }
+        }
+        ids
+    }
+
+    // Whether the calendar refers to a time zone it has no definition for
+    fn is_missing(&self, tz_id: &str) -> bool {
+        self.referenced.contains(tz_id) && !self.defined.contains(tz_id)
+    }
+}
+
 fn timezone_id(component: &ICalendarComponent) -> Option<&str> {
     component
         .property(&ICalendarProperty::Tzid)
@@ -820,4 +846,93 @@ pub fn itip_method(ical: &ICalendar) -> Result<&ICalendarMethod, ItipError> {
             })
         })
         .ok_or(ItipError::MissingMethod)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::itip_merge_changes;
+    use calcard::icalendar::{ICalendar, ICalendarComponentType};
+    use std::time::{Duration, Instant};
+
+    fn timezone_ids(ical: &ICalendar) -> Vec<String> {
+        ical.timezones()
+            .filter_map(super::timezone_id)
+            .map(str::to_string)
+            .collect()
+    }
+
+    // inbuxa: copying an iTIP message's VTIMEZONEs onto the stored event takes
+    // one pass over each, not a pass over the event for every one of them
+    #[test]
+    fn itip_timezone_copy_is_linear() {
+        const ZONES: usize = 40_000;
+        let mut stored = String::from("BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:x\r\n");
+        let mut itip = String::from("BEGIN:VCALENDAR\r\nMETHOD:REQUEST\r\n");
+        for i in 0..ZONES {
+            stored.push_str(&format!("X-NOTE;TZID=Zone/N{i}:x\r\n"));
+            itip.push_str(&format!(
+                "BEGIN:VTIMEZONE\r\nTZID:Zone/N{i}\r\nBEGIN:STANDARD\r\n\
+                 DTSTART:19700101T000000\r\nTZOFFSETFROM:+0000\r\nTZOFFSETTO:+0000\r\n\
+                 END:STANDARD\r\nEND:VTIMEZONE\r\n"
+            ));
+        }
+        stored.push_str("END:VEVENT\r\nEND:VCALENDAR\r\n");
+        // a zone the event doesn't use, and one sent twice, are not copied
+        itip.push_str(concat!(
+            "BEGIN:VTIMEZONE\r\nTZID:Zone/Unused\r\nEND:VTIMEZONE\r\n",
+            "BEGIN:VTIMEZONE\r\nTZID:Zone/N0\r\nEND:VTIMEZONE\r\n",
+            "BEGIN:VEVENT\r\nUID:x\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+        ));
+        let mut ical = ICalendar::parse(&stored).unwrap();
+        let itip = ICalendar::parse(&itip).unwrap();
+
+        let started = Instant::now();
+        itip_merge_changes(&mut ical, &itip, vec![]);
+        let elapsed = started.elapsed();
+
+        let ids = timezone_ids(&ical);
+        assert_eq!(ids.len(), ZONES);
+        assert_eq!(ids.first().map(String::as_str), Some("Zone/N0"));
+        assert_eq!(
+            ids.last().map(String::as_str),
+            Some(format!("Zone/N{}", ZONES - 1).as_str())
+        );
+        // every definition is ahead of the event, with its observance
+        let root = &ical.components[0];
+        let first_event = root
+            .component_ids
+            .iter()
+            .position(|id| {
+                ical.components[*id as usize].component_type == ICalendarComponentType::VEvent
+            })
+            .unwrap();
+        assert_eq!(first_event, ZONES);
+        assert!(ical.timezones().all(|tz| tz.component_ids.len() == 1));
+        assert!(
+            elapsed < Duration::from_secs(20),
+            "copying {ZONES} zones took {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn itip_timezone_copy_keeps_existing_definitions() {
+        let mut ical = ICalendar::parse(concat!(
+            "BEGIN:VCALENDAR\r\n",
+            "BEGIN:VTIMEZONE\r\nTZID:Zone/Kept\r\nEND:VTIMEZONE\r\n",
+            "BEGIN:VEVENT\r\nUID:x\r\nDTSTART;TZID=Zone/Kept:20260101T100000\r\n",
+            "DTEND;TZID=Zone/New:20260101T110000\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+        ))
+        .unwrap();
+        let itip = ICalendar::parse(concat!(
+            "BEGIN:VCALENDAR\r\nMETHOD:REQUEST\r\n",
+            "BEGIN:VTIMEZONE\r\nTZID:Zone/Kept\r\nX-FROM:itip\r\nEND:VTIMEZONE\r\n",
+            "BEGIN:VTIMEZONE\r\nTZID:Zone/New\r\nX-FROM:itip\r\nEND:VTIMEZONE\r\n",
+            "BEGIN:VEVENT\r\nUID:x\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+        ))
+        .unwrap();
+        itip_merge_changes(&mut ical, &itip, vec![]);
+        assert_eq!(timezone_ids(&ical), ["Zone/Kept", "Zone/New"]);
+        let text = ical.to_string();
+        assert_eq!(text.matches("X-FROM:itip").count(), 1, "{text}");
+    }
 }

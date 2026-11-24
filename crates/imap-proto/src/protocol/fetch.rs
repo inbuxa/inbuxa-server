@@ -79,6 +79,23 @@ pub enum Section {
     Mime,
 }
 
+impl DataItem<'_> {
+    /// inbuxa: how many bytes of the message the item carries
+    pub fn contents_len(&self) -> usize {
+        match self {
+            DataItem::Binary { contents, .. } => match contents {
+                BodyContents::Text(text) => text.len(),
+                BodyContents::Bytes(bytes) => bytes.len(),
+            },
+            DataItem::BodySection { contents, .. } => contents.len(),
+            DataItem::Rfc822 { contents }
+            | DataItem::Rfc822Header { contents }
+            | DataItem::Rfc822Text { contents } => contents.len(),
+            _ => 0,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DataItem<'x> {
     Binary {

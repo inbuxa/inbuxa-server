@@ -494,8 +494,13 @@ impl<T: SessionStream> SessionData<T> {
                 let mut items = Vec::with_capacity(arguments.attributes.len());
                 let set_seen_flag =
                     set_seen_flags && !message_cache.has_keyword(data, &Keyword::Seen);
+                // inbuxa: the answer for one message is built whole before it
+                // is written, so it holds at most four copies of the message
+                let answer_limit = (data.size as usize).saturating_mul(4) + 64 * 1024;
+                let mut answer_size = 0usize;
 
                 for attribute in &arguments.attributes {
+                    let items_before = items.len();
                     match attribute {
                         Attribute::Envelope => {
                             items.push(DataItem::Envelope {
@@ -628,6 +633,21 @@ impl<T: SessionStream> SessionData<T> {
                                 ..Default::default()
                             }));
                         }
+                    }
+
+                    answer_size += items[items_before..]
+                        .iter()
+                        .map(DataItem::contents_len)
+                        .sum::<usize>();
+                    if answer_size > answer_limit {
+                        return Err(trc::ImapEvent::Error
+                            .into_err()
+                            .details(format!(
+                                "The answer for message {} would hold more than four copies of it.",
+                                if is_uid { uid } else { seqnum }
+                            ))
+                            .code(ResponseCode::Limit)
+                            .id(arguments.tag.clone()));
                     }
                 }
 

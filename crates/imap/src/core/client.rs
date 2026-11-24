@@ -95,6 +95,21 @@ impl<T: SessionStream> Session<T> {
 
         let mut requests = requests.into_iter().peekable();
         while let Some(request) = requests.next() {
+            // inbuxa: a session ends at its next command once the sign-in it
+            // was opened with is no longer valid, or the account has lost
+            // permissions or shares it holds
+            if let State::Authenticated { data } | State::Selected { data, .. } = &self.state
+                && let Err(err) = self
+                    .server
+                    .assert_session_current(&data.access_token, self.remote_addr)
+                    .await
+            {
+                trc::error!(err.span_id(self.session_id));
+                let _ = self
+                    .write_bytes(&b"* BYE Session no longer authorized.\r\n"[..])
+                    .await;
+                return SessionResult::Close;
+            }
             // inbuxa: ST-6: commands that only read may be served by a read
             // replica; any write they make still goes to the primary
             let replica_accounts = match (&request.command, &self.state) {

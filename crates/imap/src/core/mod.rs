@@ -199,19 +199,12 @@ impl<T: SessionStream> State<T> {
 
 impl<T: SessionStream> SessionData<T> {
     pub async fn refresh_access_token(&self) -> trc::Result<AccessToken> {
+        // inbuxa: AL-3: a session opened before its account was locked is
+        // refused from its next command, as is one whose sign-in has
+        // otherwise stopped being valid
         self.server
-            .access_token(self.account_id)
+            .renew_session_token(&self.access_token, self.remote_addr)
             .await
-            .and_then(|inner| {
-                // inbuxa: AL-3: a session opened before its account was
-                // locked is refused from its next command
-                if inner.is_locked() {
-                    return Err(trc::AuthEvent::Failed
-                        .into_err()
-                        .details("Account is locked"));
-                }
-                AccessToken::renew(inner, self.access_token.credential_id(), self.remote_addr)
-            })
             .caused_by(trc::location!())
     }
 

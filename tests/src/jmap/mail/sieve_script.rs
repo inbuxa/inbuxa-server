@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
@@ -14,7 +16,11 @@ use jmap_client::{
     email, mailbox,
     sieve::query::{Comparator, Filter},
 };
-use registry::schema::{prelude::ObjectType, structs::SieveUserScript};
+use mail_auth::{common::parse::TxtRecordParser, spf::Spf};
+use registry::schema::{
+    prelude::{ObjectType, Property},
+    structs::{Expression, SenderAuth, SieveUserScript},
+};
 use std::{
     fs,
     path::PathBuf,
@@ -288,6 +294,33 @@ pub async fn test(test: &TestServer) {
         Instant::now() + Duration::from_secs(10),
     );
 
+    // inbuxa: a rejection goes back only to a return path this server
+    // verified. Here LMTP checks SPF: remote.org passes, foobar.com fails
+    admin
+        .registry_update_setting(
+            SenderAuth {
+                spf_from_verify: Expression {
+                    else_: "relaxed".into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            &[Property::SpfFromVerify],
+        )
+        .await;
+    admin.reload_settings().await;
+    for (domain, record) in [
+        ("remote.org", &b"v=spf1 ip4:127.0.0.1 -all"[..]),
+        ("foobar.com", &b"v=spf1 -all"[..]),
+    ] {
+        server.txt_add(
+            domain,
+            Spf::parse(record).unwrap(),
+            Instant::now() + Duration::from_secs(3600),
+        );
+    }
+    let mut lmtp = SmtpConnection::connect().await;
+
     // Run reject and duplicate check tests
     lmtp.ingest(
         "bill@remote.org",
@@ -432,6 +465,70 @@ pub async fn test(test: &TestServer) {
     )
     .await;
 
+    // inbuxa: mail from a sender that failed SPF is rejected without a
+    // rejection notice (it would go to whoever was forged), and isn't stored
+    client
+        .sieve_script_create(
+            "test_reject_forged",
+            concat!(
+                "require \"reject\";\r\n",
+                "reject \"Not accepted here.\";\r\n"
+            )
+            .as_bytes()
+            .to_vec(),
+            true,
+        )
+        .await
+        .unwrap();
+    let stored = client
+        .email_query(None::<email::query::Filter>, None::<Vec<_>>)
+        .await
+        .unwrap()
+        .ids()
+        .len();
+    for sender in ["victim@foobar.com", ""] {
+        lmtp.ingest(
+            sender,
+            &["jdoe@example.com"],
+            concat!(
+                "From: victim@foobar.com\r\n",
+                "To: jdoe@example.com\r\n",
+                "Subject: Backscatter\r\n",
+                "\r\n",
+                "Bounce this to the forged sender."
+            ),
+        )
+        .await;
+    }
+    // the next rejection to arrive is the one for the verified sender
+    lmtp.ingest(
+        "bill@remote.org",
+        &["jdoe@example.com"],
+        concat!(
+            "From: bill@remote.org\r\n",
+            "To: jdoe@example.com\r\n",
+            "Subject: Verified\r\n",
+            "\r\n",
+            "Reject this one with a notice."
+        ),
+    )
+    .await;
+    assert_message_delivery(
+        &mut smtp_rx,
+        MockMessage::new("<>", ["<bill@remote.org>"], "@Not accepted here"),
+    )
+    .await;
+    assert_eq!(
+        client
+            .email_query(None::<email::query::Filter>, None::<Vec<_>>)
+            .await
+            .unwrap()
+            .ids()
+            .len(),
+        stored,
+        "A rejected message was stored."
+    );
+
     // Run enclose + redirect tests
     client
         .sieve_script_create(
@@ -568,6 +665,10 @@ pub async fn test(test: &TestServer) {
     admin
         .registry_destroy_all(ObjectType::SieveUserScript)
         .await;
+    admin
+        .registry_update_setting(SenderAuth::default(), &[Property::SpfFromVerify])
+        .await;
+    admin.reload_settings().await;
     test.assert_is_empty().await;
 }
 

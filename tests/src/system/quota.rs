@@ -103,6 +103,59 @@ pub async fn test(test: &mut TestServer) {
     // Delete temporary blobs from previous tests
     test.blob_expire_all().await;
 
+    // inbuxa: an upload to another account's /jmap/upload/{accountId} is
+    // refused before it is stored or counted against that account. user3 has
+    // no Impersonate and isn't a member of user1.
+    let third_account_id = admin
+        .registry_create_object(structs::Account::User(UserAccount {
+            name: "user3".to_string(),
+            domain_id,
+            credentials: List::from_iter([Credential::Password(PasswordCredential {
+                secret: "this is a very strong password3".to_string(),
+                ..Default::default()
+            })]),
+            ..Default::default()
+        }))
+        .await;
+    let third_account = Account::new(
+        "user3@example.org",
+        "this is a very strong password3",
+        &[],
+        "User3",
+        third_account_id,
+    );
+    DISABLE_UPLOAD_QUOTA.store(false, std::sync::atomic::Ordering::Relaxed);
+    let third_http =
+        HttpRequest::with_credentials(8899, "user3@example.org", "this is a very strong password3");
+    let own = third_http
+        .send_full(
+            hyper::Method::POST,
+            &format!("/jmap/upload/{third_account_id}"),
+            Some(b"own account".to_vec()),
+            Some("application/octet-stream"),
+        )
+        .await;
+    assert_eq!(own.status.as_u16(), 200, "own upload body: {}", own.body);
+    for _ in 0..3 {
+        let foreign = third_http
+            .send_full(
+                hyper::Method::POST,
+                &format!("/jmap/upload/{account_id}"),
+                Some(vec![b'X'; 1024]),
+                Some("application/octet-stream"),
+            )
+            .await;
+        assert_eq!(
+            foreign.status.as_u16(),
+            403,
+            "foreign upload body: {}",
+            foreign.body
+        );
+    }
+    // user1's own three uploads below still fit its three-file limit, so
+    // the refused uploads weren't counted against it.
+    test.blob_expire_all().await;
+
     // Test temporary blob quota (3 files)
     DISABLE_UPLOAD_QUOTA.store(false, std::sync::atomic::Ordering::Relaxed);
     let client = account.jmap_client().await;
@@ -491,6 +544,7 @@ pub async fn test(test: &mut TestServer) {
     test.wait_for_tasks().await;
     test.destroy_all_mailboxes(&account).await;
     test.destroy_all_mailboxes(&other_account).await;
+    test.destroy_all_mailboxes(&third_account).await;
     admin.registry_destroy_all(ObjectType::QueuedMessage).await;
     admin
         .registry_destroy_all(ObjectType::SpamTrainingSample)
@@ -498,9 +552,12 @@ pub async fn test(test: &mut TestServer) {
     test.assert_is_empty().await;
 
     admin
-        .registry_destroy(ObjectType::Account, [account_id, other_account_id])
+        .registry_destroy(
+            ObjectType::Account,
+            [account_id, other_account_id, third_account_id],
+        )
         .await
-        .assert_destroyed(&[account_id, other_account_id]);
+        .assert_destroyed(&[account_id, other_account_id, third_account_id]);
 
     // inbuxa: put the upload limits back; with a one-second upload lifetime
     // the next suite's uploads can expire before their import under load

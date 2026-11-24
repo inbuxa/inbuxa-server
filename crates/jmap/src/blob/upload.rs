@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use super::{UploadResponse, download::BlobDownload};
@@ -203,6 +205,17 @@ impl BlobUpload for Server {
         data: &[u8],
         access_token: &AccessToken,
     ) -> trc::Result<UploadResponse> {
+        // inbuxa: an upload is stored under, and charged to, the account in the
+        // path, so only that account's owner, a member or an impersonator may
+        // use it (the same rule as Blob/upload). Checked before anything is
+        // counted.
+        if !access_token.is_member(account_id.document_id()) {
+            return Err(trc::SecurityEvent::Unauthorized
+                .into_err()
+                .ctx(trc::Key::AccountId, access_token.account_id())
+                .details(format!("You are not an owner of account {account_id}")));
+        }
+
         // Limit concurrent uploads
         let _in_flight = self
             .is_upload_allowed(access_token)

@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
@@ -13,10 +15,12 @@ use crate::{
 };
 use common::{
     BuildServer,
-    network::{SessionData, SessionManager, SessionResult, SessionStream},
+    network::{
+        SessionData, SessionManager, SessionResult, SessionStream, write_stall::write_all_or_stall,
+    },
 };
 use std::borrow::Cow;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncReadExt;
 use tokio_rustls::server::TlsStream;
 
 impl SessionManager for Pop3SessionManager {
@@ -160,18 +164,21 @@ impl<T: SessionStream> Session<T> {
             Contents = trc::Value::from_maybe_string(bytes),
         );
 
-        self.stream.write_all(bytes.as_ref()).await.map_err(|err| {
-            trc::NetworkEvent::WriteError
-                .into_err()
-                .reason(err)
-                .caused_by(trc::location!())
-        })?;
-        self.stream.flush().await.map_err(|err| {
-            trc::NetworkEvent::WriteError
-                .into_err()
-                .reason(err)
-                .caused_by(trc::location!())
-        })
+        // inbuxa: a client that stops reading is dropped once the answer has
+        // stood still for the session's read timeout
+        let stall = if !matches!(self.state, State::NotAuthenticated { .. }) {
+            self.server.core.imap.timeout_auth
+        } else {
+            self.server.core.imap.timeout_unauth
+        };
+        write_all_or_stall(&mut self.stream, bytes, stall)
+            .await
+            .map_err(|err| {
+                trc::NetworkEvent::WriteError
+                    .into_err()
+                    .reason(err)
+                    .caused_by(trc::location!())
+            })
     }
 
     pub async fn write_ok(&mut self, message: impl Into<Cow<'static, str>>) -> trc::Result<()> {

@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use super::stream::WebSocketHandler;
@@ -12,7 +14,10 @@ use hyper_util::rt::TokioIo;
 use std::future::Future;
 use tokio_tungstenite::WebSocketStream;
 use trc::JmapEvent;
-use tungstenite::{handshake::derive_accept_key, protocol::Role};
+use tungstenite::{
+    handshake::derive_accept_key,
+    protocol::{Role, WebSocketConfig},
+};
 
 pub trait WebSocketUpgrade: Sync + Send {
     fn upgrade_websocket_connection(
@@ -72,6 +77,12 @@ impl WebSocketUpgrade for Server {
             }
         };
 
+        // inbuxa: a message, or a frame, over the request size limit is
+        // refused as its header arrives, not once it is all in memory
+        let config = WebSocketConfig::default()
+            .max_message_size(Some(self.core.jmap.request_max_size))
+            .max_frame_size(Some(self.core.jmap.request_max_size));
+
         // Spawn WebSocket connection
         let jmap = self.clone();
         tokio::spawn(async move {
@@ -84,7 +95,7 @@ impl WebSocketUpgrade for Server {
                             WebSocketStream::from_raw_socket(
                                 TokioIo::new(upgraded),
                                 Role::Server,
-                                None,
+                                Some(config),
                             )
                             .await,
                             access_token,

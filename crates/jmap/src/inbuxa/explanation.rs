@@ -494,24 +494,26 @@ a negative one toward legitimate mail. The result follows the total against the 
         Subject::LogEntry { log_id } => {
             let not_found =
                 || SetError::not_found().with_description("That log entry isn't on this node.");
-            let (Some(path), Ok(id)) = (server.core.metrics.log_path.clone(), Id::from_str(log_id))
+            let (Some(files), Ok(id)) =
+                (server.core.metrics.log_files.clone(), Id::from_str(log_id))
             else {
                 return Ok(Err(not_found()));
             };
-            let entries =
-                tokio::task::spawn_blocking(move || read_log_entries(path, Some(vec![id]), 1))
-                    .await
-                    .map_err(|err| {
-                        trc::EventType::Server(trc::ServerEvent::ThreadError)
-                            .reason(err)
-                            .caused_by(trc::location!())
-                    })?
-                    .map_err(|err| {
-                        trc::EventType::Telemetry(trc::TelemetryEvent::LogError)
-                            .reason(err)
-                            .details("Failed to read log files")
-                            .caused_by(trc::location!())
-                    })?;
+            let entries = tokio::task::spawn_blocking(move || {
+                read_log_entries(&files.path, &files.prefix, Some(vec![id]), 1)
+            })
+            .await
+            .map_err(|err| {
+                trc::EventType::Server(trc::ServerEvent::ThreadError)
+                    .reason(err)
+                    .caused_by(trc::location!())
+            })?
+            .map_err(|err| {
+                trc::EventType::Telemetry(trc::TelemetryEvent::LogError)
+                    .reason(err)
+                    .details("Failed to read log files")
+                    .caused_by(trc::location!())
+            })?;
             let Some((_, log)) = entries.into_iter().next() else {
                 return Ok(Err(not_found()));
             };
