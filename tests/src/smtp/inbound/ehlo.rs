@@ -2,12 +2,15 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
     smtp::session::{TestSession, VerifyResponse},
     utils::{dns::DnsCache, server::TestServerBuilder},
 };
+use common::config::smtp::auth::VerifyStrategy;
 use mail_auth::{SpfResult, common::parse::TxtRecordParser, spf::Spf};
 use mail_parser::DateTime;
 use registry::{
@@ -170,4 +173,22 @@ async fn ehlo() {
         .assert_not_contains("MT-PRIORITY")
         .assert_not_contains("FUTURERELEASE")
         .assert_not_contains("STARTTLS");
+
+    // inbuxa: SMTP-5: a session names at most five EHLO domains, since each
+    // new one starts an SPF check; the sixth gets 421 and the session ends.
+    // Naming the current one again doesn't count.
+    let mut session = test.new_mta_session();
+    session.data.remote_ip_str = "10.0.0.3".into();
+    session.data.remote_ip = session.data.remote_ip_str.parse().unwrap();
+    session.eval_session_params().await;
+    session.params.spf_ehlo = VerifyStrategy::Disable;
+    for i in 1..=5 {
+        session.cmd(&format!("EHLO h{i}.foobar.org"), "250").await;
+        session.cmd(&format!("EHLO h{i}.foobar.org"), "250").await;
+    }
+    assert!(
+        session.ingest(b"EHLO h6.foobar.org\r\n").await.is_err(),
+        "the session went on after a sixth EHLO domain"
+    );
+    session.response().assert_code("421 4.7.0");
 }

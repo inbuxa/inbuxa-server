@@ -19,11 +19,31 @@ use std::{
 };
 use trc::SmtpEvent;
 
+/// inbuxa: SMTP-5: how many EHLO or HELO domains one session may name.
+/// Each new one starts an SPF check; a client names one, and again the same
+/// one after STARTTLS.
+const MAX_HELO_DOMAINS: usize = 5;
+
 impl<T: SessionStream> Session<T> {
     pub async fn handle_ehlo(&mut self, domain: Cow<'_, str>, is_extended: bool) -> Result<(), ()> {
         // Set EHLO domain
 
         if domain != self.data.helo_domain {
+            self.data.helo_domains += 1;
+            if self.data.helo_domains > MAX_HELO_DOMAINS {
+                trc::event!(
+                    Limit(trc::LimitEvent::TooManyRequests),
+                    SpanId = self.data.session_id,
+                    Domain = domain.as_ref().to_string(),
+                    Limit = MAX_HELO_DOMAINS,
+                    Details = "Too many EHLO domains",
+                );
+
+                self.write(b"421 4.7.0 Too many EHLO domains, closing connection.\r\n")
+                    .await?;
+                return Err(());
+            }
+
             // Reject non-FQDN EHLO domains - simply checks that the hostname has at least one dot
             if self.params.ehlo_reject_non_fqdn && !domain.as_ref().has_valid_labels() {
                 trc::event!(

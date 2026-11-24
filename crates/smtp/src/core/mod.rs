@@ -72,6 +72,8 @@ pub struct SessionData {
     pub remote_port: u16,
     pub asn_geo_data: AsnGeoLookupResult,
     pub helo_domain: String,
+    // inbuxa: SMTP-5: EHLO and HELO domains the session has named
+    pub helo_domains: usize,
 
     pub mail_from: Option<SessionAddress>,
     pub rcpt_to: Vec<SessionAddress>,
@@ -176,6 +178,7 @@ impl SessionData {
             remote_port,
             asn_geo_data,
             helo_domain: String::new(),
+            helo_domains: 0,
             mail_from: None,
             rcpt_to: Vec::new(),
             authenticated_as: None,
@@ -305,6 +308,7 @@ impl SessionData {
             session_id,
             asn_geo_data: AsnGeoLookupResult::default(),
             helo_domain: "localhost".into(),
+            helo_domains: 0,
             mail_from,
             rcpt_to,
             rcpt_errors: 0,
