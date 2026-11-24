@@ -176,8 +176,12 @@ impl HttpRequest {
             .unwrap()
             .request(method, format!("https://127.0.0.1:{}{query}", self.port));
 
+        // inbuxa: every body here is JSON, and the sign-in routes take no
+        // other type
         if let Some(body) = body {
-            request = request.body(body);
+            request = request
+                .header(hyper::header::CONTENT_TYPE, "application/json")
+                .body(body);
         }
 
         if let (Some(username), Some(password)) = (&self.username, &self.password) {

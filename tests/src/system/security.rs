@@ -829,6 +829,126 @@ async fn send_raw(request: &[u8]) -> Option<Option<u16>> {
     Some(crate::utils::http::read_http_status(&mut stream, Duration::from_secs(5)).await)
 }
 
+/// inbuxa: `POST /api/auth` takes a password.
+/// A page on another site can POST there without a preflight only with a
+/// type such as `text/plain`, so anything but `application/json` is refused
+/// with a 415 and counts toward no ban. JSON sign-ins still count.
+///
+/// Runs alone: `cargo test -p tests api_content_type_tests -- --ignored`.
+#[ignore]
+#[tokio::test(flavor = "multi_thread")]
+pub async fn api_content_type_tests() {
+    let test = crate::utils::server::TestServerBuilder::new("api_content_type_tests")
+        .await
+        .with_default_listeners()
+        .await
+        .build()
+        .await;
+    println!("Running sign-in content type tests...");
+    let admin = test.create_admin_account("admin@example.com").await;
+    admin
+        .registry_update_setting(
+            registry::schema::structs::Security {
+                auth_ban_rate: Some(registry::schema::structs::Rate {
+                    count: 3,
+                    period: registry::types::duration::Duration::from_millis(86_400_000),
+                }),
+                ..Default::default()
+            },
+            &[Property::AuthBanRate],
+        )
+        .await;
+    admin.reload_settings().await;
+
+    let localhost: std::net::IpAddr = Ipv4Addr::LOCALHOST.into();
+    let ban = || async {
+        test.server
+            .registry()
+            .primary_key(
+                ObjectType::BlockedIp.into(),
+                Property::Address,
+                IpAddrOrMask::from_ip(localhost).to_index_key(),
+            )
+            .await
+            .unwrap()
+    };
+    let login = json!({
+        "type": "authCode",
+        "accountName": "admin@example.com",
+        "accountSecret": "not the password",
+        "clientId": "content-type-test",
+        "redirectUri": "com.example.app:/cb",
+        "codeChallenge": "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+        "codeChallengeMethod": "S256",
+    })
+    .to_string();
+
+    for content_type in [
+        Some("text/plain"),
+        Some("text/plain;charset=UTF-8"),
+        Some("application/x-www-form-urlencoded"),
+        Some("multipart/form-data; boundary=x"),
+        Some("application/json-patch+json"),
+        Some("application/jsonx"),
+        None,
+    ] {
+        let status = post_typed("/api/auth", content_type, &login).await;
+        assert_eq!(status, 415, "/api/auth with {content_type:?}");
+        assert!(
+            ban().await.is_none() && !test.server.is_ip_blocked(localhost),
+            "a {content_type:?} sign-in counted toward the ban"
+        );
+    }
+
+    // JSON is answered, and its failed sign-ins are counted as before
+    for content_type in [
+        "application/json",
+        "Application/JSON",
+        "application/json; charset=utf-8",
+    ] {
+        let status = post_typed("/api/auth", Some(content_type), &login).await;
+        assert_ne!(status, 415, "{content_type}");
+    }
+    for _ in 0..3 {
+        post_typed("/api/auth", Some("application/json"), &login).await;
+    }
+    let blocked_id = ban()
+        .await
+        .expect("failed JSON sign-ins should still ban the address");
+    let blocked_ip = test
+        .server
+        .registry()
+        .object::<BlockedIp>(blocked_id.id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(blocked_ip.reason, BlockReason::AuthFailure);
+
+    if test.is_reset() {
+        test.temp_dir.delete();
+    }
+}
+
+/// POSTs `body` to `path` with `content_type` (none when None); the status,
+/// or 0 when the server turned the connection away
+async fn post_typed(path: &str, content_type: Option<&str>, body: &str) -> u16 {
+    let mut request = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .danger_accept_invalid_certs(true)
+        .pool_max_idle_per_host(0)
+        .build()
+        .unwrap()
+        .post(format!("https://127.0.0.1:8899{path}"))
+        .body(body.to_string());
+    if let Some(content_type) = content_type {
+        request = request.header("Content-Type", content_type);
+    }
+    request
+        .send()
+        .await
+        .map_or(0, |response| response.status().as_u16())
+}
+
 /// GETs `path` on a new connection, with `Sec-Fetch-Site: site` when given,
 /// following redirects; the final status, or an error when the server
 /// turned the connection away

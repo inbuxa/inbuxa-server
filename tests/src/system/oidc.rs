@@ -1452,6 +1452,7 @@ async fn post_json_raw(url: &str, body: &impl Serialize) -> (u16, serde_json::Va
         .build()
         .unwrap_or_default()
         .post(url)
+        .header("Content-Type", "application/json")
         .body(serde_json::to_string(body).unwrap().into_bytes())
         .send()
         .await
