@@ -396,6 +396,49 @@ if header :regex "x-h" "${p}" { discard; }
         }
     }
 
+    // inbuxa: #543: no vacation reply to mail the spam filter classified as
+    // spam (the 50% the server files into Junk), whatever its headers say
+    #[test]
+    fn sieve_spam_gets_no_vacation_reply() {
+        let runtime = sieve::Runtime::new();
+        let script = std::sync::Arc::new(
+            sieve::Compiler::new()
+                .compile(b"require \"vacation\";\nvacation \"away\";\n")
+                .unwrap(),
+        );
+        let replies = |percentage: Option<u8>| {
+            let message =
+                "From: sender@example.org\r\nTo: john@example.com\r\nSubject: hi\r\n\r\nbody\r\n";
+            let mut ctx = runtime
+                .filter(message.as_bytes())
+                .with_envelope(sieve::Envelope::From, "sender@example.org")
+                .with_envelope(sieve::Envelope::To, "john@example.com")
+                .with_user_address("john@example.com")
+                .with_spam_status(crate::config::mailstore::spamfilter::spam_status(
+                    percentage,
+                ));
+            let mut input = sieve::Input::script("test", script.clone());
+            let mut sent = false;
+            while let Some(event) = ctx.run(input) {
+                input = match event.unwrap() {
+                    sieve::Event::SendMessage { .. } => {
+                        sent = true;
+                        sieve::Input::True
+                    }
+                    sieve::Event::DuplicateId { .. } => sieve::Input::False,
+                    _ => sieve::Input::True,
+                };
+            }
+            sent
+        };
+        for percentage in [None, Some(0), Some(25), Some(49)] {
+            assert!(replies(percentage), "{percentage:?}");
+        }
+        for percentage in [Some(50), Some(75), Some(99), Some(100)] {
+            assert!(!replies(percentage), "{percentage:?}");
+        }
+    }
+
     // inbuxa: a test is true when any key matches (RFC 5229, 5260), whatever
     // the keys' order, and :regex on a date part is a regular expression,
     // not a wildcard pattern

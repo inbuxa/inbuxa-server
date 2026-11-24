@@ -425,6 +425,7 @@ impl SieveScriptIngest for Server {
                         ..
                     } => {
                         input = true.into();
+                        let is_redirect = message_id == instance.main_message_id();
                         if let Some(message) = messages.get(message_id) {
                             if received_headers >= self.core.sieve.max_received_headers {
                                 trc::event!(
@@ -472,6 +473,11 @@ impl SieveScriptIngest for Server {
                                     sender_address: mail_from.clone(),
                                     recipients,
                                     message: raw_message,
+                                    // inbuxa: a redirected copy keeps this
+                                    // recipient's spam verdict
+                                    spam_percentage: is_redirect
+                                        .then_some(envelope_to.spam_percentage)
+                                        .flatten(),
                                 });
                                 do_redirect = true;
                             } else {

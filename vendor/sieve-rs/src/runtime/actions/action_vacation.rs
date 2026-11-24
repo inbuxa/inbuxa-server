@@ -12,7 +12,7 @@ use mail_builder::headers::{date::Date, message_id::generate_message_id_header};
 use mail_parser::{HeaderName, HeaderValue};
 
 use crate::{
-    Context, Envelope, Event, Recipient,
+    Context, Envelope, Event, Recipient, SpamStatus,
     compiler::grammar::{
         AddressPart,
         actions::{
@@ -35,12 +35,30 @@ pub(crate) fn is_auto_submitted(value: &HeaderValue) -> bool {
         .is_none_or(|v| !v.eq_ignore_ascii_case("no"))
 }
 
+// inbuxa: the server sets a percentage, p / 100; 50% is its spam threshold
+pub(crate) fn is_spam(status: &SpamStatus) -> bool {
+    match status {
+        SpamStatus::Spam => true,
+        SpamStatus::MaybeSpam(fraction) => *fraction >= 0.5,
+        SpamStatus::Unknown | SpamStatus::Ham => false,
+    }
+}
+
 impl TestVacation {
     pub(crate) fn exec(&self, ctx: &mut Context) -> TestResult {
         let mut from = String::new();
         let mut user_addresses = Vec::new();
 
         if ctx.num_out_messages >= ctx.runtime.max_out_messages {
+            return TestResult::Bool(false);
+        }
+
+        // inbuxa: no reply to mail the server's spam filter classified as
+        // spam: 50% or more, what the server files into Junk. Its sender is
+        // most likely forged, so a reply goes to a bystander or confirms the
+        // address to a spammer. The status comes from the filter's verdict,
+        // not from a header the sender wrote.
+        if is_spam(&ctx.spam_status) {
             return TestResult::Bool(false);
         }
 

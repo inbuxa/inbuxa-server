@@ -12,7 +12,10 @@ use crate::{
     spawn_op,
 };
 use common::{auth::BuildAccessToken, ipc::PushNotification, network::SessionStream};
-use email::message::ingest::{EmailIngest, IngestEmail, IngestSource};
+use email::{
+    mailbox::JUNK_ID,
+    message::ingest::{EmailIngest, IngestEmail, IngestSource},
+};
 use imap_proto::{
     Command, ResponseCode, StatusResponse,
     protocol::{append::Arguments, select::HighestModSeq},
@@ -125,6 +128,15 @@ impl<T: SessionStream> SessionData<T> {
         let mut created_ids = Vec::with_capacity(arguments.messages.len());
         let mut last_change_id = None;
         for message in arguments.messages {
+            // inbuxa: an upload trains the spam classifier only when the
+            // client says what the message is ($Junk, $NotJunk) or puts it
+            // in Junk, as Email/import does. A plain upload to the Inbox (a
+            // mailbox migration, say) is no verdict on the message.
+            let keywords: Vec<Keyword> = message.flags.into_iter().map(Keyword::from).collect();
+            let train_classifier = mailbox_id == JUNK_ID
+                || keywords
+                    .iter()
+                    .any(|k| matches!(k, Keyword::Junk | Keyword::NotJunk));
             match self
                 .server
                 .email_ingest(IngestEmail {
@@ -133,11 +145,9 @@ impl<T: SessionStream> SessionData<T> {
                     blob_hash: None,
                     access_token: &access_token,
                     mailbox_ids: vec![mailbox_id],
-                    keywords: message.flags.into_iter().map(Keyword::from).collect(),
+                    keywords,
                     received_at: message.received_at.map(|d| d as u64),
-                    source: IngestSource::Imap {
-                        train_classifier: true,
-                    },
+                    source: IngestSource::Imap { train_classifier },
                     session_id: self.session_id,
                 })
                 .await

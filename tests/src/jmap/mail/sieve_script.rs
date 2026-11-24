@@ -2,11 +2,17 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
     jmap::mail::submission::{MockMessage, assert_message_delivery, spawn_mock_smtp_server},
     utils::{dns::DnsCache, server::TestServer, smtp::SmtpConnection},
+};
+use ::email::{
+    cache::{MessageCacheFetch, email::MessageCacheAccess},
+    mailbox::{INBOX_ID, JUNK_ID},
 };
 use jmap_client::{
     Error,
@@ -14,7 +20,13 @@ use jmap_client::{
     email, mailbox,
     sieve::query::{Comparator, Filter},
 };
-use registry::schema::{prelude::ObjectType, structs::SieveUserScript};
+use registry::{
+    schema::{
+        prelude::ObjectType,
+        structs::{SieveUserScript, SpamTag, SpamTagScore},
+    },
+    types::float::Float,
+};
 use std::{
     fs,
     path::PathBuf,
@@ -556,6 +568,73 @@ pub async fn test(test: &TestServer) {
         }
         panic!("Email {:?} not found in: {:#?}", subject, emails);
     }
+
+    // inbuxa: #542: a redirect to a local account keeps the spam verdict of
+    // the recipient whose script redirected it: the copy goes to the
+    // target's Junk, not its Inbox
+    let gtube_score = admin
+        .registry_create_object(SpamTag::Score(SpamTagScore {
+            score: Float::new(1000.0),
+            tag: "GTUBE_TEST".to_string(),
+        }))
+        .await;
+    admin.reload_settings().await;
+    client
+        .sieve_script_create(
+            "test_redirect_local",
+            b"redirect \"bill@example.com\";".to_vec(),
+            true,
+        )
+        .await
+        .unwrap();
+    let bill = test.account("bill@example.com");
+    let bill_id = bill.id().document_id();
+    let in_mailbox = |mailbox_id: u32| {
+        let server = server.clone();
+        async move {
+            server
+                .get_cached_messages(bill_id)
+                .await
+                .unwrap()
+                .in_mailbox(mailbox_id)
+                .count()
+        }
+    };
+    let bill_inbox = in_mailbox(INBOX_ID).await;
+    let bill_junk = in_mailbox(JUNK_ID).await;
+    let mut lmtp = SmtpConnection::connect().await;
+    lmtp.ingest(
+        "spammer@remote.org",
+        &["jdoe@example.com"],
+        concat!(
+            "From: spammer@remote.org\r\n",
+            "To: jdoe@example.com\r\n",
+            "Subject: XJS*C4JDBQADN1.NSBN3*2IDNEN*GTUBE-STANDARD-ANTI-UBE-TEST-EMAIL*C.34X\r\n",
+            "\r\n",
+            "Redirected spam."
+        ),
+    )
+    .await;
+    lmtp.quit().await;
+    let started = Instant::now();
+    while in_mailbox(INBOX_ID).await + in_mailbox(JUNK_ID).await == bill_inbox + bill_junk {
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the redirected message didn't arrive"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(
+        (in_mailbox(INBOX_ID).await, in_mailbox(JUNK_ID).await),
+        (bill_inbox, bill_junk + 1),
+        "the redirected spam wasn't filed in the target's Junk"
+    );
+    admin
+        .registry_destroy(ObjectType::SpamTag, [gtube_score])
+        .await
+        .assert_destroyed(&[gtube_score]);
+    admin.reload_settings().await;
+    test.destroy_all_mailboxes(bill).await;
 
     // Remove test data
     client.sieve_script_deactivate().await.unwrap();

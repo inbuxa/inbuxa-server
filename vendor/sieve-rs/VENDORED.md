@@ -86,6 +86,17 @@ Every changed file carries the AGPL 5(a) notice in its header.
   isn't a field name, or whose address holds a control (a `%0D%0A`), is
   refused. The `header_injection_tests` in `action_editheader.rs` cover it
   (run like `scan_limit_tests`).
+- `src/runtime/context.rs`: `Context::main_message_id()` returns the id of
+  the inbound message as the script left it (0, or its edited copy), so the
+  server can tell a redirect (a `SendMessage` of that message) from a
+  vacation reply or a notification, which send messages of their own. A
+  redirected copy keeps the spam verdict of the recipient who redirected it.
+  The delivery test in the system suite covers it.
+- `src/runtime/actions/action_vacation.rs`: vacation stays silent for mail
+  the server's spam filter classified as spam: a spam status of 50% or more,
+  which the server sets from its own verdict, the line at which it files mail
+  into Junk. Before, spam was answered, and replies went to forged senders.
+  The `sieve_spam_gets_no_vacation_reply` test in `crates/common` covers it.
 - `Cargo.toml`: the example target is dropped, with the top-level
   `examples/` and `tests/`, which the server never builds. (`src/` keeps its
   own `tests` modules: the crate declares them.)
