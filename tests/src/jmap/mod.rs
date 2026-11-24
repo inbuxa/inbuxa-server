@@ -204,6 +204,7 @@ pub async fn jmap_tests() {
 
     core::event_source::test(&test).await;
     core::websocket::test(&test).await;
+    core::request_limits::test(&test).await;
     core::push_subscription::test(&test).await;
     core::blob::test(&test).await;
 
