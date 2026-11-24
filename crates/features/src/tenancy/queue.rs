@@ -9,11 +9,16 @@
 //! A message one of its own people sent (an authenticated sender whose
 //! return path is on the tenant's domains) is the tenant's whole, until it
 //! leaves the queue: every recipient, the content, and deleting it.
-//! A message that only has recipients on the tenant's domains shows the
-//! tenant those recipients and nothing of the others, who may be another
-//! tenant's or the sender's blind copies; the tenant cancels or retries
-//! delivery to its own recipients only, and can't download the content or
-//! delete the message. Nothing else in the queue is visible to it.
+//! A message whose recipients are all on the tenant's domains is the
+//! tenant's whole too: nothing in it belongs to another tenant.
+//! A message that also has recipients elsewhere shows the tenant its own
+//! recipients and nothing of the others, who may be another tenant's or the
+//! sender's blind copies; the tenant cancels or retries delivery to its own
+//! recipients only, and can't download the content or delete the message.
+//! Nothing else in the queue is visible to it.
+//!
+//! Where the sender connected from is shown only with the whole message,
+//! and never when the sender was another tenant's signed-in person.
 
 use ahash::AHashSet;
 use registry::schema::{prelude::ObjectType, structs::Domain};
@@ -56,7 +61,8 @@ pub enum QueueReach {
     Nothing,
     /// Its own recipients only.
     OwnRecipients,
-    /// All of it: one of the tenant's people sent it.
+    /// All of it: one of the tenant's people sent it, or every recipient
+    /// is the tenant's.
     Whole,
 }
 
@@ -72,16 +78,46 @@ pub fn reach<'x>(
     return_path: &str,
     from_authenticated: bool,
 ) -> QueueReach {
-    if from_authenticated && is_own_recipient(domains, return_path) {
-        QueueReach::Whole
-    } else if recipients
-        .into_iter()
-        .any(|rcpt| is_own_recipient(domains, rcpt))
-    {
-        QueueReach::OwnRecipients
-    } else {
-        QueueReach::Nothing
+    if sent_by_tenant(domains, return_path, from_authenticated) {
+        return QueueReach::Whole;
     }
+    let (mut any_own, mut all_own) = (false, true);
+    for rcpt in recipients {
+        if is_own_recipient(domains, rcpt) {
+            any_own = true;
+        } else {
+            all_own = false;
+        }
+    }
+    match (any_own, all_own) {
+        (true, true) => QueueReach::Whole,
+        (true, false) => QueueReach::OwnRecipients,
+        _ => QueueReach::Nothing,
+    }
+}
+
+/// Whether one of the tenant's own people sent the message: an
+/// authenticated sender whose return path is on the tenant's domains.
+pub fn sent_by_tenant(
+    domains: &AHashSet<String>,
+    return_path: &str,
+    from_authenticated: bool,
+) -> bool {
+    from_authenticated && is_own_recipient(domains, return_path)
+}
+
+/// Whether a tenant that reaches a message this far is shown where its
+/// sender connected from: only with the whole message, and not when the
+/// sender signed in here as someone outside the tenant, whose address that
+/// is.
+pub fn shows_client_ip(
+    reach: QueueReach,
+    domains: &AHashSet<String>,
+    return_path: &str,
+    from_authenticated: bool,
+) -> bool {
+    reach == QueueReach::Whole
+        && (!from_authenticated || sent_by_tenant(domains, return_path, from_authenticated))
 }
 
 #[cfg(test)]
@@ -94,10 +130,29 @@ mod tests {
 
     #[test]
     fn addressed_to_the_tenant() {
-        // Observed 4: mail to the tenant's domain from anyone, but only the
-        // tenant's own recipients of it
+        // Mail to the tenant's domains only is the tenant's whole, from
+        // anyone
         assert_eq!(
             reach(&domains(), ["a@T.example"], "x@u.example", false),
+            QueueReach::Whole
+        );
+        assert_eq!(
+            reach(
+                &domains(),
+                ["a@t.example", "c@t.example"],
+                "x@u.example",
+                true
+            ),
+            QueueReach::Whole
+        );
+        // Observed 4: with recipients elsewhere too, only the tenant's own
+        assert_eq!(
+            reach(
+                &domains(),
+                ["a@t.example", "b@u.example"],
+                "x@u.example",
+                false
+            ),
             QueueReach::OwnRecipients
         );
         assert_eq!(
@@ -126,9 +181,42 @@ mod tests {
             QueueReach::Nothing
         );
         assert_eq!(
-            reach(&domains(), ["a@t.example"], "a@t.example", false),
+            reach(
+                &domains(),
+                ["a@t.example", "b@u.example"],
+                "a@t.example",
+                false
+            ),
             QueueReach::OwnRecipients
         );
+    }
+
+    #[test]
+    fn client_ip() {
+        let d = domains();
+        // The tenant's own sent mail, and mail from outside to it alone
+        assert!(shows_client_ip(QueueReach::Whole, &d, "a@t.example", true));
+        assert!(shows_client_ip(
+            QueueReach::Whole,
+            &d,
+            "x@remote.example",
+            false
+        ));
+        // Another tenant's signed-in person, even to the tenant alone
+        assert!(!shows_client_ip(QueueReach::Whole, &d, "x@u.example", true));
+        // Never with only some recipients
+        assert!(!shows_client_ip(
+            QueueReach::OwnRecipients,
+            &d,
+            "x@remote.example",
+            false
+        ));
+        assert!(!shows_client_ip(
+            QueueReach::Nothing,
+            &d,
+            "a@t.example",
+            true
+        ));
     }
 
     #[test]
