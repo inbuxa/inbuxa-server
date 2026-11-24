@@ -604,7 +604,17 @@ impl Http {
                     format!("https://{server_name}")
                 }
             } else {
-                String::new()
+                // inbuxa: #560: recovery and bootstrap mode's own address
+                // when one is set (boot has refused one that isn't a URL);
+                // without it their URLs stay relative
+                crate::manager::listener_ports::recovery_mode_url(
+                    types::branding::env_var("RECOVERY_MODE_URL")
+                        .ok()
+                        .as_deref(),
+                )
+                .ok()
+                .flatten()
+                .unwrap_or_default()
             },
             allowed_endpoint: if bp.registry.is_recovery_mode() {
                 IfBlock::empty(ObjectType::Http.singleton(), Property::AllowedEndpoints)
