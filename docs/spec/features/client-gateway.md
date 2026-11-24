@@ -1,9 +1,11 @@
 # Feature spec: client access through inbuxa-relay
 
-Status: design note, 2026-11-19, revised 2026-11-21 to cover both modes.
-Open questions answered 2026-11-21 (all as recommended). Still a
-suggestion: not approved, not planned, not scheduled. inbuxa-server #484
-(milestone 27.7), discussed on the forum (t/340). It builds on
+Status: design note, 2026-11-19, revised 2026-11-21 to cover both modes
+and 2026-11-24 for sign-in choices through a terminating relay (t/340 post
+11). Questions 1 to 13 answered 2026-11-21 (all as recommended); 14 is
+open. Still a suggestion: not approved, not planned, not scheduled.
+inbuxa-server #484 (milestone 27.7), discussed on the forum (t/340). It
+builds on
 `features/relay.md` and doesn't change any of that spec's rules.
 
 ## Provenance
@@ -70,9 +72,14 @@ exposed too, which is why terminating mode refuses them (CG-7).
 | A compromised relay sees | Addresses, names, timing | All of that, plus content and session tokens while it's held |
 | A parser exploit lands on | The server | The relay |
 | Protocols | 443, 993, 465 (995 with legacy on) | 443 (JMAP, webmail, DAV) at first |
-| Sign-in | Anything the server allows, end to end | Passkeys and relay-bound tokens only (CG-7, CG-8) |
+| Sign-in | Anything the server allows, end to end | Chosen per relay; no password crosses it in the clear (CG-7, CG-13, CG-14) |
 | Certificates for client names | Only on the downstream | A short-lived one on the relay, key made there (CG-9) |
 | Fits | Few users, or content that matters more than the server | Many users, or a server that matters more than one session |
+
+Pass-through is also the answer where rules require two-factor sign-in.
+The relay never sees the sign-in, so OAuth with a second factor,
+OAUTHBEARER on IMAP and submission, passkeys, and the server's own token
+lifetimes all work exactly as they would on a direct connection.
 
 Neither is wrong. Which one is worth more depends on what is being
 protected. For one person on their own server, a taken relay and a taken
@@ -84,7 +91,8 @@ clean (see "Detection and response").
 
 **Recommendation: both, chosen per port, pass-through by default.**
 Pass-through is built first. Terminating comes second, for 443 only at
-first, as its own build of the relay (see "Footprint").
+first, as its own build of the relay (see "Footprint"). The one mix within
+a port: a terminating 443 can pass the sign-in name through (CG-13).
 
 ## Rules
 
@@ -121,11 +129,14 @@ Terminating:
   requests it has parsed in full and written out again in one canonical
   form. No byte from the client reaches the downstream unparsed. Anything
   it can't parse, or that is ambiguous, is refused at the relay.
-- **CG-7. No reusable secret.** A terminating port refuses password
+- **CG-7. No reusable secret.** A terminating name refuses password
   sign-in: HTTP Basic, the OAuth password form, and any other form that
-  sends a password. Sign-in is by passkey, or with a token already bound to
-  this relay (CG-8). A passkey assertion is bound to its challenge and
-  can't be replayed, so a relay that sees one gains nothing lasting.
+  sends a password. Sign-in is by passkey, by the server's normal sign-in
+  done on a name the relay doesn't terminate (CG-13), or with a token
+  already bound to this relay (CG-8). Which of these a relay accepts is
+  chosen per relay (see "Sign-in through a terminating relay"). A passkey
+  assertion is bound to its challenge and can't be replayed, so a relay
+  that sees one gains nothing lasting.
 - **CG-8. Sessions belong to a relay generation.** Every token issued
   through a terminating relay carries the relay's id and generation, and
   the server accepts it only through that relay and generation. A new
@@ -153,6 +164,17 @@ Terminating:
 - **CG-12. Can be cut off at once.** The downstream can quarantine a relay
   in one step, from inbuxa-admin or with an API key that holds only that
   permission (see "Detection and response").
+- **CG-13. The sign-in page is never terminated.** When a relay offers the
+  server's normal sign-in, the server's authorization pages are served on
+  a name of their own that the relay passes through (CG-1), even on a
+  relay whose other 443 names terminate. The password and second factor go
+  end to end to the server, as in pass-through. Only the token that comes
+  out of it is used on the terminating name, bound to the relay (CG-8).
+- **CG-14. Tokens through a terminating relay are short.** Each relay has
+  its own cap on how long a session issued through it lasts, refreshes
+  included, set in inbuxa-admin. Default 12 hours. After that the client
+  signs in again. The server's normal token lifetimes are unchanged for
+  everything else.
 
 ## How a connection goes
 
@@ -249,9 +271,37 @@ still needs.
 and SMTP submission parser in the relay (the workspace's own `imap-proto`
 and `smtp-proto` would do; a bug in the shared parser then fires on the
 relay, and the server only sees the rebuilt command). The harder part is
-sign-in: IMAP and submission clients send passwords, which CG-7 forbids.
-App passwords could stand in, bound to the relay like tokens (CG-8). Listed
-as an open question.
+sign-in: most IMAP and submission clients send passwords, which CG-7
+forbids. Clients that can do OAuth (OAUTHBEARER) would use the sign-in name
+(CG-13). For the rest, app passwords bound to the relay like tokens (CG-8)
+could stand in. Listed as an open question.
+
+## Sign-in through a terminating relay
+
+Raised on t/340: rules that require two-factor sign-in mostly mean OAuth,
+nobody keeps a second password just for the relay, and a static app
+password is weaker than a short-lived token. So a terminating relay offers
+a choice rather than one fixed method, and the admin picks what each relay
+accepts:
+
+- **Passkeys.** On by default. Nothing reusable crosses the relay.
+- **The server's normal sign-in.** Off by default. The client is sent to
+  the sign-in name (CG-13), where the user signs in as they would anywhere
+  else, second factor included. The token issued is bound to the relay
+  (CG-8) and capped by CG-14. This is the one to use where policy requires
+  two-factor sign-in.
+- **App passwords bound to the relay.** Only once IMAP and submission are
+  terminated (question 3), for clients that can't do OAuth. Each one is
+  shown once, works only through that relay and generation, and is capped
+  by CG-14 like a token.
+
+Users can narrow this for their own account (passkeys only, or no access
+through the relay at all) but can't widen it past what the admin allows.
+
+The limit is the clients. Many desktop and phone mail apps only do OAuth
+for a handful of large providers they know by name, so for IMAP the app
+password may stay the fallback in practice. Webmail and JMAP clients that
+use the browser for sign-in don't have that problem.
 
 ## Detection and response
 
@@ -391,7 +441,9 @@ relay (CG-8), so a laptop that moves between the two signs in again.
 Pushed over the link with the other settings:
 
 - `clientAccess`: per port, on or off, the mode, and the target id; the
-  list of names for 443;
+  list of names for 443; in terminating mode, the sign-in methods accepted,
+  the sign-in name if the normal sign-in is on, and the session cap
+  (CG-14);
 - `clientLimits`: connections per address per minute (60), open connections
   per address (50), open client connections in all (2000), and in
   terminating mode the request limits (header section 16 KB, body 10 MB
@@ -448,9 +500,10 @@ surprise.
   can't get a certificate for the names while the CAA record holds.
 - **A compromised terminating relay** gets, while it's held, the content of
   every request and response through it, and the relay-bound tokens of
-  everyone signed in through it. It doesn't get passwords (CG-7), tokens
-  that work anywhere else (CG-8), anything from before its last rebuild
-  (CG-10), or a way to keep its access past quarantine. Breaking one worker
+  everyone signed in through it. It doesn't get passwords (CG-7, CG-13),
+  tokens that work anywhere else (CG-8) or for longer than the relay's cap
+  (CG-14), anything from before its last rebuild (CG-10), or a way to keep
+  its access past quarantine. Breaking one worker
   gives only that connection (CG-11). This is the price of the mode, and
   inbuxa-admin says so when it's turned on.
 - **Either kind** can drop or delay connections, and write a false client
@@ -471,6 +524,12 @@ surprise.
 - **Sign-in limits.** They work per client address, through CG-4. A target
   that ignores the PROXY header would rate-limit the node itself. The
   automatic trusted-network setting covers the server's own listeners.
+- **A fake sign-in form.** A taken terminating relay controls what it
+  serves on the names it terminates, so it could show its own password
+  form there instead of sending the client to the sign-in name. CG-13
+  keeps passwords off the relay in normal running; it can't stop a
+  compromised relay from asking for one. That's part of why passkeys stay
+  the default, and why the normal sign-in is something the admin turns on.
 - **The quarantine key.** Whoever holds it can take client access down, but
   can't read or change anything else. That's the right trade for a key that
   sits on a monitoring system.
@@ -536,6 +595,17 @@ Terminating:
   all three.
 - **CG-T17.** A worker that crashes mid-request takes down only its own
   connection, and is reported in a `RelayEvent`.
+- **CG-T18.** With the normal sign-in on, a client on a terminating name is
+  sent to the sign-in name, completes TLS there with the downstream's
+  certificate, signs in with a password and second factor, and gets a
+  token that works on the terminating name and is refused through any
+  other relay or generation.
+- **CG-T19.** A token issued through a relay with a 1-hour cap stops
+  working after an hour, and can't be refreshed past it.
+- **CG-T20.** With the normal sign-in off, the sign-in name isn't served
+  and the relay accepts passkeys only. A user who set their account to
+  passkeys only can't use the normal sign-in through a relay that allows
+  it.
 
 ## Questions
 
@@ -575,3 +645,13 @@ suggestion open for discussion on the forum (t/340).
     decide on building after seeing who uses it.
 13. **Milestone.** Recommended: stays in 27.7, unscheduled until 12
     has an answer.
+
+Open (added 2026-11-24, from t/340):
+
+14. **Sign-in choices through a terminating relay.** Recommended: passkeys
+    on by default; the server's normal sign-in on a pass-through sign-in
+    name (CG-13) as an option the admin turns on; app passwords only with
+    terminated IMAP and submission; a per-relay session cap, 12 hours by
+    default (CG-14); users can narrow but not widen. This refines answer 4:
+    still no password through a terminating name, but passkeys are no
+    longer the only way in.
