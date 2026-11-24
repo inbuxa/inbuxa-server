@@ -10,7 +10,7 @@ use super::Request;
 use crate::{
     error::request::{RequestError, RequestErrorType, RequestLimitError},
     object::AnyId,
-    request::{Call, deserialize::DeserializeArguments},
+    request::{Call, deserialize::DeserializeArguments, parser::is_json},
     response::{Response, ResponseMethod, serialize::serialize_hex, status::PushObject},
 };
 use serde::{
@@ -38,9 +38,10 @@ pub struct WebSocketResponse<'x> {
     #[serde(serialize_with = "serialize_hex")]
     session_state: u32,
 
-    #[serde(rename(deserialize = "createdIds"))]
-    #[serde(skip_serializing_if = "HashMap::is_empty")]
-    created_ids: HashMap<String, AnyId>,
+    // inbuxa: whenever the request had createdIds, even empty
+    #[serde(rename = "createdIds")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    created_ids: Option<HashMap<String, AnyId>>,
 
     #[serde(rename = "requestId")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -110,29 +111,60 @@ impl<'x> WebSocketMessage<'x> {
         if json.len() <= max_size {
             match serde_json::from_slice::<Self>(json) {
                 Ok(WebSocketMessage::Request(WebSocketRequest {
+                    id,
                     request:
                         Request {
                             unknown_capability: Some(capability),
                             ..
                         },
-                    ..
-                })) => Err(trc::JmapEvent::UnknownCapability
-                    .into_err()
-                    .details(capability)),
+                })) => Err(with_request_id(
+                    trc::JmapEvent::UnknownCapability
+                        .into_err()
+                        .details(capability),
+                    id,
+                )),
                 Ok(WebSocketMessage::Request(req))
                     if req.request.method_calls.len() > max_calls =>
                 {
-                    Err(trc::LimitEvent::CallsIn.into_err())
+                    Err(with_request_id(trc::LimitEvent::CallsIn.into_err(), req.id))
                 }
                 Ok(msg) => Ok(msg),
-                Err(err) => Err(trc::JmapEvent::NotRequest
-                    .into_err()
-                    .details(format!("Invalid WebSocket JMAP request {err}"))),
+                // inbuxa: notJSON for a message that isn't JSON at all
+                Err(err) if !is_json(json) => {
+                    Err(trc::JmapEvent::NotJson.into_err().details(err.to_string()))
+                }
+                Err(err) => Err(with_request_id(
+                    trc::JmapEvent::NotRequest
+                        .into_err()
+                        .details(format!("Invalid WebSocket JMAP request {err}")),
+                    message_id(json),
+                )),
             }
         } else {
             Err(trc::LimitEvent::SizeRequest.into_err())
         }
     }
+}
+
+/// inbuxa: a refused request's error carries the request's `id` as
+/// `Key::Id`, for the RequestError's `requestId` (RFC 8887 §4.3.4).
+fn with_request_id(err: trc::Error, id: Option<String>) -> trc::Error {
+    match id {
+        Some(id) => err.ctx(trc::Key::Id, id),
+        None => err,
+    }
+}
+
+/// inbuxa: the `id` of a JSON message that isn't a valid WebSocket message,
+/// when it has a string one.
+fn message_id(json: &[u8]) -> Option<String> {
+    #[derive(Deserialize)]
+    struct MessageId {
+        id: Option<String>,
+    }
+    serde_json::from_slice::<MessageId>(json)
+        .ok()
+        .and_then(|message| message.id)
 }
 
 impl<'de: 'x, 'x: 'de> Deserialize<'de> for WebSocketMessage<'x> {
@@ -243,7 +275,7 @@ impl<'x> WebSocketResponse<'x> {
             _type: WebSocketResponseType::Response,
             method_responses: response.method_responses,
             session_state: response.session_state,
-            created_ids: response.created_ids,
+            created_ids: response.echo_created_ids.then_some(response.created_ids),
             request_id,
         }
     }

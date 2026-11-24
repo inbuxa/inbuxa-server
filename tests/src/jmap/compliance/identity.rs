@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use super::{CompCtx, TestOutcome, check, check_contains, check_eq, skip};
@@ -53,6 +55,16 @@ pub async fn run(ctx: &CompCtx<'_>) {
     ctx.run(
         "identity/set-update-text-signature",
         set_update_text_signature(ctx),
+    )
+    .await;
+    ctx.run(
+        "identity/set-if-in-state-mismatch",
+        super::set_honors_if_in_state(ctx, "Identity"),
+    )
+    .await;
+    ctx.run(
+        "identity/set-reports-states",
+        super::set_reports_states(ctx, "Identity"),
     )
     .await;
 }

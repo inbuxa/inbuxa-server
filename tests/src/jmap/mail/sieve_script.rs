@@ -65,15 +65,46 @@ pub async fn test(test: &TestServer) {
         .sieve_script_validate(get_script("validate_ok"))
         .await
         .unwrap();
-    assert!(matches!(
-        client
-            .sieve_script_validate(get_script("validate_error"))
-            .await,
-        Err(Error::Set(SetError {
-            type_: SetErrorType::InvalidScript,
-            ..
-        }))
-    ));
+    // A script that doesn't compile is the invalidSieve of RFC 9661, from
+    // SieveScript/validate and SieveScript/set alike (jmap-client only knows
+    // the draft's name, so the responses are read as JSON)
+    let account_id = account.id_string();
+    let blob_id = client
+        .upload(None, get_script("validate_error"), None)
+        .await
+        .unwrap()
+        .blob_id()
+        .to_string();
+    let response = account
+        .jmap_method_call(
+            "SieveScript/validate",
+            serde_json::json!({"accountId": account_id, "blobId": blob_id}),
+        )
+        .await;
+    assert_eq!(
+        response
+            .method_response()
+            .pointer("/error/type")
+            .and_then(|v| v.as_str()),
+        Some("invalidSieve"),
+        "{response:?}"
+    );
+    let response = account
+        .jmap_method_call(
+            "SieveScript/set",
+            serde_json::json!({"accountId": account_id, "create": {
+                "bad": {"name": "does_not_compile", "blobId": blob_id}
+            }}),
+        )
+        .await;
+    assert_eq!(
+        response
+            .method_response()
+            .pointer("/notCreated/bad/type")
+            .and_then(|v| v.as_str()),
+        Some("invalidSieve"),
+        "{response:?}"
+    );
 
     // Create 5 Sieve scripts, all deactivated.
     let mut script_ids = Vec::new();

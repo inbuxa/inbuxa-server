@@ -121,8 +121,9 @@ pub enum SetErrorType {
     CannotUnsend,
     #[serde(rename = "alreadyExists")]
     AlreadyExists,
-    #[serde(rename = "invalidScript")]
-    InvalidScript,
+    // inbuxa: RFC 9661's name; the draft's invalidScript is still read
+    #[serde(rename = "invalidSieve", alias = "invalidScript")]
+    InvalidSieve,
     // inbuxa: RFC 9661's name; the draft's scriptIsActive is still read
     #[serde(rename = "sieveIsActive", alias = "scriptIsActive")]
     SieveIsActive,
@@ -180,7 +181,7 @@ impl SetErrorType {
             SetErrorType::ForbiddenToSend => "forbiddenToSend",
             SetErrorType::CannotUnsend => "cannotUnsend",
             SetErrorType::AlreadyExists => "alreadyExists",
-            SetErrorType::InvalidScript => "invalidScript",
+            SetErrorType::InvalidSieve => "invalidSieve",
             SetErrorType::SieveIsActive => "sieveIsActive",
             SetErrorType::AddressBookHasContents => "addressBookHasContents",
             SetErrorType::NodeHasChildren => "nodeHasChildren",
@@ -397,5 +398,27 @@ impl From<PatchError> for SetError<registry::schema::properties::Property> {
             rules: Vec::new(),
             invalid_recipients: Vec::new(),
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SetErrorType;
+
+    // inbuxa: a Sieve script that doesn't compile is invalidSieve (RFC 9661),
+    // and the draft's invalidScript is still understood when read
+    #[test]
+    fn invalid_sieve_name() {
+        assert_eq!(
+            serde_json::to_string(&SetErrorType::InvalidSieve).unwrap(),
+            r#""invalidSieve""#
+        );
+        assert_eq!(SetErrorType::InvalidSieve.as_str(), "invalidSieve");
+        for name in [r#""invalidSieve""#, r#""invalidScript""#] {
+            assert!(matches!(
+                serde_json::from_str::<SetErrorType>(name).unwrap(),
+                SetErrorType::InvalidSieve
+            ));
+        }
     }
 }

@@ -110,7 +110,7 @@ impl WebSocketHandler for Server {
                                             {
                                                 Ok(access_token) => access_token,
                                                 Err(err) => {
-                                                    end_websocket(&mut stream, err, session.session_id).await;
+                                                    end_websocket(&mut stream, err, request.id, session.session_id).await;
                                                     break;
                                                 }
                                             };
@@ -133,7 +133,7 @@ impl WebSocketHandler for Server {
                                                     .to_json()
                                                 }
                                                 Err(err) => {
-                                                    WebSocketRequestError::from(err.to_request_error()).to_json()
+                                                    WebSocketRequestError::from_error(err.to_request_error(), request.id).to_json()
                                                 }
                                             }
                                         }
@@ -150,7 +150,9 @@ impl WebSocketHandler for Server {
                                             continue;
                                         }
                                         Err(err) => {
-                                            let response = WebSocketRequestError::from(err.to_request_error()).to_json();
+                                            // inbuxa: with the request's id when it has one
+                                            let request_id = err.value_as_str(trc::Key::Id).map(String::from);
+                                            let response = WebSocketRequestError::from_error(err.to_request_error(), request_id).to_json();
                                             trc::error!(err.details("Failed to parse WebSocket message").span_id(session.session_id));
                                             response
                                         },
@@ -266,7 +268,7 @@ impl WebSocketHandler for Server {
                     if let Err(err) =
                         current_websocket_token(self, &access_token, session.remote_ip).await
                     {
-                        end_websocket(&mut stream, err, session.session_id).await;
+                        end_websocket(&mut stream, err, None, session.session_id).await;
                         break;
                     }
                     for push in notifications_into_push_objects(std::mem::take(&mut notifications))
@@ -346,10 +348,12 @@ async fn current_websocket_token(
     })
 }
 
-/// inbuxa: tells the client its session is over and closes the socket.
+/// inbuxa: tells the client its session is over, answering the request
+/// that found out when there is one, and closes the socket.
 async fn end_websocket(
     stream: &mut WebSocketStream<TokioIo<Upgraded>>,
     err: trc::Error,
+    request_id: Option<String>,
     session_id: u64,
 ) {
     trc::event!(
@@ -360,7 +364,7 @@ async fn end_websocket(
     );
     let _ = stream
         .send(Message::Text(
-            WebSocketRequestError::from(RequestError::unauthorized())
+            WebSocketRequestError::from_error(RequestError::unauthorized(), request_id)
                 .to_json()
                 .into(),
         ))

@@ -56,6 +56,8 @@ pub enum Event {
     Update { account_id: u32 },
     DeliverySuccess { id: Id },
     DeliveryFailure { id: Id, failed: PushBatch },
+    // inbuxa: the push service no longer has the subscription
+    DeliveryGone { id: Id },
     Reset,
 }
 

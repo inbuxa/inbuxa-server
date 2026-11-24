@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::utils::server::TestServer;
@@ -95,6 +97,32 @@ pub async fn test(test: &TestServer) {
         .destroyed(&mailbox_id)
         .unwrap();
     expect_nothing(&mut stream_rx).await;
+
+    // inbuxa: a refused request's RequestError carries its id (RFC 8887
+    // §4.3.4), here one with more method calls than the server takes
+    let client = account.jmap_client().await;
+    let mut ws_stream = client.connect_ws().await.unwrap();
+    let max_calls = client
+        .session()
+        .core_capabilities()
+        .unwrap()
+        .max_calls_in_request();
+    let mut request = client.build();
+    for _ in 0..=max_calls {
+        request.get_mailbox();
+    }
+    let request_id = request.send_ws().await.unwrap();
+    match tokio::time::timeout(Duration::from_millis(500), ws_stream.next()).await {
+        Ok(Some(Err(jmap_client::Error::Problem(problem)))) => {
+            assert_eq!(problem.status(), Some(400), "{problem:?}");
+            assert_eq!(
+                problem.request_id(),
+                Some(request_id.as_str()),
+                "RequestError without the request's id: {problem:?}"
+            );
+        }
+        other => panic!("Expected a RequestError, got: {other:?}"),
+    }
 
     test.destroy_all_mailboxes(account).await;
     test.assert_is_empty().await;

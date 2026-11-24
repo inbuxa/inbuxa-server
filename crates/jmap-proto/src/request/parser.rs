@@ -37,6 +37,11 @@ impl<'x> Request<'x> {
                         Err(trc::LimitEvent::CallsIn.into_err())
                     }
                 }
+                // inbuxa: a body that isn't JSON at all is notJSON; JSON
+                // that isn't a Request object is notRequest (RFC 8620 §3.6.1)
+                Err(err) if !is_json(json) => {
+                    Err(trc::JmapEvent::NotJson.into_err().details(err.to_string()))
+                }
                 Err(err) => Err(trc::JmapEvent::NotRequest
                     .into_err()
                     .reason(err.to_string())
@@ -46,6 +51,11 @@ impl<'x> Request<'x> {
             Err(trc::LimitEvent::SizeRequest.into_err())
         }
     }
+}
+
+/// inbuxa: whether the bytes are a JSON value of any shape.
+pub(crate) fn is_json(json: &[u8]) -> bool {
+    serde_json::from_slice::<serde::de::IgnoredAny>(json).is_ok()
 }
 
 impl<'de> DeserializeArguments<'de> for Request<'de> {
@@ -1509,6 +1519,108 @@ mod tests {
             *err.as_ref(),
             trc::EventType::Jmap(trc::JmapEvent::UnknownCapability)
         );
+    }
+
+    // inbuxa: a body that isn't JSON is notJSON, JSON of the wrong shape
+    // is notRequest, over HTTP and WebSocket alike (RFC 8620 §3.6.1).
+    #[test]
+    fn not_json_and_not_request_are_told_apart() {
+        for (body, expected) in [
+            ("{", trc::JmapEvent::NotJson),
+            ("not json", trc::JmapEvent::NotJson),
+            (
+                r#"{"using": ["urn:ietf:params:jmap:core"]"#,
+                trc::JmapEvent::NotJson,
+            ),
+            ("[]", trc::JmapEvent::NotRequest),
+            (
+                r#"{"using": "nope", "methodCalls": []}"#,
+                trc::JmapEvent::NotRequest,
+            ),
+            (r#"{"methodCalls": 1}"#, trc::JmapEvent::NotRequest),
+        ] {
+            let err = Request::parse(body.as_bytes(), 10, 10240).unwrap_err();
+            assert_eq!(
+                *err.as_ref(),
+                trc::EventType::Jmap(expected),
+                "HTTP body {body:?}"
+            );
+        }
+
+        for (message, expected) in [
+            ("{", trc::JmapEvent::NotJson),
+            (
+                r#"{"@type": "Request", "id": "r1""#,
+                trc::JmapEvent::NotJson,
+            ),
+            ("[]", trc::JmapEvent::NotRequest),
+            (
+                r#"{"@type": "Nonsense", "id": "r1"}"#,
+                trc::JmapEvent::NotRequest,
+            ),
+            (
+                r#"{"@type": "Request", "id": "r1", "methodCalls": 1}"#,
+                trc::JmapEvent::NotRequest,
+            ),
+        ] {
+            let err =
+                crate::request::websocket::WebSocketMessage::parse(message.as_bytes(), 10, 10240)
+                    .unwrap_err();
+            assert_eq!(
+                *err.as_ref(),
+                trc::EventType::Jmap(expected),
+                "WebSocket message {message:?}"
+            );
+        }
+    }
+
+    // inbuxa: a refused WebSocket request carries its id, so the client can
+    // match the RequestError to it (RFC 8887 §4.3.4).
+    #[test]
+    fn refused_websocket_request_keeps_its_id() {
+        let too_many_calls = format!(
+            r#"{{"@type": "Request", "id": "r1", "using": ["urn:ietf:params:jmap:core"],
+                 "methodCalls": [{}]}}"#,
+            (0..11)
+                .map(|n| format!(r#"["Core/echo", {{}}, "{n}"]"#))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        for (message, expected) in [
+            (
+                r#"{"@type": "Request", "id": "r1", "using": ["urn:example:nope"],
+                    "methodCalls": [["Core/echo", {}, "0"]]}"#
+                    .to_string(),
+                trc::EventType::Jmap(trc::JmapEvent::UnknownCapability),
+            ),
+            (
+                too_many_calls,
+                trc::EventType::Limit(trc::LimitEvent::CallsIn),
+            ),
+            (
+                r#"{"@type": "Request", "id": "r1", "methodCalls": 1}"#.to_string(),
+                trc::EventType::Jmap(trc::JmapEvent::NotRequest),
+            ),
+        ] {
+            let err =
+                crate::request::websocket::WebSocketMessage::parse(message.as_bytes(), 10, 10240)
+                    .unwrap_err();
+            assert_eq!(*err.as_ref(), expected, "{message}");
+            assert_eq!(
+                err.value(trc::Key::Id).and_then(|v| v.as_str()),
+                Some("r1"),
+                "{message}"
+            );
+        }
+
+        // Without an id there is nothing to carry
+        let err = crate::request::websocket::WebSocketMessage::parse(
+            br#"{"@type": "Request", "using": ["urn:example:nope"], "methodCalls": []}"#,
+            10,
+            10240,
+        )
+        .unwrap_err();
+        assert!(err.value(trc::Key::Id).is_none());
     }
 
     #[test]

@@ -44,7 +44,7 @@ use std::{
     str::FromStr,
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -112,6 +112,8 @@ pub async fn test(test: &TestServer) {
         endpoint_origin: "https://127.0.0.1:19000".to_string(),
         tx: event_tx,
         fail_requests: false.into(),
+        gone_requests: false.into(),
+        gone_hits: 0.into(),
     });
 
     // Start mock push server
@@ -402,6 +404,66 @@ pub async fn test(test: &TestServer) {
     );
     client.push_subscription_destroy(&local_id).await.unwrap();
 
+    // inbuxa: a push service that answers 410 Gone has dropped the
+    // subscription for good, so the server removes it after that one push
+    // instead of retrying it (RFC 8030 §6.2)
+    let gone_id = client
+        .push_subscription_create(
+            "gone",
+            "https://127.0.0.1:19000/push?skip_checks=true",
+            None,
+        )
+        .await
+        .unwrap()
+        .take_id();
+    let verification = expect_push(&mut event_rx).await.unwrap_verification();
+    assert_eq!(verification.push_subscription_id, gone_id);
+    client
+        .push_subscription_verify(&gone_id, verification.verification_code)
+        .await
+        .unwrap();
+    push_server.gone_requests.store(true, Ordering::Relaxed);
+    let mailbox_id = client
+        .mailbox_create("PushSubscription Gone", None::<String>, Role::None)
+        .await
+        .unwrap()
+        .take_id();
+    let mut remaining = Vec::new();
+    for _ in 0..30 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        remaining = account
+            .jmap_request(
+                &["urn:ietf:params:jmap:core"],
+                json!([["PushSubscription/get", { "ids": null }, "0"]]),
+            )
+            .await
+            .list_array()
+            .as_array()
+            .unwrap()
+            .clone();
+        if remaining.is_empty() {
+            break;
+        }
+    }
+    assert_eq!(
+        remaining,
+        Vec::<serde_json::Value>::new(),
+        "a subscription whose push service said 410 Gone is still there"
+    );
+    expect_nothing(&mut event_rx).await;
+    assert_eq!(
+        push_server.gone_hits.load(Ordering::Relaxed),
+        1,
+        "a gone subscription was pushed to again"
+    );
+    push_server.gone_requests.store(false, Ordering::Relaxed);
+    client
+        .mailbox_update_sort_order(&mailbox_id, 1)
+        .await
+        .unwrap();
+    expect_nothing(&mut event_rx).await;
+    client.mailbox_destroy(&mailbox_id, true).await.unwrap();
+
     // Test the EmailPush object builder (filters and size limits) directly
     test_email_push_object(test).await;
 
@@ -574,6 +636,8 @@ pub struct PushServer {
     endpoint_origin: String,
     tx: mpsc::Sender<PushMessage>,
     fail_requests: AtomicBool,
+    gone_requests: AtomicBool,
+    gone_hits: AtomicUsize,
 }
 
 #[derive(serde::Deserialize, Debug)]
@@ -669,6 +733,16 @@ impl common::network::SessionManager for SessionManager {
                         let push = push.clone();
 
                         async move {
+                            if push.gone_requests.load(Ordering::Relaxed) {
+                                push.gone_hits.fetch_add(1, Ordering::Relaxed);
+                                return Ok(HtmlResponse::with_status(
+                                    StatusCode::GONE,
+                                    "gone".to_string(),
+                                )
+                                .into_http_response()
+                                .build());
+                            }
+
                             if push.fail_requests.load(Ordering::Relaxed) {
                                 return Ok(HtmlResponse::with_status(
                                     StatusCode::TOO_MANY_REQUESTS,
