@@ -283,7 +283,17 @@ impl<T: SessionStream> SessionData<T> {
                                         .map(|uid| Sequence::Number { value: uid })
                                         .collect(),
                                 },
-                                attributes: vec![fetch::Attribute::Flags, fetch::Attribute::Uid],
+                                // inbuxa: with CONDSTORE on, flag changes
+                                // carry MODSEQ (RFC 7162 3.2)
+                                attributes: if is_condstore {
+                                    vec![
+                                        fetch::Attribute::Flags,
+                                        fetch::Attribute::Uid,
+                                        fetch::Attribute::ModSeq,
+                                    ]
+                                } else {
+                                    vec![fetch::Attribute::Flags, fetch::Attribute::Uid]
+                                },
                                 changed_since: None,
                                 include_vanished: false,
                             },
