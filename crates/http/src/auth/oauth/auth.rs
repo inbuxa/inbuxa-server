@@ -412,7 +412,7 @@ impl OAuthApiHandler for Server {
                         .caused_by(trc::location!())?;
                     if oauth.status == OAuthStatus::Pending {
                         // Authenticate
-                        match self
+                        let authenticated = self
                             .authenticate(&AuthRequest {
                                 credentials: Credentials::Basic {
                                     username: account_name,
@@ -422,8 +422,29 @@ impl OAuthApiHandler for Server {
                                 session_id: session.session_id,
                                 remote_ip: session.remote_ip,
                             })
-                            .await
-                        {
+                            .await;
+                        // inbuxa: a tenant's client is approved only by that
+                        // tenant's accounts
+                        let authenticated = match authenticated {
+                            Ok(access_token) => {
+                                if self
+                                    .client_serves_tenant(
+                                        oauth.client_id.as_str(),
+                                        access_token.tenant_id(),
+                                    )
+                                    .await?
+                                {
+                                    Ok(access_token)
+                                } else {
+                                    Err(trc::SecurityEvent::Unauthorized
+                                        .into_err()
+                                        .account_id(access_token.account_id())
+                                        .details("This client belongs to another tenant."))
+                                }
+                            }
+                            Err(err) => Err(err),
+                        };
+                        match authenticated {
                             Ok(access_token) => {
                                 let new_oauth_code = OAuthCode {
                                     status: OAuthStatus::Authorized,

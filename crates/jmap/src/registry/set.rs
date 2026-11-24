@@ -553,7 +553,21 @@ impl RegistrySet for Server {
                                 .await
                                 .caused_by(trc::location!())?;
                             }
-                            if is_create {
+                            // inbuxa: the first-party client ids are the
+                            // server's own: no tenant holds one, by creating
+                            // it or by renaming a client to it
+                            if (access_token.tenant_id().is_some()
+                                || client.member_tenant_id.is_some())
+                                && common::manager::first_party::is_reserved_client_id(
+                                    &client.client_id,
+                                )
+                            {
+                                Err(SetError::forbidden()
+                                    .with_property(Property::ClientId)
+                                    .with_description(
+                                        "This client id is reserved for the server's own front ends.",
+                                    ))
+                            } else if is_create {
                                 validate_tenant_quota(
                                     self,
                                     access_token,
