@@ -113,7 +113,17 @@ pub fn itip_process_message(
             _ => return Err(ItipError::UnsupportedMethod(method.clone())),
         }
     } else {
-        itip_snapshots.assert_organizer_sends(method, &sender)?;
+        if let Err(err) = itip_snapshots.assert_organizer_sends(method, &sender) {
+            // inbuxa: #586: an attendee's REQUEST is the organizer's message
+            // forwarded to a delegate, and only that delegation is taken
+            return if itip_snapshots.is_delegation_to_recipient(method, &sender) {
+                delegation_merge(ical, &snapshots, itip, &itip_snapshots, &sender)
+                    .map(MergeResult::Actions)
+                    .ok_or(err)
+            } else {
+                Err(err)
+            };
+        }
 
         // Handle organizer and attendees updates
         match method {
@@ -356,6 +366,100 @@ pub fn itip_process_message(
     } else {
         Ok(MergeResult::None)
     }
+}
+
+/// inbuxa: #586: the delegation in an attendee's REQUEST to the recipient,
+/// who already holds the event (RFC 5546 sections 3.2.2.3 and 4.2.5, RFC 6638
+/// section 3.2.2). The delegator forwards the organizer's request, so every
+/// instance in it must match the recipient's copy except for the two
+/// attendees: same sequence, same properties, same other attendees. Then only
+/// the delegator's PARTSTAT and DELEGATED-TO and the delegate's DELEGATED-FROM,
+/// RSVP and ROLE are taken. The delegate's PARTSTAT stays its own: the
+/// delegate sets it, not the delegator, and an absent one reads as
+/// NEEDS-ACTION (RFC 5545 section 3.2.12). Anything else, `None`: the message is
+/// refused as before, since an attendee mustn't rewrite the event.
+fn delegation_merge(
+    ical: &ICalendar,
+    snapshots: &ItipSnapshots<'_>,
+    itip: &ICalendar,
+    itip_snapshots: &ItipSnapshots<'_>,
+    sender: &str,
+) -> Option<Vec<MergeAction>> {
+    // a time zone definition the copy lacks would come from the sender
+    if itip
+        .timezones()
+        .filter_map(timezone_id)
+        .any(|tz_id| needs_timezone(ical, tz_id))
+    {
+        return None;
+    }
+
+    let mut merge_actions = Vec::new();
+    for (instance_id, itip_snapshot) in &itip_snapshots.components {
+        let snapshot = snapshots.components.get(instance_id)?;
+        let (itip_delegator, itip_delegate) = itip_snapshot.delegation_to_recipient(sender)?;
+        let delegator = snapshot.attendee_by_email(&itip_delegator.email.email)?;
+        let delegate = snapshot.attendee_by_email(&itip_delegate.email.email)?;
+        let is_other = |attendee: &&Attendee<'_>| {
+            attendee.email != delegator.email && attendee.email != delegate.email
+        };
+        let same_others = itip_snapshot.attendees.iter().filter(is_other).count()
+            == snapshot.attendees.iter().filter(is_other).count()
+            && itip_snapshot
+                .attendees
+                .iter()
+                .filter(is_other)
+                .all(|attendee| snapshot.attendees.iter().any(|stored| stored == attendee));
+        if itip_snapshot.sequence.unwrap_or_default() != snapshot.sequence.unwrap_or_default()
+            || itip_snapshot
+                .entries
+                .symmetric_difference(&snapshot.entries)
+                .next()
+                .is_some()
+            || !same_others
+        {
+            return None;
+        }
+
+        let itip_component = itip_snapshot.comp;
+        for (attendee, itip_attendee, parameters) in [
+            (
+                delegator,
+                itip_delegator,
+                &[
+                    ICalendarParameterName::Partstat,
+                    ICalendarParameterName::DelegatedTo,
+                ][..],
+            ),
+            (
+                delegate,
+                itip_delegate,
+                &[
+                    ICalendarParameterName::DelegatedFrom,
+                    ICalendarParameterName::Rsvp,
+                    ICalendarParameterName::Role,
+                ][..],
+            ),
+        ] {
+            merge_actions.push(MergeAction::RemoveParameters {
+                component_id: snapshot.comp_id,
+                entry_id: attendee.entry_id,
+                parameters: parameters.to_vec(),
+            });
+            merge_actions.push(MergeAction::AddParameters {
+                component_id: snapshot.comp_id,
+                entry_id: attendee.entry_id,
+                parameters: itip_component.entries[itip_attendee.entry_id as usize]
+                    .params
+                    .iter()
+                    .filter(|param| parameters.contains(&param.name))
+                    .cloned()
+                    .collect(),
+            });
+        }
+    }
+
+    (!merge_actions.is_empty()).then_some(merge_actions)
 }
 
 pub fn itip_import_message(ical: &mut ICalendar) -> Result<(), ItipError> {
@@ -746,21 +850,7 @@ fn merge_timezones(ical: &mut ICalendar, itip: &ICalendar) {
             continue;
         };
 
-        let mut is_referenced = false;
-        for component in &ical.components {
-            if component.component_type == ICalendarComponentType::VTimezone {
-                if timezone_id(component) == Some(tz_id) {
-                    is_referenced = false;
-                    break;
-                }
-            } else if !is_referenced {
-                is_referenced = component
-                    .entries
-                    .iter()
-                    .any(|entry| entry.tz_id() == Some(tz_id));
-            }
-        }
-        if !is_referenced {
+        if !needs_timezone(ical, tz_id) {
             continue;
         }
 
@@ -792,6 +882,24 @@ fn merge_timezones(ical: &mut ICalendar, itip: &ICalendar) {
     }
 
     ical.add_missing_timezones();
+}
+
+// Whether the calendar refers to a time zone it has no definition for
+fn needs_timezone(ical: &ICalendar, tz_id: &str) -> bool {
+    let mut is_referenced = false;
+    for component in &ical.components {
+        if component.component_type == ICalendarComponentType::VTimezone {
+            if timezone_id(component) == Some(tz_id) {
+                return false;
+            }
+        } else if !is_referenced {
+            is_referenced = component
+                .entries
+                .iter()
+                .any(|entry| entry.tz_id() == Some(tz_id));
+        }
+    }
+    is_referenced
 }
 
 fn timezone_id(component: &ICalendarComponent) -> Option<&str> {

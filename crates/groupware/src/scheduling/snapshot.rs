@@ -12,8 +12,9 @@ use crate::scheduling::{
 };
 use ahash::AHashMap;
 use calcard::icalendar::{
-    ICalendar, ICalendarMethod, ICalendarParameterName, ICalendarParameterValue, ICalendarProperty,
-    ICalendarScheduleAgentValue, ICalendarValue, Uri,
+    ICalendar, ICalendarMethod, ICalendarParameterName, ICalendarParameterValue,
+    ICalendarParticipationStatus, ICalendarProperty, ICalendarScheduleAgentValue, ICalendarValue,
+    Uri,
 };
 
 pub fn itip_snapshot<'x, 'y>(
@@ -387,6 +388,19 @@ impl ItipSnapshots<'_> {
         }
     }
 
+    /// inbuxa: #586: whether an attendee's REQUEST delegates to the
+    /// recipient in every instance it carries. Such a message still isn't
+    /// the organizer's: only the delegation in it may be applied, and only
+    /// to a copy the recipient already holds (see `inbound::delegation_merge`).
+    pub fn is_delegation_to_recipient(&self, method: &ICalendarMethod, sender: &str) -> bool {
+        method == &ICalendarMethod::Request
+            && !self.components.is_empty()
+            && self
+                .components
+                .values()
+                .all(|snapshot| snapshot.delegation_to_recipient(sender).is_some())
+    }
+
     pub fn sender_is_organizer_or_attendee(&self, email: &str) -> bool {
         self.organizer.email.email == email
             || self.components.values().any(|snapshot| {
@@ -418,6 +432,25 @@ impl ItipSnapshot<'_> {
         self.attendees
             .iter()
             .find(|attendee| attendee.email.is_local)
+    }
+
+    /// inbuxa: #586: the sender as delegator and the recipient as its
+    /// delegate (RFC 5546 section 3.2.2.3): the sender has PARTSTAT=DELEGATED
+    /// and a DELEGATED-TO naming the recipient, and the recipient has a
+    /// DELEGATED-FROM naming the sender.
+    pub fn delegation_to_recipient(&self, sender: &str) -> Option<(&Attendee<'_>, &Attendee<'_>)> {
+        let delegator = self.attendee_by_email(sender)?;
+        if delegator.email.is_local
+            || delegator.part_stat != Some(&ICalendarParticipationStatus::Delegated)
+        {
+            return None;
+        }
+        let delegate = self.attendees.iter().find(|attendee| {
+            attendee.email.is_local
+                && delegator.is_delegated_to(attendee)
+                && attendee.is_delegated_from(delegator)
+        })?;
+        Some((delegator, delegate))
     }
 
     pub fn external_attendees(&self) -> impl Iterator<Item = &Attendee<'_>> + '_ {
