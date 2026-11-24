@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use serde::{Deserialize, Serialize};
@@ -208,9 +210,25 @@ impl ClientRegistrationError {
 }
 
 pub fn loopback_redirect_parts(uri: &str) -> Option<(&str, &str)> {
+    redirect_host_parts(uri, &["127.0.0.1", "[::1]"])
+}
+
+/// inbuxa: `http://localhost` is the browser's own machine too (RFC 8252
+/// §8.3 allows it; browsers resolve it to loopback). A console opened at
+/// http://localhost over an SSH tunnel, as the recovery and first-boot docs
+/// do, redirects there. It's accepted as a redirect, but unlike the IP
+/// literals it isn't matched across ports.
+pub fn is_localhost_redirect(uri: &str) -> bool {
+    redirect_host_parts(uri, &["localhost"]).is_some()
+}
+
+fn redirect_host_parts<'x>(
+    uri: &'x str,
+    hosts: &[&'static str],
+) -> Option<(&'static str, &'x str)> {
     let uri = uri.strip_prefix("http://")?;
 
-    for host in ["127.0.0.1", "[::1]"] {
+    for &host in hosts {
         if let Some(rest) = uri.strip_prefix(host) {
             let rest = match rest.strip_prefix(':') {
                 Some(after_colon) => {
@@ -254,7 +272,10 @@ pub fn validate_redirect_uri(uri: &str) -> Result<(), ClientRegistrationError> {
         return Err(ClientRegistrationError::invalid_redirect_uri(
             "Redirect URI must not contain consecutive dots.",
         ));
-    } else if uri.starts_with("https://") || loopback_redirect_parts(uri).is_some() {
+    } else if uri.starts_with("https://")
+        || loopback_redirect_parts(uri).is_some()
+        || is_localhost_redirect(uri)
+    {
         return Ok(());
     } else if let Some((scheme, _)) = uri.split_once(':')
         && scheme.contains('.')
@@ -270,7 +291,7 @@ pub fn validate_redirect_uri(uri: &str) -> Result<(), ClientRegistrationError> {
     }
 
     Err(ClientRegistrationError::invalid_redirect_uri(
-        "Redirect URI must be an https URL, a loopback (http://127.0.0.1/, http://[::1]/) or a private-use scheme URI.",
+        "Redirect URI must be an https URL, a loopback (http://127.0.0.1/, http://[::1]/, http://localhost/) or a private-use scheme URI.",
     ))
 }
 
@@ -304,7 +325,7 @@ pub fn validate_grant_metadata(
 
 #[cfg(test)]
 mod tests {
-    use super::{loopback_redirect_parts, redirect_uri_matches};
+    use super::{loopback_redirect_parts, redirect_uri_matches, validate_redirect_uri};
 
     #[test]
     fn loopback_matches_any_port() {
@@ -351,5 +372,49 @@ mod tests {
         ] {
             assert_eq!(loopback_redirect_parts(uri), None, "{uri}");
         }
+    }
+
+    #[test]
+    fn localhost_is_a_native_redirect() {
+        // inbuxa: a console opened at http://localhost redirects there (#614)
+        for uri in [
+            "http://localhost",
+            "http://localhost/",
+            "http://localhost:8080/admin/oauth/callback",
+            "http://localhost:8081/oauth/callback?x=1",
+            "http://127.0.0.1:8080/oauth/callback",
+            "com.example.app:/cb",
+        ] {
+            assert!(
+                validate_redirect_uri(uri).is_ok(),
+                "{uri} should be accepted"
+            );
+        }
+
+        for uri in [
+            "http://localhost.evil.com/",
+            "http://localhost@evil.com/",
+            "http://localhost:80@evil.com/",
+            "http://localhost:/cb",
+            "http://localhost:abc/",
+            "http://localhostevil.com/",
+            "http://localhost:8080/cb#frag",
+            "http://evil.com/localhost/",
+        ] {
+            assert!(
+                validate_redirect_uri(uri).is_err(),
+                "{uri} should be refused"
+            );
+        }
+
+        // Not matched across ports, unlike the IP literals
+        assert!(!redirect_uri_matches(
+            "http://localhost/cb",
+            "http://localhost:4711/cb"
+        ));
+        assert!(redirect_uri_matches(
+            "http://localhost:4711/cb",
+            "http://localhost:4711/cb"
+        ));
     }
 }
