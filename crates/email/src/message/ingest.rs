@@ -119,6 +119,7 @@ pub trait EmailIngest: Sync + Send {
         account_id: u32,
         document_id: u32,
         is_spam: bool,
+        hold_sample: bool,
         span_id: u64,
     ) -> impl Future<Output = trc::Result<()>> + Send;
 
@@ -902,6 +903,7 @@ impl EmailIngest for Server {
         account_id: u32,
         document_id: u32,
         is_spam: bool,
+        hold_sample: bool,
         span_id: u64,
     ) -> trc::Result<()> {
         if self.core.spam.classifier.is_some()
@@ -928,7 +930,7 @@ impl EmailIngest for Server {
                 part.from().unwrap_or_default().to_string(),
                 thread_name(part.subject().unwrap_or_default()).to_string(),
                 is_spam,
-                true,
+                hold_sample,
                 span_id,
             );
         }

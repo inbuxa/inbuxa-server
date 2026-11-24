@@ -15,18 +15,21 @@ use common::{
     Server, config::mailstore::spamfilter::SpamClassifier as SpamClassifierModel,
     ipc::RegistryChange, manager::SPAM_TRAINER_KEY,
 };
+use email::mailbox::JUNK_ID;
 use imap_proto::ResponseType;
 use registry::schema::{
     enums::TaskSpamFilterMaintenanceType,
     prelude::ObjectType,
     structs::{Task, TaskSpamFilterMaintenance, TaskStatus},
 };
+use serde_json::json;
 use spam_filter::modules::classifier::SpamTrainer;
 use std::sync::Arc;
 use store::{
     Deserialize,
     write::{AlignedBytes, Archive},
 };
+use types::id::Id;
 
 pub async fn test(test: &TestServer) {
     println!("Running Spam classifier tests...");
@@ -218,6 +221,52 @@ pub async fn test(test: &TestServer) {
         .send_ok("MOVE * \"Shared Folders/support@example.com/Drafts\"")
         .await;
     assert_eq!(samples_for(jane_id, false).await, 1);
+
+    // inbuxa: #589: the samples of a move outlive the moved-out original
+    test.wait_for_tasks().await;
+    assert_eq!(samples_for(support_id, true).await, 1);
+    assert_eq!(samples_for(jane_id, false).await, 1);
+
+    // inbuxa: #589: so does the sample of a JMAP move (Email/copy destroying
+    // the original) from the shared account into Jane's Junk Mail
+    imap_jane
+        .send_ok("SELECT \"Shared Folders/support@example.com/Drafts\"")
+        .await;
+    imap_jane.send("FETCH * (OBJECTID)").await;
+    let email_id = imap_jane
+        .assert_read(Type::Tagged, ResponseType::Ok)
+        .await
+        .iter()
+        .find_map(|line| {
+            line.split_once("EMAILID ").map(|(_, value)| {
+                value
+                    .trim_start_matches('(')
+                    .split([' ', ')'])
+                    .next()
+                    .unwrap()
+                    .to_string()
+            })
+        })
+        .expect("Missing EMAILID");
+    let support = test.account("support@example.com");
+    let response = jane
+        .jmap_copy(
+            support,
+            jane,
+            "Email",
+            [(
+                "moved",
+                json!({
+                    "id": email_id,
+                    "mailboxIds": { Id::from(JUNK_ID).to_string(): true }
+                }),
+            )],
+            true,
+        )
+        .await;
+    response.copied("moved");
+    test.wait_for_tasks().await;
+    assert_eq!(samples_for(support_id, true).await, 2);
 }
 
 pub async fn spam_classifier_model(server: &Server) -> SpamTrainer {

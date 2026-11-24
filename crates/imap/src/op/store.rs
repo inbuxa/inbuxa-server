@@ -420,6 +420,7 @@ impl<T: SessionStream> SessionData<T> {
                             account_id,
                             *id,
                             learn_spam,
+                            true,
                             self.session_id,
                         )
                         .await
