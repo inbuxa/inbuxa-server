@@ -137,6 +137,30 @@ impl<T: SessionStream> Session<T> {
         self.auth_error(b"500 5.5.6 Invalid challenge.\r\n").await
     }
 
+    /// inbuxa: a signed-in session acts only while the sign-in it was opened
+    /// with is valid: not after the password changes, the token is revoked
+    /// or the account is locked, or once it loses a permission it had. A
+    /// session that fails is answered 530 and closed.
+    pub async fn assert_sign_in_current(&mut self) -> Result<(), ()> {
+        let Some(access_token) = &self.data.access_token else {
+            return Ok(());
+        };
+        match self
+            .server
+            .assert_session_current(access_token, self.data.remote_ip)
+            .await
+        {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                trc::error!(err.span_id(self.data.session_id));
+                let _ = self
+                    .write(b"530 5.7.0 Authentication no longer valid.\r\n")
+                    .await;
+                Err(())
+            }
+        }
+    }
+
     pub async fn authenticate(&mut self, credentials: Credentials) -> Result<bool, ()> {
         // inbuxa: legacy-protocols LP-6. Refused before the password is looked
         // at, and not counted as an authentication error (LP-11). Only mail

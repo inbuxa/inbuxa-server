@@ -11,9 +11,13 @@ use crate::{
     utils::server::TestServerBuilder,
 };
 use registry::{
-    schema::structs::{Expression, ExpressionMatch, MtaExtensions, MtaStageAuth},
+    schema::{
+        prelude::ObjectType,
+        structs::{Expression, ExpressionMatch, MtaExtensions, MtaStageAuth},
+    },
     types::list::List,
 };
+use serde_json::json;
 use smtp::core::State;
 
 #[tokio::test]
@@ -230,4 +234,50 @@ async fn auth() {
         .await;
     session.mail_from("jane@example.org", "501 5.5.4").await;
     session.mail_from("john@example.org", "250").await;
+
+    // inbuxa: a signed-in session ends once its sign-in stops being valid:
+    // after a password change, the next MAIL FROM (or AUTH) is refused and
+    // the session closed
+    let admin = test.account("admin");
+    let kate = admin
+        .create_user_account(
+            "kate@example.org",
+            "the first secret of kate",
+            "Kate",
+            &[],
+            vec![],
+        )
+        .await;
+    let mut sessions = Vec::new();
+    for _ in 0..2 {
+        let mut session = test.new_mta_session();
+        session.data.remote_ip_str = "10.0.0.3".into();
+        session.eval_session_params().await;
+        session.stream.tls = true;
+        session.ehlo("mx.foobar.org").await;
+        session
+            .auth_plain("kate@example.org", "the first secret of kate", "235 2.7.0")
+            .await;
+        sessions.push(session);
+    }
+    admin
+        .registry_update_object(
+            ObjectType::Account,
+            kate.id(),
+            json!({"credentials/0/secret": "the second secret of kate"}),
+        )
+        .await;
+    for (session, command) in sessions.iter_mut().zip([
+        &b"MAIL FROM:<kate@example.org>\r\n"[..],
+        &b"AUTH PLAIN AGthdGVAZXhhbXBsZS5vcmcAdGhlIGZpcnN0IHNlY3JldCBvZiBrYXRl\r\n"[..],
+    ]) {
+        let result = session.ingest(command).await;
+        let response = session.response();
+        assert!(
+            result.is_err() && response.last().is_some_and(|r| r.starts_with("530 5.7.0")),
+            "{} after a password change: {response:?}, closed: {}",
+            std::str::from_utf8(command).unwrap().trim(),
+            result.is_err()
+        );
+    }
 }

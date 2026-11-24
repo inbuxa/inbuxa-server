@@ -143,6 +143,10 @@ impl<T: SessionStream> Session<T> {
 
                                     self.write(b"503 5.5.1 AUTH not allowed.\r\n").await?;
                                 } else if let Some(authenticated_as) = self.authenticated_as() {
+                                    // inbuxa: a session whose sign-in no longer
+                                    // holds is closed rather than told it is in
+                                    let authenticated_as = authenticated_as.to_string();
+                                    self.assert_sign_in_current().await?;
                                     trc::event!(
                                         Smtp(SmtpEvent::AlreadyAuthenticated),
                                         SpanId = self.data.session_id,
