@@ -97,6 +97,13 @@ Every changed file carries the AGPL 5(a) notice in its header.
   which the server sets from its own verdict, the line at which it files mail
   into Junk. Before, spam was answered, and replies went to forged senders.
   The `sieve_spam_gets_no_vacation_reply` test in `crates/common` covers it.
+- `src/runtime/actions/action_vacation.rs`, `src/lib.rs`,
+  `src/runtime/context.rs`: one vacation reply per message (RFC 5230, 4.7).
+  `Context::vacation_sent` is set when a reply is queued, and a later
+  `vacation` in the same run (another branch, an include) sends nothing.
+  Upstream answered once for every `vacation` the script reached, up to
+  `max_out_messages`. The `sieve_one_vacation_reply_per_message` test in
+  `crates/common` covers it.
 - `Cargo.toml`: the example target is dropped, with the top-level
   `examples/` and `tests/`, which the server never builds. (`src/` keeps its
   own `tests` modules: the crate declares them.)

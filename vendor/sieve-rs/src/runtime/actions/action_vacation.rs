@@ -49,7 +49,10 @@ impl TestVacation {
         let mut from = String::new();
         let mut user_addresses = Vec::new();
 
-        if ctx.num_out_messages >= ctx.runtime.max_out_messages {
+        // inbuxa: RFC 5230 (4.7): one vacation reply per message. A script
+        // that reaches vacation again, in another branch or after an
+        // include, sends nothing more
+        if ctx.vacation_sent || ctx.num_out_messages >= ctx.runtime.max_out_messages {
             return TestResult::Bool(false);
         }
 
@@ -342,6 +345,7 @@ impl Vacation {
         let mut events = Vec::with_capacity(3);
         ctx.last_message_id += 1;
         ctx.num_out_messages += 1;
+        ctx.vacation_sent = true;
         events.push(Event::CreatedMessage {
             message_id: ctx.last_message_id,
             message,

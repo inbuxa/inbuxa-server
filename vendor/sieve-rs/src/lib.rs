@@ -137,6 +137,8 @@ pub struct Context<'x> {
     pub(crate) num_redirects: usize,
     pub(crate) num_instructions: usize,
     pub(crate) num_out_messages: usize,
+    // inbuxa: a vacation reply was queued; RFC 5230 allows one per message
+    pub(crate) vacation_sent: bool,
     pub(crate) regex_cache: runtime::tests::comparator::RegexCache,
     pub(crate) scanned_bytes: std::cell::Cell<usize>,
 }

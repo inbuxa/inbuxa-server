@@ -601,4 +601,59 @@ if header :regex "x-h" "${p}" { discard; }
             );
         }
     }
+
+    // runs a script against one message and returns the messages it creates
+    // and how many it sends
+    fn sieve_created_messages(script: &str) -> (Vec<String>, usize) {
+        let runtime = sieve::Runtime::new();
+        let compiled = std::sync::Arc::new(
+            sieve::Compiler::new()
+                .compile(script.as_bytes())
+                .unwrap_or_else(|err| panic!("{script}: {err}")),
+        );
+        let message =
+            "From: sender@example.org\r\nTo: john@example.com\r\nSubject: hi\r\n\r\nbody\r\n";
+        let mut ctx = runtime
+            .filter(message.as_bytes())
+            .with_envelope(sieve::Envelope::From, "sender@example.org")
+            .with_envelope(sieve::Envelope::To, "john@example.com")
+            .with_user_address("john@example.com");
+        let mut input = sieve::Input::script("test", compiled);
+        let mut created = Vec::new();
+        let mut sent = 0;
+        while let Some(event) = ctx.run(input) {
+            input = match event.unwrap() {
+                sieve::Event::CreatedMessage { message, .. } => {
+                    created.push(String::from_utf8(message).unwrap());
+                    sieve::Input::True
+                }
+                sieve::Event::SendMessage { .. } => {
+                    sent += 1;
+                    sieve::Input::True
+                }
+                sieve::Event::DuplicateId { .. } => sieve::Input::False,
+                _ => sieve::Input::True,
+            };
+        }
+        (created, sent)
+    }
+
+    // inbuxa: #546: one vacation reply per message (RFC 5230, 4.7), however
+    // many vacation actions the script reaches
+    #[test]
+    fn sieve_one_vacation_reply_per_message() {
+        for script in [
+            "require \"vacation\";\nvacation :handle \"a\" \"away\";\nvacation :handle \"b\" \"still away\";\n",
+            concat!(
+                "require \"vacation\";\n",
+                "if header :contains \"subject\" \"hi\" { vacation :handle \"a\" \"away\"; }\n",
+                "if true { vacation :handle \"b\" \"still away\"; }\n",
+                "if true { vacation :days 1 \"away again\"; }\n",
+            ),
+        ] {
+            let (created, sent) = sieve_created_messages(script);
+            assert_eq!((created.len(), sent), (1, 1), "{script}{created:?}");
+            assert!(created[0].ends_with("\r\n\r\naway"), "{}", created[0]);
+        }
+    }
 }
