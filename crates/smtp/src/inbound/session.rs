@@ -43,15 +43,35 @@ impl<T: SessionStream> Session<T> {
     pub async fn ingest(&mut self, bytes: &[u8]) -> Result<bool, ()> {
         let mut iter = bytes.iter();
         let mut state = std::mem::replace(&mut self.state, State::None);
+        // inbuxa: a line the parser refused is answered once; what it left
+        // unread of the line (after AUTH and a tab, say) is dropped, not
+        // read as another command
+        let mut skip_rest = false;
 
         'outer: loop {
             match &mut state {
                 State::Request(receiver) => loop {
+                    if std::mem::take(&mut skip_rest) {
+                        let mut rest = DummyLineReceiver::default();
+                        if !rest.ingest(&mut iter) {
+                            state = State::SkipLine(rest);
+                            continue 'outer;
+                        }
+                    }
                     // inbuxa (#531): the start of a command split across reads,
                     // and where this read starts, so RCPT can read its line
                     let held = (!receiver.buf().is_empty()).then(|| receiver.buf().clone());
                     let line_start = iter.as_slice();
-                    match receiver.ingest(&mut iter) {
+                    let result = receiver.ingest(&mut iter);
+                    skip_rest = matches!(
+                        &result,
+                        Err(err) if !matches!(
+                            err,
+                            Error::NeedsMoreData { .. } | Error::ResponseTooLong
+                        )
+                    ) && line_start[..line_start.len() - iter.as_slice().len()].last()
+                        != Some(&b'\n');
+                    match result {
                         Ok(request) => match request {
                             Request::Rcpt { mut to } => {
                                 if to.address.is_empty() {
@@ -519,6 +539,13 @@ impl<T: SessionStream> Session<T> {
                         );
 
                         self.write(b"554 5.3.4 Line is too long.\r\n").await?;
+                        state = State::default();
+                    } else {
+                        break 'outer;
+                    }
+                }
+                State::SkipLine(receiver) => {
+                    if receiver.ingest(&mut iter) {
                         state = State::default();
                     } else {
                         break 'outer;

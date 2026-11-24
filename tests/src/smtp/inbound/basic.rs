@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
@@ -81,6 +83,31 @@ async fn basic_commands() {
 
     // Test LHLO on SMTP channel
     session.cmd("LHLO domain.org", "502").await;
+
+    // inbuxa: an AUTH line the parser refuses is answered once, and the
+    // rest of it is not read as another command, also when it arrives in
+    // pieces
+    for (line, code) in [
+        (&b"AUTH \tRSET\r\n"[..], "501 5.5.2"),
+        (b"AUTH  RSET\r\n", "554 5.7.8"),
+    ] {
+        session.ingest(line).await.unwrap();
+        let response = session.response();
+        assert_eq!(
+            response.len(),
+            1,
+            "{} got {response:?}",
+            String::from_utf8_lossy(line).escape_debug()
+        );
+        response.assert_code(code);
+    }
+    session.ingest(b"AUTH \tRS").await.unwrap();
+    session.ingest(b"ET\r\nNOOP\r\n").await.unwrap();
+    let response = session.response();
+    assert_eq!(response.len(), 2, "{response:?}");
+    response
+        .assert_contains("501 5.5.2")
+        .assert_contains("250 2.0.0");
 
     // Test QUIT
     session.ingest(b"QUIT\r\n").await.unwrap_err();
