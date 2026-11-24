@@ -15,6 +15,170 @@ https://github.com/inbuxa/inbuxa-server/security/advisories.
 Every version PR adds that version's entry here. CI refuses a version this
 file has no entry for (`tools/release/version.py --changelog`).
 
+## [27.1-rc.44] - 2026-11-24
+
+27.1-rc.43 with 52 bug fixes from the 27.1 bug sweep (#572): mail
+delivery, IMAP, JMAP, Sieve, the spam filter, calendars and contacts, and
+the cluster. There are no new features and no store layout change.
+
+### Fixed
+Mail delivery:
+- SMTP: mail to a mailing list with no members is refused at RCPT TO with
+  the same 550 5.1.2 an unknown address gets, instead of failing at DATA.
+  (#529, #587)
+- SPF: records with an unknown modifier containing "/" (for example
+  `foo=bar/baz`) no longer fail as permerror; the modifier is ignored.
+  (#533, #587)
+- DKIM: automatic key rotation keeps the replaced key's settings (signed
+  headers, canonicalization, AUID, expiry, reporting, third-party signing,
+  DKIM2 flags) instead of resetting them to defaults. (#534, #587)
+- Delivery Test: no longer reports a STARTTLS error for hosts secured with
+  DANE; it checks certificates the way delivery does. (#530, #599)
+- SMTP: `RCPT TO:<>` is refused for every sender, including signed-in
+  users. (#532, #599)
+- SMTP: a bare `RCPT TO:<postmaster>` (any case) is accepted and delivered
+  to postmaster at the default domain. (#531, #599)
+- Mail delivery: mail a signed-in user sends (587/465 or JMAP) to a local
+  mailbox is stored with a Return-Path, like mail received on port 25.
+  (#537, #599)
+
+IMAP:
+- IMAP: clients get EXISTS for new messages in the reply to FETCH, STORE,
+  SEARCH, THREAD and UIDBATCHES, and IDLE reports changes that were
+  waiting when it started. (#538, #588)
+- IMAP: when SELECT or EXAMINE fails, no mailbox is left selected, so a
+  following CLOSE or EXPUNGE can no longer remove messages from the
+  mailbox that was open before. (#540, #588)
+- IMAP: a command the account isn't allowed to use now gets a tagged NO
+  [NOPERM] and the session continues; before, the connection was dropped
+  without a reply. (#590, #596)
+- IMAP: SELECT or EXAMINE with QRESYNC, sent before ENABLE QRESYNC, now
+  gets BAD instead of NO. (#591, #596)
+- IMAP: saving drafts or sent copies, copying or moving messages, and
+  appends by migration tools no longer trigger "new mail" pushes; mail
+  that arrives by SMTP or LMTP still does. (#548, #596)
+- IMAP: clients that enable CONDSTORE get HIGHESTMODSEQ in the STATUS sent
+  during IDLE. (#539, #610)
+- IMAP: SELECT or EXAMINE with CONDSTORE turns CONDSTORE on for the whole
+  session (RFC 7162). (#605, #610)
+- IMAP: with CONDSTORE on, flag changes sent during IDLE and NOOP include
+  MODSEQ. (#607, #610)
+- Mail: creating or renaming a folder to the same name from two clients at
+  once no longer leaves two folders with that name. (#541, #610)
+
+JMAP:
+- JMAP: saving a draft, importing a message or copying one between
+  accounts no longer sends a "new mail" push; only mail that actually
+  arrives does. (#547, #592)
+- JMAP: EmailSubmission sends to recipients on any well-formed domain
+  (internal names, new gTLDs), and a To/Cc/Bcc address that isn't valid is
+  reported as `invalidRecipients` instead of being silently dropped.
+  (#549, #592)
+- JMAP: destroying the active Sieve script is refused with sieveIsActive
+  (RFC 9661) instead of scriptIsActive. (#553, #601)
+- JMAP: changing the active Sieve script reports both scripts' isActive
+  and moves the SieveScript state. (#554, #601)
+- JMAP: activating a script that the same SieveScript/set call destroys is
+  ignored, and the current script stays active. (#555, #601)
+- JMAP: WebSocket RequestError frames carry the request's requestId.
+  (#552, #602)
+- JMAP push: a push subscription whose endpoint answers 410 Gone is
+  removed; other failures are still retried. (#559, #602)
+- JMAP: Sieve scripts that fail to compile are reported as invalidSieve
+  (RFC 9661) instead of invalidScript. (#600, #602)
+- JMAP: a request body that isn't JSON gets notJSON instead of notRequest.
+  (#557, #602)
+- JMAP: an empty createdIds in a request is echoed in the response, and
+  WebSocket responses name it createdIds. (#558, #602)
+- JMAP: Identity/set and EmailSubmission/set check ifInState
+  (stateMismatch) and always return oldState and newState. (#556, #602)
+- JMAP: one Mailbox/set request can no longer create or rename two
+  mailboxes to the same name, or give two mailboxes the same role. (#606,
+  #610)
+
+Sieve:
+- Sieve: a redirect to a local account keeps the message's spam verdict,
+  so spam lands in the target's Junk. (#542, #593)
+- Sieve: no vacation reply is sent to mail the spam filter puts in Junk.
+  (#543, #593)
+- Sieve: a script sends at most one vacation reply per message. (#546,
+  #601)
+- Sieve: notify mailto links can no longer set Auto-Submitted, Received,
+  Date, Message-ID or From on the notification. (#581, #601)
+
+Spam filter:
+- Spam filter: uploading messages over IMAP (for example a mailbox
+  migration) no longer trains the classifier unless they're flagged $Junk
+  or $NotJunk or uploaded into Junk. (#544, #593)
+- Spam filter: every cluster node starts scoring with a newly trained
+  model, not only the node that trained it. (#545, #593)
+- Spam filter: moving a message from another account (such as a shared
+  mailbox) into your Junk folder, or out of Junk into another account,
+  trains the classifier again. (#589, #597)
+- Spam filter: creating messages in the Inbox with JMAP Email/set no
+  longer trains the classifier as ham. (#594, #610)
+- Spam filter: resetting the classifier stops every node scoring with the
+  deleted model right away. (#595, #610)
+
+Calendar and contacts:
+- Contacts: ContactCard/parse returns every contact in a .vcf file, as an
+  array per blob, not just the first one. (#550, #584)
+- Contacts: contacts created over JMAP without a uid now get one
+  (urn:uuid:…), returned in the response and written as the vCard UID.
+  (#551, #584)
+- Contacts: a contact's online service with only a user name is now kept,
+  and CardDAV clients see it as a text SOCIALPROFILE. (#568, #584)
+- CalDAV: clients see the same default calendar as the webmail. (#565,
+  #585)
+- Calendar: unknown time zone names are refused instead of being stored as
+  floating time. (#563, #585)
+- Calendar: ending a series early, or moving an event into the past, now
+  updates the attendees. (#561, #585)
+- Calendar: RSVP=FALSE attendees (rooms, people invited for information)
+  now get invitations, updates and cancellations. To leave an attendee
+  out, use SCHEDULE-AGENT=CLIENT or NONE. (#567, #585)
+- Calendar: attendees who accepted a series are told when one occurrence
+  is moved or edited. (#566, #585)
+- Calendar: destroying an account removes its queued event alarms. (#562,
+  #604)
+- Calendar: invitation and alarm emails keep the line breaks in the event
+  description. (#564, #604)
+- Calendar: an attendee's delegation now reaches a delegate who already
+  has the event; only the delegation itself is applied to the delegate's
+  copy. (#586, #604)
+
+Search, cluster and recovery:
+- Search: when Elasticsearch rejects some documents in a bulk request, the
+  server logs an error with the count and first reason and retries them,
+  instead of treating them as indexed. (#536, #592)
+- Undelete: a restore whose account has since been deleted ends at once
+  instead of retrying until it fails. (#569, #609)
+- Cluster: after a coordinator outage, a node reloads lookup lists and web
+  apps along with its settings. (#570, #609)
+- Recovery mode: an invalid INBUXA_RECOVERY_MODE_PORT stops the start
+  instead of silently using 8080. (#571, #609)
+
+### Upgrading
+- JMAP clients see a few error and response changes: `sieveIsActive` and
+  `invalidSieve` (RFC 9661) replace `scriptIsActive` and `invalidScript`,
+  a body that isn't JSON gets `notJSON`, and ContactCard/parse returns
+  every card in a file as an array per blob. The old Sieve error names are
+  still accepted when reading.
+- Calendar: attendees marked RSVP=FALSE (rooms, people invited for
+  information) now get invitations, updates and cancellations. Use
+  SCHEDULE-AGENT=CLIENT or NONE to leave one out. Unknown time zone names
+  are refused instead of stored as floating time.
+- SMTP: `RCPT TO:<>` is refused for signed-in users too, and mail to a
+  mailing list with no members is refused at RCPT TO.
+- Spam filter: messages uploaded over IMAP APPEND or created with JMAP
+  Email/set train the classifier only when flagged $Junk or $NotJunk or
+  put in Junk.
+- Recovery and bootstrap mode refuse to start on an invalid
+  INBUXA_RECOVERY_MODE_PORT instead of using 8080.
+- 27.1-rc.43 to 27.1-rc.44 rolls like any update, with no store layout
+  step.
+
+
 ## [27.1-rc.43] - 2026-11-23
 
 27.1-rc.42 with security fixes from an internal security review (two high,
