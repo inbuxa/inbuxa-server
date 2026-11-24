@@ -335,6 +335,23 @@ impl Server {
                     }
                 }
             }
+
+            // inbuxa: an account on the default roles isn't linked to them,
+            // so a change to a default role, or to a role one of them holds,
+            // reaches every cached access token
+            let security = &self.core.network.security;
+            if [
+                &security.default_role_ids_user,
+                &security.default_role_ids_group,
+                &security.default_role_ids_tenant,
+                &security.default_role_ids_admin,
+            ]
+            .into_iter()
+            .flatten()
+            .any(|role_id| fetched_role_ids.contains(&role_id.document_id()))
+            {
+                changes.insert(CacheInvalidation::AllAccessTokens);
+            }
         }
 
         // inbuxa: MT-16: a tenant's change reaches its people on their next request
@@ -481,6 +498,10 @@ impl Server {
                 }
                 CacheInvalidation::DomainNegative => {
                     cache.domain_names_negative.clear();
+                }
+                CacheInvalidation::AllAccessTokens => {
+                    cache.access_tokens.clear();
+                    cache.http_auth.clear();
                 }
             }
         }

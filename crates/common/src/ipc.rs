@@ -116,6 +116,8 @@ pub enum CacheInvalidation {
         local_part_hash: u32,
     },
     DomainNegative,
+    // inbuxa: every cached access token, as when a default role changes
+    AllAccessTokens,
 }
 
 #[derive(Debug)]
