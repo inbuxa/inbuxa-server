@@ -13,7 +13,7 @@ use common::{BuildServer, config::mailstore::spamfilter::PyzorConfig, ipc::Regis
 use registry::schema::{
     enums::TracingLevel,
     prelude::{ObjectType, Property},
-    structs::{Action, Expression, MtaStageAuth, SpamPyzor, Tracer, TracerStdout},
+    structs::{Action, Expression, MemoryLookupKey, MtaStageAuth, SpamPyzor, Tracer, TracerStdout},
 };
 
 #[tokio::test(flavor = "multi_thread")]
@@ -49,6 +49,7 @@ pub async fn reload_tests() {
 
     test_unresolvable_pyzor(&test).await;
     test_build_errors(&test).await;
+    test_catch_up_reloads_lookups(&test).await;
 
     if test.is_reset() {
         test.temp_dir.delete();
@@ -199,6 +200,42 @@ async fn test_build_errors(test: &TestServer) {
         .await
         .assert_destroyed(&tracer_ids);
     admin.reload_settings().await;
+}
+
+// inbuxa: #570: a node that may have missed cluster events (its coordinator
+// was away) reloads its lookups too, which live outside the settings
+async fn test_catch_up_reloads_lookups(test: &TestServer) {
+    println!("Running catch-up after missed cluster events...");
+    let admin = test.account("admin@example.org");
+    let before = test.server.inner.data.lookup_stores.load_full();
+    assert!(test.server.get_lookup_store("catch-up").is_none());
+
+    let key_id = admin
+        .registry_create_object(MemoryLookupKey {
+            namespace: "catch-up".into(),
+            key: "missed.example.org".into(),
+            is_glob_pattern: false,
+        })
+        .await;
+    admin.reload_lookup_stores().await;
+    assert!(test.server.get_lookup_store("catch-up").is_some());
+
+    // This node missed the change: it still has the lookups from before
+    test.server.inner.data.lookup_stores.store(before);
+    assert!(test.server.get_lookup_store("catch-up").is_none());
+
+    services::broadcast::subscriber::recover_missed_events(&test.server.inner, "Test").await;
+    assert!(
+        test.server.get_lookup_store("catch-up").is_some(),
+        "the catch-up didn't reload the lookups"
+    );
+
+    admin
+        .registry_destroy(ObjectType::MemoryLookupKey, [key_id])
+        .await
+        .assert_destroyed(&[key_id]);
+    admin.reload_lookup_stores().await;
+    assert!(test.server.get_lookup_store("catch-up").is_none());
 }
 
 fn running_pyzor(test: &TestServer) -> PyzorConfig {

@@ -120,10 +120,14 @@ impl Listeners {
                         bind: Map::new(vec![
                             SocketAddr::from_str(&format!(
                                 "[::]:{}",
-                                types::branding::env_var("RECOVERY_MODE_PORT")
-                                    .ok()
-                                    .and_then(|p| p.parse::<u16>().ok())
-                                    .unwrap_or(8080)
+                                // inbuxa: #571: boot has refused a value that
+                                // isn't a port
+                                crate::manager::listener_ports::recovery_mode_port(
+                                    types::branding::env_var("RECOVERY_MODE_PORT")
+                                        .ok()
+                                        .as_deref()
+                                )
+                                .unwrap_or(crate::manager::listener_ports::DEFAULT_RECOVERY_PORT)
                             ))
                             .unwrap(),
                         ]),

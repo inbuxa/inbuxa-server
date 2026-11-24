@@ -14,6 +14,7 @@ use crate::utils::{
     pop3::{self, Pop3Connection},
     server::{TestServer, TestServerBuilder},
     smtp::SmtpConnection,
+    storage::task_left_after,
     webdav::DummyWebDavClient,
 };
 use email::{
@@ -26,21 +27,22 @@ use jmap_client::client::{Client, Credentials};
 use jmap_proto::error::set::SetErrorType;
 use registry::{
     schema::{
+        enums::ArchivedItemType,
         prelude::{ObjectType, Property},
         structs::{
             self, DataRetention, Expression, Imap, Jmap, MtaStageAuth, MtaStageRcpt, Task,
-            UserAccount,
+            TaskRestoreArchivedItem, TaskStatus, UserAccount,
         },
     },
-    types::duration::Duration,
+    types::{datetime::UTCDateTime, duration::Duration},
 };
 use serde_json::{Value, json};
 use store::{
     Deserialize, IterateParams, ValueKey,
     query::acl::AclQuery,
-    write::{TaskQueueClass, ValueClass},
+    write::{BatchBuilder, TaskQueueClass, ValueClass},
 };
-use types::id::Id;
+use types::{blob::BlobId, id::Id};
 
 const SECRET: &str = "undelete test user passphrase";
 const EVENT: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:test\r\nBEGIN:VEVENT\r\nUID:lunch-1\r\nDTSTAMP:20260918T100000Z\r\nDTSTART:20260918T120000Z\r\nDTEND:20260918T130000Z\r\nSUMMARY:Lunch\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
@@ -718,6 +720,28 @@ pub async fn test(test: &mut TestServer) {
         .registry_update_setting(MtaStageRcpt::default(), &[Property::WaitOnFail])
         .await;
     admin.reload_settings().await;
+
+    // #569: a restore whose account was deleted in the meantime ends at once,
+    // rather than being retried until it fails
+    let doomed = admin
+        .create_user_account("restoregone@example.org", SECRET, "Gone", &[], vec![])
+        .await;
+    let doomed_id = doomed.id();
+    admin.destroy_account(doomed).await;
+    test.wait_for_tasks().await;
+    let mut batch = BatchBuilder::new();
+    batch.schedule_task(Task::RestoreArchivedItem(TaskRestoreArchivedItem {
+        account_id: doomed_id,
+        archived_item_type: ArchivedItemType::Email,
+        blob_id: BlobId::default(),
+        created_at: UTCDateTime::now(),
+        archived_until: UTCDateTime::now(),
+        status: TaskStatus::now(),
+    }));
+    test.server.store().write(batch.build_all()).await.unwrap();
+    test.server.notify_task_queue();
+    let left = task_left_after(&test.server, std::time::Duration::from_secs(5)).await;
+    assert!(left.is_none(), "#569: restore still queued: {left:?}");
 
     // Clean up
     admin.set_retention(None).await;

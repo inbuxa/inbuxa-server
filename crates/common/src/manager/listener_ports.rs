@@ -201,9 +201,43 @@ pub fn proxy_listeners(
     Ok(Some(ProxyListeners { ports, trusted }))
 }
 
+/// inbuxa: #571: where the recovery-mode and bootstrap listener listens.
+pub const RECOVERY_PORT_ENV_VAR: &str = "INBUXA_RECOVERY_MODE_PORT";
+pub const DEFAULT_RECOVERY_PORT: u16 = 8080;
+
+/// The recovery-mode listener's port, from [`RECOVERY_PORT_ENV_VAR`]; 8080
+/// when it isn't set. A value that isn't a port is refused: falling back to
+/// 8080 would move the listener without a word.
+pub fn recovery_mode_port(value: Option<&str>) -> Result<u16, String> {
+    match value.map(str::trim).filter(|value| !value.is_empty()) {
+        None => Ok(DEFAULT_RECOVERY_PORT),
+        Some(value) => match value.parse::<u16>() {
+            Ok(port) if port > 0 => Ok(port),
+            _ => Err(format!(
+                "{RECOVERY_PORT_ENV_VAR}: '{value}' is not a port (1 to 65535)"
+            )),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recovery_mode_port_read() {
+        assert_eq!(recovery_mode_port(None), Ok(8080));
+        assert_eq!(recovery_mode_port(Some("")), Ok(8080));
+        assert_eq!(recovery_mode_port(Some("8081")), Ok(8081));
+        assert_eq!(recovery_mode_port(Some(" 9090 ")), Ok(9090));
+        for value in ["808O", "0", "65536", "-1", "8080/tcp"] {
+            let err = recovery_mode_port(Some(value)).unwrap_err();
+            assert!(
+                err.contains(RECOVERY_PORT_ENV_VAR) && err.contains(&format!("'{value}'")),
+                "{value}: {err}"
+            );
+        }
+    }
 
     #[test]
     fn proxy_listeners_read() {

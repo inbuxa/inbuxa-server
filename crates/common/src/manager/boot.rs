@@ -265,6 +265,18 @@ impl BootManager {
                  console.",
             );
         }
+        // inbuxa: #571: a recovery-mode port that isn't one stops the start,
+        // rather than the listener moving to 8080
+        let recovery_port = if registry.is_recovery_mode() {
+            super::listener_ports::recovery_mode_port(
+                types::branding::env_var("RECOVERY_MODE_PORT")
+                    .ok()
+                    .as_deref(),
+            )
+            .unwrap_or_else(|err| failed(&err))
+        } else {
+            super::listener_ports::DEFAULT_RECOVERY_PORT
+        };
         let mut bootstrap = Bootstrap::new(registry).await;
 
         // inbuxa: K-S8: a seed is only for a new store, which the defaults
@@ -330,14 +342,18 @@ impl BootManager {
                     trc::event!(
                         Server(trc::ServerEvent::BootstrapMode),
                         Hostname = bootstrap.registry.local_hostname().to_string(),
-                        Details =
-                            "No configuration file was found. Port 8080 is open for initial setup.",
+                        Details = format!(
+                            "No configuration file was found. Port {recovery_port} is open for \
+                             initial setup."
+                        ),
                         Version = types::brand_version!(),
                     );
                 } else if bootstrap.registry.is_recovery_mode() {
                     trc::event!(
                         Server(trc::ServerEvent::RecoveryMode),
-                        Details = "Port 8080 is open for troubleshooting and recovery.",
+                        Details = format!(
+                            "Port {recovery_port} is open for troubleshooting and recovery."
+                        ),
                         Hostname = bootstrap.registry.local_hostname().to_string(),
                         Version = types::brand_version!(),
                     );
