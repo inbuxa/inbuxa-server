@@ -11,6 +11,17 @@ https://github.com/inbuxa/inbuxa-server/security/advisories.
 Every version PR adds that version's entry here. CI refuses a version this
 file has no entry for (`tools/release/changelog-check.py`).
 
+## [2026.11.24.2] - 2026-11-24
+
+2026.11.24.1 with a build fix. 2026.11.24.1's binaries and images could
+not be built, so 2026.11.24.2 is the first release that carries its
+security fixes (see 2026.11.24.1 below).
+
+### Fixed
+- Build: the EventSource session check made the stream's body lose `Sync`
+  with the SQL and Redis store backends, so the release build failed. The
+  check now runs as its own task, and CI builds those backends. (#624)
+
 ## [2026.11.24.1] - 2026-11-24
 
 2026.11.24 with security fixes from security reviews (one high,
