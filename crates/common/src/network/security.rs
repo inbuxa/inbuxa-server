@@ -463,10 +463,16 @@ impl Server {
     }
 
     pub fn is_secure_password(&self, password: &str, user_inputs: &[&str]) -> Result<(), String> {
-        if (password.len() as u32) > self.core.network.security.password_max_length {
+        // inbuxa: never longer than sign-in checks, whatever the setting
+        let max_length = self
+            .core
+            .network
+            .security
+            .password_max_length
+            .min(directory::core::secret::MAX_SECRET_LEN as u32);
+        if (password.len() as u32) > max_length {
             Err(format!(
-                "Password must be at most {} characters long.",
-                self.core.network.security.password_max_length
+                "Password must be at most {max_length} characters long."
             ))
         } else if (password.len() as u32) < self.core.network.security.password_min_length {
             Err(format!(
