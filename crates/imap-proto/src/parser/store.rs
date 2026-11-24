@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use compact_str::{CompactString, ToCompactString, format_compact};
@@ -15,7 +17,7 @@ use crate::{
     receiver::{Request, Token, bad},
 };
 
-use super::{parse_number, parse_sequence_set};
+use super::{limits, parse_number, parse_sequence_set};
 
 impl Request<Command> {
     pub fn parse_store(self) -> trc::Result<store::Arguments> {
@@ -102,6 +104,13 @@ impl Request<Command> {
                 for token in tokens {
                     match token {
                         Token::Argument(flag) => {
+                            // inbuxa: see limits
+                            if keywords.len() >= limits::MAX_FLAGS {
+                                return Err(bad(
+                                    self.tag.to_compact_string(),
+                                    format!("Too many flags, the limit is {}.", limits::MAX_FLAGS),
+                                ));
+                            }
                             keywords.push(
                                 Flag::parse_imap(flag)
                                     .map_err(|v| bad(self.tag.to_compact_string(), v))?,
