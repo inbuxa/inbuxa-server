@@ -422,7 +422,11 @@ pub async fn test(test: &mut TestServer) {
                 ("com.example.app:/cb", None, false),
                 ("http://127.0.0.1:4711/cb", Some(PKCE_CHALLENGE), true),
                 ("http://localhost:4711/cb", Some(PKCE_CHALLENGE), true),
-                ("http://localhost.example.net/cb", Some(PKCE_CHALLENGE), false),
+                (
+                    "http://localhost.example.net/cb",
+                    Some(PKCE_CHALLENGE),
+                    false,
+                ),
                 ("com.example.app:/cb", Some(PKCE_CHALLENGE), true),
                 ("https://app.example.net/cb", Some(PKCE_CHALLENGE), false),
             ] {
