@@ -23,11 +23,18 @@ use registry::{
 use serde_json::json;
 use std::{
     path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 use trc::{EventType, ServerEvent};
 
 const PREFIX: &str = "tracer-reload";
+// Upper bound on the event stream, so a reload that never lands fails
+// instead of filling the disk
+const MAX_SEQ: usize = 500_000;
 
 #[tokio::test(flavor = "multi_thread")]
 pub async fn tracer_reload_tests() {
@@ -99,16 +106,24 @@ async fn test_log_tracer_moves(test: &TestServer) {
     emit("marker-before");
     wait_for(&old_file, "marker-before").await;
 
-    // Events keep coming while the path changes
-    let stream = tokio::spawn(async {
-        for i in 0..2000u32 {
-            emit(&format!("seq-{i:05}-end"));
-            if i % 50 == 0 {
-                tokio::time::sleep(Duration::from_millis(1)).await;
+    // Events keep coming while the path changes: the stream runs until the
+    // new file has some of it, so the switch always lands mid-stream (#464)
+    let stop = Arc::new(AtomicBool::new(false));
+    let stream = tokio::spawn({
+        let stop = stop.clone();
+        async move {
+            let mut sent = 0usize;
+            while !stop.load(Ordering::Relaxed) && sent < MAX_SEQ {
+                emit(&format!("seq-{sent:06}-end"));
+                sent += 1;
+                if sent % 50 == 0 {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
             }
+            sent
         }
     });
-    tokio::time::sleep(Duration::from_millis(5)).await;
+    wait_for(&old_file, "seq-").await;
     let response = admin
         .registry_update(
             ObjectType::Tracer,
@@ -116,36 +131,44 @@ async fn test_log_tracer_moves(test: &TestServer) {
         )
         .await;
     assert_applied(&response);
-    stream.await.unwrap();
+    wait_for(&new_file, "seq-").await;
+    stop.store(true, Ordering::Relaxed);
+    let sent = stream.await.unwrap();
+    assert!(sent < MAX_SEQ, "the reload never reached the new file");
 
     // Once the reload has run, events go to the new file only
     tokio::time::sleep(Duration::from_millis(200)).await;
     emit("marker-after");
     wait_for(&new_file, "marker-after").await;
-    wait_for(&new_file, "seq-01999-end").await;
+    wait_for(&new_file, &format!("seq-{:06}-end", sent - 1)).await;
     tokio::time::sleep(Duration::from_millis(200)).await;
     let old = read(&old_file);
     let new = read(&new_file);
     assert!(!old.contains("marker-after"), "old file still written to");
     assert!(!new.contains("marker-before"));
 
-    // Every event written once, in one file or the other
-    let old_seq = count_seq(&old);
-    let new_seq = count_seq(&new);
+    // Every event written once, in one file or the other, and both files
+    // got part of the stream
+    let old_seq = count_seq(&old, sent);
+    let new_seq = count_seq(&new, sent);
     println!(
-        "{} events in the old file, {} in the new one",
+        "{sent} events sent: {} in the old file, {} in the new one",
         old_seq.iter().filter(|c| **c > 0).count(),
         new_seq.iter().filter(|c| **c > 0).count()
     );
-    for i in 0..2000 {
+    for i in 0..sent {
         assert_eq!(
             old_seq[i] + new_seq[i],
             1,
-            "seq-{i:05} written {} + {} times",
+            "seq-{i:06} written {} + {} times",
             old_seq[i],
             new_seq[i]
         );
     }
+    assert!(
+        old_seq.iter().any(|c| *c > 0),
+        "no event of the stream reached the old file"
+    );
     assert!(
         new_seq.iter().any(|c| *c > 0),
         "no event of the stream reached the new file"
@@ -202,11 +225,11 @@ fn read(path: &Path) -> String {
     std::fs::read_to_string(path).unwrap_or_default()
 }
 
-fn count_seq(text: &str) -> Vec<u32> {
-    let mut counts = vec![0u32; 2000];
+fn count_seq(text: &str, sent: usize) -> Vec<u32> {
+    let mut counts = vec![0u32; sent];
     for part in text.split("seq-").skip(1) {
-        if let Some(n) = part.get(..5).and_then(|n| n.parse::<usize>().ok())
-            && part[5..].starts_with("-end")
+        if let Some(n) = part.get(..6).and_then(|n| n.parse::<usize>().ok())
+            && part[6..].starts_with("-end")
         {
             counts[n] += 1;
         }
