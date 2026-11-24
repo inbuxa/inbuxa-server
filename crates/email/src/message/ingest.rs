@@ -293,6 +293,31 @@ impl EmailIngest for Server {
                     });
                 }
 
+                // inbuxa (#537): final delivery records the envelope sender
+                // (RFC 5321, Section 4.4). Mail received on port 25 has it
+                // from DATA, which leaves it off submitted mail because that
+                // may still be relayed; so submitted mail gets it here,
+                // unless it has one already
+                if verified_sender == VerifiedSender::Envelope
+                    && message.header(HeaderName::ReturnPath).is_none()
+                {
+                    const HEADER: &str = "Return-Path";
+                    let offset_field = extra_headers.len();
+                    let offset_start = offset_field + HEADER.len() + 1;
+                    let _ = write!(&mut extra_headers, "{HEADER}: <{envelope_from}>\r\n");
+                    extra_headers_parsed.push(Header {
+                        name: HeaderName::ReturnPath,
+                        value: if envelope_from.is_empty() {
+                            HeaderValue::Empty
+                        } else {
+                            HeaderValue::Text(envelope_from.into())
+                        },
+                        offset_field: offset_field as u32,
+                        offset_start: offset_start as u32,
+                        offset_end: extra_headers.len() as u32,
+                    });
+                }
+
                 // Spam training on confirmed false positives
                 if self.core.spam.enabled {
                     let mut overridden = None;

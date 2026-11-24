@@ -11,7 +11,7 @@ use crate::{
         inbound::TestMessage,
         session::{TestSession, VerifyResponse, load_test_message},
     },
-    utils::server::TestServerBuilder,
+    utils::{account::Account, server::TestServerBuilder},
 };
 use registry::{
     schema::{
@@ -23,6 +23,8 @@ use registry::{
     },
     types::{list::List, map::Map},
 };
+use serde_json::json;
+use std::time::Duration;
 
 #[tokio::test]
 async fn data() {
@@ -485,4 +487,131 @@ async fn data() {
         .registry_destroy_all(ObjectType::MtaInboundThrottle)
         .await;
     test.assert_is_empty().await;
+}
+
+// inbuxa (#537): mail a signed-in user submits to a local mailbox is stored
+// with a Return-Path, as mail received on port 25 is, and never two
+#[tokio::test]
+async fn submission_return_path() {
+    let test = TestServerBuilder::new("smtp_submission_return_path_test")
+        .await
+        .with_http_listener(19064)
+        .await
+        .disable_services()
+        .build()
+        .await;
+
+    let admin = test.account("admin");
+    admin
+        .create_user_account(
+            "john@foobar.org",
+            "12345 + extra safety",
+            "John Doe",
+            &[],
+            vec![],
+        )
+        .await;
+    let jane = admin
+        .create_user_account(
+            "jane@foobar.org",
+            "abcde + extra safety",
+            "Jane Smith",
+            &[],
+            vec![],
+        )
+        .await;
+
+    // Submitted on port 587
+    let mut session = test.new_mta_session();
+    session.data.local_port = 587;
+    session.stream.tls = true;
+    session.eval_session_params().await;
+    session.ehlo("client.foobar.org").await;
+    session
+        .auth_plain("john@foobar.org", "12345 + extra safety", "235 2.7.0")
+        .await;
+    session
+        .send_message(
+            "john@foobar.org",
+            &["jane@foobar.org"],
+            concat!(
+                "From: john@foobar.org\r\n",
+                "To: jane@foobar.org\r\n",
+                "Subject: Submitted\r\n",
+                "\r\n",
+                "Sent on port 587."
+            ),
+            "250",
+        )
+        .await;
+    assert_eq!(
+        delivered_return_paths(&jane, "Submitted").await,
+        ["john@foobar.org"]
+    );
+
+    // Received on port 25: it has one from DATA and isn't given another
+    let mut session = test.new_mta_session();
+    session.data.local_port = 25;
+    session.eval_session_params().await;
+    session.ehlo("mx.example.net").await;
+    session
+        .send_message(
+            "bill@example.net",
+            &["jane@foobar.org"],
+            concat!(
+                "From: bill@example.net\r\n",
+                "To: jane@foobar.org\r\n",
+                "Subject: Received\r\n",
+                "\r\n",
+                "Sent on port 25."
+            ),
+            "250",
+        )
+        .await;
+    assert_eq!(
+        delivered_return_paths(&jane, "Received").await,
+        ["bill@example.net"]
+    );
+}
+
+/// Waits for a message with this subject to reach the account, and returns
+/// the addresses in its Return-Path headers
+async fn delivered_return_paths(account: &Account, subject: &str) -> Vec<String> {
+    for _ in 0..50 {
+        let response = account
+            .jmap_method_calls(json!([
+                ["Email/query", {
+                    "accountId": account.id_string()
+                }, "q"],
+                ["Email/get", {
+                    "accountId": account.id_string(),
+                    "#ids": {"resultOf": "q", "name": "Email/query", "path": "/ids"},
+                    "properties": ["subject", "header:Return-Path:asText:all"]
+                }, "g"]
+            ]))
+            .await;
+        if let Some(email) = response.0["methodResponses"][1][1]["list"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|email| email["subject"].as_str() == Some(subject))
+        {
+            return email["header:Return-Path:asText:all"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|value| {
+                    value
+                        .as_str()
+                        .unwrap()
+                        .trim()
+                        .trim_start_matches('<')
+                        .trim_end_matches('>')
+                        .to_string()
+                })
+                .collect();
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    panic!("no message {subject:?} was delivered");
 }
