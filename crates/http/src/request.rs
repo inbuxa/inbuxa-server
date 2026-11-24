@@ -139,13 +139,12 @@ impl ParseHttp for Server {
                             }
                         }
 
+                        // inbuxa: read no more than a request may be; the
+                        // upload limit, or none for UnlimitedUploads, is
+                        // for uploads
                         let bytes = fetch_body(
                             &mut req,
-                            if !access_token.has_permission(Permission::UnlimitedUploads) {
-                                self.core.jmap.upload_max_size
-                            } else {
-                                0
-                            },
+                            self.core.jmap.request_max_size,
                             session.session_id,
                         )
                         .await

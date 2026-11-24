@@ -24,7 +24,10 @@ use std::time::Instant;
 use store::write::now;
 use tokio_tungstenite::WebSocketStream;
 use trc::JmapEvent;
-use tungstenite::Message;
+use tungstenite::{
+    Message,
+    protocol::{CloseFrame, frame::coding::CloseCode},
+};
 use types::type_state::{DataType, StateChange};
 use utils::map::bitmap::Bitmap;
 
@@ -183,6 +186,22 @@ impl WebSocketHandler for Server {
 
                             last_request = Instant::now();
                             last_heartbeat = Instant::now();
+                        }
+                        // inbuxa: over the size limit, told with 1009
+                        // (RFC 6455 §7.4.1) before the socket closes
+                        Ok(Some(Err(tungstenite::Error::Capacity(err)))) => {
+                            trc::event!(Jmap(JmapEvent::WebsocketError),
+                                                    Details = "Websocket message too big",
+                                                    SpanId = session.session_id,
+                                                    Reason = err.to_string()
+                                        );
+                            let _ = stream
+                                .close(Some(CloseFrame {
+                                    code: CloseCode::Size,
+                                    reason: "Message too big".into(),
+                                }))
+                                .await;
+                            break;
                         }
                         Ok(Some(Err(err))) => {
                             trc::event!(Jmap(JmapEvent::WebsocketError),

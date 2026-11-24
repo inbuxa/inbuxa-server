@@ -376,8 +376,7 @@ pub(crate) async fn http_request(
 
                 PushDelivery::Done
             } else {
-                let mut reason = response.text().await.unwrap_or_default();
-                reason.truncate(reason.ceil_char_boundary(MAX_ERROR_RESPONSE_LEN));
+                let reason = error_reason(response).await;
 
                 trc::event!(
                     PushSubscription(PushSubscriptionEvent::Error),
@@ -402,6 +401,23 @@ pub(crate) async fn http_request(
             PushDelivery::Retry
         }
     }
+}
+
+/// inbuxa: the start of an error answer's body, for the log. The endpoint
+/// is the user's to choose, and its body can be of any size, so no more
+/// than MAX_ERROR_RESPONSE_LEN is read.
+async fn error_reason(mut response: reqwest::Response) -> String {
+    let mut bytes = Vec::with_capacity(MAX_ERROR_RESPONSE_LEN);
+    while bytes.len() < MAX_ERROR_RESPONSE_LEN {
+        let Ok(Some(chunk)) = response.chunk().await else {
+            break;
+        };
+        let take = chunk.len().min(MAX_ERROR_RESPONSE_LEN - bytes.len());
+        bytes.extend_from_slice(&chunk[..take]);
+    }
+    let mut reason = String::from_utf8_lossy(&bytes).into_owned();
+    reason.truncate(reason.floor_char_boundary(MAX_ERROR_RESPONSE_LEN));
+    reason
 }
 
 fn is_same_organization(previous: &Url, next: &Url) -> bool {
@@ -512,5 +528,69 @@ mod tests {
                 "{previous} -> {next}"
             );
         }
+    }
+
+    // inbuxa: an endpoint that answers an error with a body of any size has
+    // only the first KiB read
+    #[tokio::test]
+    async fn error_body_is_read_to_one_kib() {
+        use super::{MAX_ERROR_RESPONSE_LEN, http_request};
+        use email::push::{PushSubscription, Urgency};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        const BODY_LEN: usize = 64 << 20;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let endpoint = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = vec![0u8; 16 * 1024];
+            let _ = socket.read(&mut request).await;
+            socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 500 Internal Server Error\r\nContent-Length: {BODY_LEN}\r\n\r\n"
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            let chunk = vec![b'x'; 64 * 1024];
+            let mut sent = 0;
+            while sent < BODY_LEN && socket.write_all(&chunk).await.is_ok() {
+                sent += chunk.len();
+            }
+            sent
+        });
+
+        let subscription = PushSubscription {
+            id: 1,
+            url: format!("http://{address}/push"),
+            device_client_id: "device".into(),
+            expires: u64::MAX,
+            verification_code: "code".into(),
+            verified: true,
+            types: Default::default(),
+            keys: None,
+            email_push: Vec::new(),
+        };
+        let client = utils::http::http_client_builder(false).build().unwrap();
+        let delivery = http_request(
+            &client,
+            &subscription,
+            b"{}".to_vec(),
+            std::time::Duration::from_secs(30),
+            None,
+            Urgency::Normal,
+        )
+        .await;
+        drop(client);
+        assert_eq!(delivery, PushDelivery::Retry);
+
+        // What the socket buffers hold is all that got sent past the KiB
+        let sent = endpoint.await.unwrap();
+        assert!(
+            sent < BODY_LEN / 4,
+            "{sent} of {BODY_LEN} bytes of the error body were read, for a reason of {MAX_ERROR_RESPONSE_LEN}"
+        );
     }
 }
