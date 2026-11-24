@@ -15,7 +15,7 @@ use crate::{
         server::TestServer,
     },
 };
-use common::ipc::RegistryChange;
+use common::{auth::AccessTokenInner, ipc::RegistryChange};
 use imap_proto::ResponseType;
 use jmap_client::{
     client::{Client, Credentials},
@@ -30,7 +30,11 @@ use registry::{
     types::ipmask::IpAddrOrMask,
 };
 use serde_json::json;
-use std::{net::Ipv4Addr, sync::Arc, time::Duration};
+use std::{
+    net::Ipv4Addr,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use store::{registry::write::RegistryWrite, write::now};
 use types::id::Id;
 
@@ -557,7 +561,12 @@ pub async fn test(test: &mut TestServer) {
                 .await;
         });
     }
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // inbuxa: probe once all 8 hold a slot, not after a fixed 500 ms; they
+    // were sometimes slower than that to reach the server
+    wait_for_in_flight(test, user_id.document_id(), "8 requests", |token| {
+        token.in_flight_http_requests() >= 8
+    })
+    .await;
     let body = serde_json::to_vec(&json!({
         "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
         "methodCalls": [
@@ -602,7 +611,10 @@ pub async fn test(test: &mut TestServer) {
     );
 
     // Wait for sleep to be done
-    tokio::time::sleep(Duration::from_millis(1000)).await;
+    wait_for_in_flight(test, user_id.document_id(), "no requests", |token| {
+        token.in_flight_http_requests() == 0
+    })
+    .await;
 
     // Concurrent upload test
     for _ in 0..4 {
@@ -611,7 +623,11 @@ pub async fn test(test: &mut TestServer) {
             client_.upload(None, b"sleep".to_vec(), None).await.unwrap();
         });
     }
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // inbuxa: as above, probe once all 4 uploads hold a slot
+    wait_for_in_flight(test, user_id.document_id(), "4 uploads", |token| {
+        token.in_flight_uploads() >= 4
+    })
+    .await;
     let resp = raw_http
         .send_full(
             hyper::Method::POST,
@@ -642,7 +658,10 @@ pub async fn test(test: &mut TestServer) {
     );
 
     // Wait for sleep to be done before continuing
-    tokio::time::sleep(Duration::from_millis(1000)).await;
+    wait_for_in_flight(test, user_id.document_id(), "no uploads", |token| {
+        token.in_flight_uploads() == 0 && token.in_flight_http_requests() == 0
+    })
+    .await;
 
     // Disable X-Forwarded-For processing
     admin
@@ -660,6 +679,30 @@ pub async fn test(test: &mut TestServer) {
     admin.destroy_account(user).await;
 
     test.cleanup().await;
+}
+
+/// inbuxa: waits until the account's in-flight HTTP requests and uploads
+/// meet `done`, as the server counts them for its limits.
+async fn wait_for_in_flight(
+    test: &TestServer,
+    account_id: u32,
+    what: &str,
+    done: impl Fn(&AccessTokenInner) -> bool,
+) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let token = test.server.access_token(account_id).await.unwrap();
+        if done(&token) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "waited 30 s for {what} in flight: {} requests, {} uploads",
+            token.in_flight_http_requests(),
+            token.in_flight_uploads()
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }
 
 /// inbuxa: HTTP-JMAP-PREAUTH-2. A page on any other site can make its

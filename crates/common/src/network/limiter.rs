@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{ThrottleKey, ThrottleKeyHasher, ThrottleKeyHasherBuilder};
@@ -59,6 +61,11 @@ impl ConcurrencyLimiter {
 
     pub fn max_concurrent(&self) -> u64 {
         self.0.max_concurrent
+    }
+
+    // inbuxa: how many are in flight now
+    pub fn num_concurrent(&self) -> u64 {
+        self.0.concurrent.load(Ordering::Relaxed)
     }
 }
 
