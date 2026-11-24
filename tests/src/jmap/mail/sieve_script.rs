@@ -15,8 +15,6 @@ use ::email::{
     mailbox::{INBOX_ID, JUNK_ID},
 };
 use jmap_client::{
-    Error,
-    core::set::{SetError, SetErrorType},
     email, mailbox,
     sieve::query::{Comparator, Filter},
 };
