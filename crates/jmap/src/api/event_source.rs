@@ -127,9 +127,24 @@ impl EventSourceHandler for Server {
                     // inbuxa: the stream ends once the sign-in it was opened
                     // with is no longer valid, or the account has lost
                     // permissions or shares it holds
-                    if let Err(err) = server.assert_session_current(&access_token, remote_ip).await {
-                        trc::error!(err.details("EventSource stream ended"));
-                        break;
+                    // inbuxa: the check runs as a task of its own, so this
+                    // stream stays Sync: with the SQL and Redis store backends
+                    // its futures aren't, and the response body has to be. A
+                    // check that can't finish ends the stream.
+                    let check = {
+                        let server = server.clone();
+                        let access_token = access_token.clone();
+                        tokio::spawn(async move {
+                            server.assert_session_current(&access_token, remote_ip).await
+                        })
+                    };
+                    match check.await {
+                        Ok(Ok(())) => (),
+                        Ok(Err(err)) => {
+                            trc::error!(err.details("EventSource stream ended"));
+                            break;
+                        }
+                        Err(_) => break,
                     }
 
                     match event {

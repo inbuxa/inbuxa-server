@@ -149,6 +149,11 @@ jobs:
       # --no-run: compiles every test target without running them, which
       # catches a test that no longer builds without needing a store.
       - run: cargo test --workspace --locked --no-run
+      # The feature set the image and release binaries are built with (see
+      # Dockerfile). Default features are RocksDB only, and the other store
+      # backends change what compiles: 27.1-rc.45 had green CI and a release
+      # build that failed on Sync bounds only those backends bring in.
+      - run: cargo check -p inbuxa --locked --no-default-features --features "sqlite postgres mysql rocks s3 redis azure nats"
       - if: github.ref == 'refs/heads/main'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -158,12 +163,12 @@ jobs:
             ~/.cargo/git/db
             target/debug
           key: cargo-${{ steps.rust.outputs.version }}-${{ hashFiles('Cargo.lock') }}
-      # The release profile, on main only. It is the profile the image is
-      # built with, and it fails in ways the dev profile does not: v2026.9.24
-      # was tagged on a commit whose CI was green and whose release build
-      # could not compile the scim crate at all.
-      - if: github.ref == 'refs/heads/main'
-        run: cargo build -p inbuxa --locked --release
+      # The release profile and features, on main and release/* only. It is what
+      # the image is built with, and it fails in ways the dev profile does not:
+      # v2026.9.24 was tagged on a commit whose CI was green and whose release
+      # build could not compile the scim crate at all.
+      - if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/')
+        run: cargo build -p inbuxa --locked --release --no-default-features --features "sqlite postgres mysql rocks s3 redis azure nats"
 
   # --------------------------------------------------------------- tags ------
   # Two guards before anything is pushed, the same as Gitea's publish.yml:
