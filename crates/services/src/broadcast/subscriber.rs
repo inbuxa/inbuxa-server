@@ -278,16 +278,21 @@ pub fn spawn_broadcast_subscriber(inner: Arc<Inner>, mut shutdown_rx: watch::Rec
 
 /// inbuxa: after a gap in which cluster events may have been missed, drops
 /// every local cache that only those events keep fresh and rebuilds the
-/// settings, certificates and blocked addresses from the registry and loads
-/// the stored spam model, as the missed events would have. The message
-/// caches check the change log on each use and need nothing.
-async fn recover_missed_events(inner: &Arc<Inner>, why: &str) {
+/// settings, certificates, blocked addresses, lookups and applications from
+/// the registry and loads the stored spam model, as the missed events would
+/// have. The message caches check the change log on each use and need
+/// nothing.
+pub async fn recover_missed_events(inner: &Arc<Inner>, why: &str) {
     let server = inner.build_server();
     server.invalidate_all_local_caches();
     for object in [
         ObjectType::ClusterRole,
         ObjectType::Certificate,
         ObjectType::BlockedIp,
+        // inbuxa: #570: these live outside the settings, so a settings
+        // rebuild leaves them as they were
+        ObjectType::StoreLookup,
+        ObjectType::Application,
     ] {
         match Box::pin(server.reload_registry(RegistryChange::Reload(object))).await {
             Ok(result) => result.log(),
