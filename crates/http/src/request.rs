@@ -917,7 +917,10 @@ async fn handle_session<T: SessionStream>(inner: Arc<Inner>, session: SessionDat
     .await
         && !http_err.is_timeout()
     {
-        if http_err.is_parse() {
+        // inbuxa: a head too large to parse (answered 414 or 431) counts
+        // nothing: a page on any site can make its visitors' browsers send
+        // one, with a long enough URL in an `<img>`
+        if http_err.is_parse() && !http_err.is_parse_too_large() {
             let server = inner.build_server();
             // inbuxa: a trusted proxy's address stands for many clients
             if !(server.core.network.http.use_forwarded
