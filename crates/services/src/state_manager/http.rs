@@ -26,7 +26,7 @@ use jmap_proto::{
 };
 use jmap_tools::Value;
 use reqwest::{
-    Client, Url,
+    Client, StatusCode, Url,
     header::{AUTHORIZATION, CONTENT_ENCODING, CONTENT_TYPE},
     redirect::Policy,
 };
@@ -41,6 +41,31 @@ use utils::map::vec_map::VecMap;
 const MAX_ERROR_RESPONSE_LEN: usize = 1024;
 const MAX_REDIRECTS: usize = 4;
 const PUSH_OBJECT_OVERHEAD: usize = 128;
+
+/// inbuxa: what became of one push.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PushDelivery {
+    /// Delivered, or failed in a way sending again won't fix
+    Done,
+    /// Not delivered this time (a timeout, 404, 429, 5xx...), so try again
+    Retry,
+    /// 410: the subscription was deleted and won't come back (RFC 8030 §6.2).
+    /// A 404 is retried: a client's relay spread over several replicas can
+    /// answer it from a replica that doesn't hold the subscription.
+    Gone,
+}
+
+impl PushDelivery {
+    pub(crate) fn from_status(status: StatusCode) -> Self {
+        if status.is_success() {
+            PushDelivery::Done
+        } else if status == StatusCode::GONE {
+            PushDelivery::Gone
+        } else {
+            PushDelivery::Retry
+        }
+    }
+}
 
 #[derive(Default)]
 struct EmailPushObject {
@@ -73,8 +98,12 @@ impl PushRegistration {
             let mut failed = PushBatch::default();
             let mut failed_email_pushes = Vec::new();
             let mut failed_calendar_alerts = Vec::new();
+            let mut gone = false;
 
             for notification in &batch.notifications {
+                if gone {
+                    break;
+                }
                 match notification {
                     PushNotification::StateChange(_) => {}
                     PushNotification::CalendarAlert(calendar_alert) => {
@@ -87,7 +116,7 @@ impl PushRegistration {
                             }),
                             alert_id: calendar_alert.alert_id.clone(),
                         };
-                        if !post_object(
+                        match post_object(
                             &push_client,
                             &subscription,
                             &payload,
@@ -97,8 +126,10 @@ impl PushRegistration {
                         )
                         .await
                         {
-                            failed_calendar_alerts
-                                .push((calendar_alert.account_id, calendar_alert.event_id));
+                            PushDelivery::Done => {}
+                            PushDelivery::Retry => failed_calendar_alerts
+                                .push((calendar_alert.account_id, calendar_alert.event_id)),
+                            PushDelivery::Gone => gone = true,
                         }
                     }
                     PushNotification::EmailPush(email_push) => {
@@ -156,11 +187,11 @@ impl PushRegistration {
                 }
             }
 
-            if !batch.state_changes.is_empty() {
+            if !gone && !batch.state_changes.is_empty() {
                 let payload = PushObject::StateChange {
                     changed: batch.state_changes,
                 };
-                if !post_object(
+                match post_object(
                     &push_client,
                     &subscription,
                     &payload,
@@ -169,13 +200,21 @@ impl PushRegistration {
                     Urgency::Normal,
                 )
                 .await
-                    && let PushObject::StateChange { changed } = payload
                 {
-                    failed.state_changes = changed;
+                    PushDelivery::Done => {}
+                    PushDelivery::Retry => {
+                        if let PushObject::StateChange { changed } = payload {
+                            failed.state_changes = changed;
+                        }
+                    }
+                    PushDelivery::Gone => gone = true,
                 }
             }
 
             for (account_id, email_push) in email_pushes {
+                if gone {
+                    break;
+                }
                 if email_push.emails.is_empty() {
                     continue;
                 }
@@ -186,7 +225,7 @@ impl PushRegistration {
                     state: email_push.change_id.map(State::Exact),
                 };
 
-                if !post_object(
+                match post_object(
                     &push_client,
                     &subscription,
                     &payload,
@@ -196,11 +235,15 @@ impl PushRegistration {
                 )
                 .await
                 {
-                    failed_email_pushes.push(account_id.document_id());
+                    PushDelivery::Done => {}
+                    PushDelivery::Retry => failed_email_pushes.push(account_id.document_id()),
+                    PushDelivery::Gone => gone = true,
                 }
             }
 
-            let result = if failed.state_changes.is_empty()
+            let result = if gone {
+                Event::DeliveryGone { id }
+            } else if failed.state_changes.is_empty()
                 && failed_email_pushes.is_empty()
                 && failed_calendar_alerts.is_empty()
             {
@@ -234,7 +277,7 @@ async fn post_object(
     push_timeout: Duration,
     vapid: Option<&Vapid>,
     urgency: Urgency,
-) -> bool {
+) -> PushDelivery {
     match serde_json::to_vec(object) {
         Ok(body) => {
             http_request(
@@ -254,7 +297,7 @@ async fn post_object(
                 Url = subscription.url.to_string(),
                 Reason = err.to_string()
             );
-            true
+            PushDelivery::Done
         }
     }
 }
@@ -283,7 +326,7 @@ pub(crate) async fn http_request(
     push_timeout: Duration,
     vapid: Option<&Vapid>,
     urgency: Urgency,
-) -> bool {
+) -> PushDelivery {
     let mut client = push_client
         .post(details.url.as_str())
         .timeout(push_timeout)
@@ -311,7 +354,7 @@ pub(crate) async fn http_request(
                     Url = details.url.to_string(),
                     Reason = err
                 );
-                return true;
+                return PushDelivery::Done;
             }
         }
     }
@@ -331,7 +374,7 @@ pub(crate) async fn http_request(
                     Url = details.url.to_string()
                 );
 
-                true
+                PushDelivery::Done
             } else {
                 let mut reason = response.text().await.unwrap_or_default();
                 reason.truncate(reason.ceil_char_boundary(MAX_ERROR_RESPONSE_LEN));
@@ -344,10 +387,11 @@ pub(crate) async fn http_request(
                     Reason = reason,
                 );
 
-                false
+                PushDelivery::from_status(status)
             }
         }
         Err(err) => {
+            // A timeout or a connection that failed: worth another try
             trc::event!(
                 PushSubscription(PushSubscriptionEvent::Error),
                 Details = "HTTP POST failed",
@@ -355,7 +399,7 @@ pub(crate) async fn http_request(
                 Reason = err.to_string()
             );
 
-            false
+            PushDelivery::Retry
         }
     }
 }
@@ -387,8 +431,32 @@ fn is_ip_literal(host: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::is_same_organization;
-    use reqwest::Url;
+    use super::{PushDelivery, is_same_organization};
+    use reqwest::{StatusCode, Url};
+
+    // inbuxa: only 410 means the subscription is gone; anything else that
+    // isn't a success, 404 included, is tried again (RFC 8030 §6.2)
+    #[test]
+    fn push_service_answers() {
+        for (status, expected) in [
+            (StatusCode::OK, PushDelivery::Done),
+            (StatusCode::CREATED, PushDelivery::Done),
+            (StatusCode::NO_CONTENT, PushDelivery::Done),
+            (StatusCode::NOT_FOUND, PushDelivery::Retry),
+            (StatusCode::GONE, PushDelivery::Gone),
+            (StatusCode::BAD_REQUEST, PushDelivery::Retry),
+            (StatusCode::FORBIDDEN, PushDelivery::Retry),
+            (StatusCode::REQUEST_TIMEOUT, PushDelivery::Retry),
+            (StatusCode::PAYLOAD_TOO_LARGE, PushDelivery::Retry),
+            (StatusCode::TOO_MANY_REQUESTS, PushDelivery::Retry),
+            (StatusCode::INTERNAL_SERVER_ERROR, PushDelivery::Retry),
+            (StatusCode::BAD_GATEWAY, PushDelivery::Retry),
+            (StatusCode::SERVICE_UNAVAILABLE, PushDelivery::Retry),
+            (StatusCode::GATEWAY_TIMEOUT, PushDelivery::Retry),
+        ] {
+            assert_eq!(PushDelivery::from_status(status), expected, "{status}");
+        }
+    }
 
     #[test]
     fn same_organization_redirects() {

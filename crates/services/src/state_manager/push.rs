@@ -24,9 +24,9 @@ use std::{
     time::{Duration, Instant},
 };
 use store::{
-    ValueKey,
+    Serialize, ValueKey,
     ahash::{AHashMap, AHashSet},
-    write::{AlignedBytes, Archive, now},
+    write::{AlignedBytes, Archive, Archiver, BatchBuilder, now},
 };
 use tokio::sync::mpsc;
 use trc::{AddContext, PushSubscriptionEvent, ServerEvent};
@@ -470,6 +470,62 @@ pub fn spawn_push_manager(inner: Arc<Inner>) -> mpsc::Sender<Event> {
                             retry_ids.insert(id);
                         }
                     }
+                    Event::DeliveryGone { id } => {
+                        // inbuxa: the push service answered 410, so the
+                        // subscription is gone for good (RFC 8030 §6.2): stop
+                        // pushing to it and destroy it, as its owner would
+                        retry_ids.remove(&id);
+                        if let Some(subscription) = push_servers.remove(&id) {
+                            let account_id = id.document_id();
+                            trc::event!(
+                                PushSubscription(PushSubscriptionEvent::NotFound),
+                                Details =
+                                    "Push service no longer has the subscription, removing it",
+                                Url = subscription.server.url.clone(),
+                                AccountId = account_id,
+                            );
+
+                            let mut expired = Vec::new();
+                            for member_id in &subscription.member_account_ids {
+                                if let Some(ids) = account_push_ids.get_mut(member_id) {
+                                    ids.remove(&id);
+                                    if ids.is_empty() {
+                                        account_push_ids.remove(member_id);
+                                        expired.push(*member_id);
+                                    }
+                                }
+                            }
+                            if !expired.is_empty()
+                                && server
+                                    .inner
+                                    .ipc
+                                    .push_tx
+                                    .clone()
+                                    .send(PushEvent::PushServerRegister {
+                                        activate: vec![],
+                                        expired,
+                                    })
+                                    .await
+                                    .is_err()
+                            {
+                                trc::event!(
+                                    Server(ServerEvent::ThreadError),
+                                    Details = "Error sending state change.",
+                                    CausedBy = trc::location!()
+                                );
+                            }
+
+                            let server = server.clone();
+                            let subscription_id = subscription.server.id;
+                            tokio::spawn(async move {
+                                if let Err(err) =
+                                    remove_subscription(&server, account_id, subscription_id).await
+                                {
+                                    trc::error!(err.details("Failed to remove push subscription"));
+                                }
+                            });
+                        }
+                    }
                 },
                 Ok(None) => {
                     break;
@@ -562,6 +618,101 @@ fn send_verification(
         )
         .await;
     });
+}
+
+/// inbuxa: removes a subscription from the account's stored list, as
+/// PushSubscription/set does when its owner destroys it, and has every node
+/// reload the account's subscriptions.
+async fn remove_subscription(
+    server: &Server,
+    account_id: u32,
+    subscription_id: u32,
+) -> trc::Result<()> {
+    const MAX_ATTEMPTS: usize = 3;
+
+    for attempt in 1..=MAX_ATTEMPTS {
+        let Some(archive) = server
+            .store()
+            .get_value::<Archive<AlignedBytes>>(ValueKey::property(
+                account_id,
+                Collection::Principal,
+                0,
+                PrincipalField::PushSubscriptions,
+            ))
+            .await?
+        else {
+            return Ok(());
+        };
+        let mut subscriptions = archive
+            .deserialize::<PushSubscriptions>()
+            .caused_by(trc::location!())?;
+        let Some(idx) = subscriptions
+            .subscriptions
+            .iter()
+            .position(|s| s.id == subscription_id)
+        else {
+            return Ok(());
+        };
+        subscriptions.subscriptions.swap_remove(idx);
+
+        let mut batch = BatchBuilder::new();
+        if subscriptions.subscriptions.is_empty() {
+            batch
+                .with_account_id(u32::MAX)
+                .with_collection(Collection::Principal)
+                .with_document(account_id)
+                .untag(PrincipalField::PushSubscriptions);
+        }
+        batch
+            .with_account_id(account_id)
+            .with_collection(Collection::Principal)
+            .with_document(0)
+            .assert_value(PrincipalField::PushSubscriptions, archive);
+        if subscriptions.subscriptions.is_empty() {
+            batch.clear(PrincipalField::PushSubscriptions);
+        } else {
+            batch.set(
+                PrincipalField::PushSubscriptions,
+                Archiver::new(subscriptions)
+                    .serialize()
+                    .caused_by(trc::location!())?,
+            );
+        }
+
+        match server.commit_batch(batch).await {
+            Ok(_) => {
+                if server
+                    .inner
+                    .ipc
+                    .push_tx
+                    .clone()
+                    .send(PushEvent::PushServerUpdate {
+                        account_id,
+                        broadcast: true,
+                    })
+                    .await
+                    .is_err()
+                {
+                    trc::event!(
+                        Server(ServerEvent::ThreadError),
+                        Details = "Error sending push updates.",
+                        CausedBy = trc::location!()
+                    );
+                }
+                return Ok(());
+            }
+            // Changed meanwhile, by its owner or another node: look again
+            Err(err)
+                if attempt < MAX_ATTEMPTS
+                    && matches!(
+                        err.as_ref(),
+                        trc::EventType::Store(trc::StoreEvent::AssertValueFailed)
+                    ) => {}
+            Err(err) => return Err(err.caused_by(trc::location!())),
+        }
+    }
+
+    Ok(())
 }
 
 async fn load_push_subscriptions(
