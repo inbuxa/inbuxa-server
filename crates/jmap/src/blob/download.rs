@@ -168,8 +168,9 @@ impl BlobDownload for Server {
 impl TenantBlobAccess for Server {
     /// inbuxa: a superuser-class blob id names a blob by its hash alone, so
     /// inside a tenant it reaches only blobs the tenant holds: one of its
-    /// accounts links the blob, or it is a queued message the tenant sees
-    /// (MT-5). Server-level administrators reach any blob.
+    /// accounts links the blob, or it is a queued message one of its people
+    /// sent (MT-5). Mail that only has recipients in the tenant isn't its to
+    /// download. Server-level administrators reach any blob.
     async fn tenant_holds_blob(
         &self,
         blob_id: &BlobId,
@@ -204,10 +205,11 @@ impl TenantBlobAccess for Server {
                             .await?,
                         ),
                     };
-                    if crate::registry::mapping::queued_message::tenant_sees_archived(
+                    if crate::registry::mapping::queued_message::tenant_reach_archived(
                         domains,
                         archive.unarchive::<Message>()?,
-                    ) {
+                    ) == inbuxa_features::tenancy::queue::QueueReach::Whole
+                    {
                         return Ok(true);
                     }
                 }

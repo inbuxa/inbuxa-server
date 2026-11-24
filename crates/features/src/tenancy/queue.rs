@@ -6,11 +6,14 @@
 
 //! What a tenant administrator sees of the mail queue (MT-5).
 //!
-//! It sees a queued message when any recipient is on one of the tenant's
-//! domains, whoever sent it. It also sees a message one of its own people
-//! sent, until the message leaves the queue: an authenticated sender whose
-//! return path is on the tenant's domains. Nothing else in the queue is
-//! visible to it.
+//! A message one of its own people sent (an authenticated sender whose
+//! return path is on the tenant's domains) is the tenant's whole, until it
+//! leaves the queue: every recipient, the content, and deleting it.
+//! A message that only has recipients on the tenant's domains shows the
+//! tenant those recipients and nothing of the others, who may be another
+//! tenant's or the sender's blind copies; the tenant cancels or retries
+//! delivery to its own recipients only, and can't download the content or
+//! delete the message. Nothing else in the queue is visible to it.
 
 use ahash::AHashSet;
 use registry::schema::{prelude::ObjectType, structs::Domain};
@@ -46,17 +49,39 @@ fn domain_of(address: &str) -> Option<String> {
         .map(|(_, domain)| domain.to_lowercase())
 }
 
-/// Whether a tenant with these domains sees a queued message (MT-5).
-pub fn sees<'x>(
+/// How much of a queued message a tenant reaches (MT-5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueueReach {
+    /// None of it: the message isn't shown.
+    Nothing,
+    /// Its own recipients only.
+    OwnRecipients,
+    /// All of it: one of the tenant's people sent it.
+    Whole,
+}
+
+/// Whether a recipient address is on one of the tenant's domains.
+pub fn is_own_recipient(domains: &AHashSet<String>, address: &str) -> bool {
+    domain_of(address).is_some_and(|d| domains.contains(&d))
+}
+
+/// How much of a queued message a tenant with these domains reaches.
+pub fn reach<'x>(
     domains: &AHashSet<String>,
     recipients: impl IntoIterator<Item = &'x str>,
     return_path: &str,
     from_authenticated: bool,
-) -> bool {
-    recipients
+) -> QueueReach {
+    if from_authenticated && is_own_recipient(domains, return_path) {
+        QueueReach::Whole
+    } else if recipients
         .into_iter()
-        .any(|rcpt| domain_of(rcpt).is_some_and(|d| domains.contains(&d)))
-        || (from_authenticated && domain_of(return_path).is_some_and(|d| domains.contains(&d)))
+        .any(|rcpt| is_own_recipient(domains, rcpt))
+    {
+        QueueReach::OwnRecipients
+    } else {
+        QueueReach::Nothing
+    }
 }
 
 #[cfg(test)]
@@ -69,27 +94,52 @@ mod tests {
 
     #[test]
     fn addressed_to_the_tenant() {
-        // Observed 4: mail to the tenant's domain from anyone.
-        assert!(sees(&domains(), ["a@T.example"], "x@u.example", false));
-        assert!(sees(
-            &domains(),
-            ["b@u.example", "a@t.example"],
-            "x@u.example",
-            true
-        ));
+        // Observed 4: mail to the tenant's domain from anyone, but only the
+        // tenant's own recipients of it
+        assert_eq!(
+            reach(&domains(), ["a@T.example"], "x@u.example", false),
+            QueueReach::OwnRecipients
+        );
+        assert_eq!(
+            reach(
+                &domains(),
+                ["b@u.example", "a@t.example"],
+                "x@u.example",
+                true
+            ),
+            QueueReach::OwnRecipients
+        );
+        assert!(is_own_recipient(&domains(), "a@T.example"));
+        assert!(!is_own_recipient(&domains(), "b@u.example"));
     }
 
     #[test]
     fn sent_by_the_tenant() {
-        assert!(sees(&domains(), ["b@u.example"], "a@t.example", true));
+        assert_eq!(
+            reach(&domains(), ["b@u.example"], "a@t.example", true),
+            QueueReach::Whole
+        );
         // A return path on the tenant's domain from an unauthenticated sender
         // is anyone's claim, not the tenant's own mail.
-        assert!(!sees(&domains(), ["b@u.example"], "a@t.example", false));
+        assert_eq!(
+            reach(&domains(), ["b@u.example"], "a@t.example", false),
+            QueueReach::Nothing
+        );
+        assert_eq!(
+            reach(&domains(), ["a@t.example"], "a@t.example", false),
+            QueueReach::OwnRecipients
+        );
     }
 
     #[test]
     fn nothing_else() {
-        assert!(!sees(&domains(), ["b@u.example"], "x@u.example", true));
-        assert!(!sees(&domains(), ["b@u.example"], "<>", true));
+        assert_eq!(
+            reach(&domains(), ["b@u.example"], "x@u.example", true),
+            QueueReach::Nothing
+        );
+        assert_eq!(
+            reach(&domains(), ["b@u.example"], "<>", true),
+            QueueReach::Nothing
+        );
     }
 }
