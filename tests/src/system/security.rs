@@ -1093,6 +1093,71 @@ pub async fn ipv6_ban_tests() {
     }
 }
 
+/// inbuxa: failures counted by login are kept apart from those counted by
+/// address. Login `abcd` is the four bytes of 97.98.99.100: failures on it
+/// from elsewhere used to run up that address's count, so its owner's next
+/// single failure banned it.
+///
+/// Runs alone: `cargo test -p tests auth_key_space_tests -- --ignored`.
+#[ignore]
+#[tokio::test(flavor = "multi_thread")]
+pub async fn auth_key_space_tests() {
+    let test = crate::utils::server::TestServerBuilder::new("auth_key_space_tests")
+        .await
+        .with_default_listeners()
+        .await
+        .build()
+        .await;
+    println!("Running sign-in counter key space tests...");
+    let admin = test.create_admin_account("admin@example.com").await;
+    admin
+        .registry_update_setting(
+            Http {
+                use_x_forwarded: true,
+                ..Default::default()
+            },
+            &[Property::UseXForwarded],
+        )
+        .await;
+    admin
+        .registry_update_setting(
+            registry::schema::structs::Security {
+                auth_ban_rate: Some(registry::schema::structs::Rate {
+                    count: 3,
+                    period: registry::types::duration::Duration::from_millis(86_400_000),
+                }),
+                ..Default::default()
+            },
+            &[Property::AuthBanRate],
+        )
+        .await;
+    admin.reload_settings().await;
+
+    // Three failures on login `abcd`, one from each of three addresses: no
+    // count goes over
+    for address in ["10.1.1.1", "10.1.1.2", "10.1.1.3"] {
+        validate_password_with_ip("abcd", "wrong password", address, false).await;
+    }
+    // One failure from 97.98.99.100 on another login
+    validate_password_with_ip("owner@example.com", "wrong password", "97.98.99.100", false).await;
+    assert!(
+        !test.server.is_ip_blocked("97.98.99.100".parse().unwrap()),
+        "failures on login abcd counted toward 97.98.99.100"
+    );
+    for address in ["10.1.1.1", "10.1.1.2", "10.1.1.3"] {
+        assert!(!test.server.is_ip_blocked(address.parse().unwrap()));
+    }
+
+    // The login's own count still bans the address that takes it over
+    validate_password_with_ip("abcd", "wrong password", "10.1.1.4", false).await;
+    assert!(test.server.is_ip_blocked("10.1.1.4".parse().unwrap()));
+    assert!(!test.server.is_ip_blocked("97.98.99.100".parse().unwrap()));
+
+    if test.is_reset() {
+        test.temp_dir.delete();
+    }
+}
+
 /// GETs `path` on a new connection, with `Sec-Fetch-Site: site` when given,
 /// following redirects; the final status, or an error when the server
 /// turned the connection away

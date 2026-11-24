@@ -143,6 +143,12 @@ pub const KV_PORT_REACHABILITY: u8 = 200;
 // inbuxa: device-flow codes live apart from authorization codes, so neither
 // grant can redeem the other's code.
 pub const KV_OAUTH_DEVICE: u8 = 201;
+// inbuxa: failures counted by login and by recipient, apart from the ones
+// counted by address: a login or recipient whose bytes are an address's key
+// would otherwise run up that address's count. 202 and 203 are taken on the
+// 27.1 line.
+pub const KV_RATE_LIMIT_AUTH_LOGIN: u8 = 204;
+pub const KV_RATE_LIMIT_RCPT_ADDRESS: u8 = 205;
 
 #[derive(Clone)]
 pub struct Server {
