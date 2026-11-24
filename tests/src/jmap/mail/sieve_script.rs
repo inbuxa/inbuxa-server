@@ -266,6 +266,40 @@ pub async fn test(test: &TestServer) {
         "{response:?}"
     );
 
+    // A script destroyed in the same call is not activated, and the active
+    // script stays active
+    client.sieve_script_activate(&script_ids[0]).await.unwrap();
+    let response = account
+        .jmap_method_call(
+            "SieveScript/set",
+            json!({
+                "accountId": account_id,
+                "destroy": [&script_ids[4]],
+                "onSuccessActivateScript": &script_ids[4]
+            }),
+        )
+        .await;
+    assert_eq!(
+        response.method_response()["destroyed"],
+        json!([&script_ids[4]]),
+        "{response:?}"
+    );
+    assert_eq!(
+        response
+            .method_response()
+            .pointer(&format!("/updated/{}", script_ids[4])),
+        None,
+        "{response:?}"
+    );
+    assert_eq!(
+        client
+            .sieve_script_query(Filter::is_active(true).into(), [Comparator::name()].into())
+            .await
+            .unwrap()
+            .ids(),
+        vec![script_ids[0].to_string()]
+    );
+
     // Deactivate all scripts
     client.sieve_script_deactivate().await.unwrap();
     assert_eq!(

@@ -95,9 +95,10 @@ impl SieveScriptSet for Server {
         };
         let will_destroy = ctx.response.collect_will_destroy(request.unwrap_destroy());
 
-        // Validate active script id
+        // Validate active script id: one that doesn't exist, or that this
+        // call destroys, is ignored (RFC 9661, 2.4)
         if let Some(MaybeIdReference::Id(id)) = &request.arguments.on_success_activate_script
-            && !sieve_ids.contains(id.document_id())
+            && (!sieve_ids.contains(id.document_id()) || will_destroy.contains(id))
         {
             request.arguments.on_success_activate_script = None;
         }
