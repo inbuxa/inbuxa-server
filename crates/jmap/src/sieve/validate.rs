@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::blob::download::BlobDownload;
@@ -37,7 +39,7 @@ impl SieveScriptValidate for Server {
                         .map(|bytes| self.core.sieve.untrusted_compiler.compile(&bytes))
                     {
                         Some(Ok(_)) => None,
-                        Some(Err(err)) => SetError::new(SetErrorType::InvalidScript)
+                        Some(Err(err)) => SetError::new(SetErrorType::InvalidSieve)
                             .with_description(err.to_string())
                             .into(),
                         None => SetError::new(SetErrorType::BlobNotFound).into(),
