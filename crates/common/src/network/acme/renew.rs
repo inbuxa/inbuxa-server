@@ -71,6 +71,36 @@ impl Server {
             &cert.subject_alternative_names.into_inner(),
         );
 
+        // inbuxa: a tenant's domain orders only the tenant's proven names,
+        // whatever its settings say (saving it refuses others)
+        let domains = if let Some(tenant_id) = domain.member_tenant_id {
+            let names = inbuxa_features::tenancy::certificates::proven_names(
+                self.registry(),
+                tenant_id.document_id(),
+            )
+            .await?;
+            let (domains, skipped): (Vec<_>, Vec<_>) = domains
+                .into_iter()
+                .partition(|name| inbuxa_features::tenancy::certificates::covers(&names, name));
+            for name in skipped {
+                trc::event!(
+                    Acme(trc::AcmeEvent::Error),
+                    Domain = domain.name.clone(),
+                    Hostname = name,
+                    Details = "Left out of the order: not a name the domain's tenant has proven",
+                );
+            }
+            if domains.is_empty() {
+                return Err(AcmeError::Invalid(format!(
+                    "Domain {} has no name its tenant has proven to order a certificate for",
+                    domain.name
+                )));
+            }
+            domains
+        } else {
+            domains
+        };
+
         if let Some(renew_at) = self
             .acme_certificate_renewal_due(&domains, renew_before, now())
             .await?

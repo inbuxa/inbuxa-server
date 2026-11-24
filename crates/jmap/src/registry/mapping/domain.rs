@@ -73,6 +73,12 @@ pub(crate) async fn validate_domain(
         return Ok(Err(err));
     }
 
+    // inbuxa: a tenant's domain names only the tenant's own names in its
+    // certificates
+    if let Err(err) = check_certificate_names(set, domain).await? {
+        return Ok(Err(err));
+    }
+
     // Validate that names and aliases do not collide with another domain
     let registry = set.server.registry();
     if old_domain.is_none_or(|old| old.name != domain.name)
@@ -148,6 +154,41 @@ pub(crate) async fn validate_domain(
     }
 
     Ok(Ok(response))
+}
+
+/// inbuxa: a domain a tenant owns may name, in its certificates, only the
+/// domain itself and names under a domain or alias the tenant has proven
+/// (`inbuxa_features::tenancy::certificates`). A name without a dot is a
+/// host under the domain, as the order reads it.
+async fn check_certificate_names(
+    set: &RegistrySetResponse<'_>,
+    domain: &Domain,
+) -> trc::Result<Result<(), SetError<Property>>> {
+    use inbuxa_features::tenancy::certificates::{covers, proven_domain_names, proven_names};
+
+    let (Some(tenant_id), CertificateManagement::Automatic(props)) =
+        (domain.member_tenant_id, &domain.certificate_management)
+    else {
+        return Ok(Ok(()));
+    };
+    if props.subject_alternative_names.is_empty() {
+        return Ok(Ok(()));
+    }
+    let mut names = proven_names(set.server.registry(), tenant_id.document_id()).await?;
+    names.extend(proven_domain_names(domain));
+    names.insert(domain.name.to_lowercase());
+    for name in props.subject_alternative_names.iter() {
+        if name.contains('.') && !covers(&names, name) {
+            return Ok(Err(SetError::invalid_properties()
+                .with_property(Property::SubjectAlternativeNames)
+                .with_description(format!(
+                    "{name} isn't {} or a name under one of this tenant's proven domains, \
+                     so this domain's certificate can't name it.",
+                    domain.name
+                ))));
+        }
+    }
+    Ok(Ok(()))
 }
 
 // Keep task planning independent of registry I/O so update transitions can be
