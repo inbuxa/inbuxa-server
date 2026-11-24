@@ -19,7 +19,7 @@ use std::fmt::Debug;
 use std::{
     borrow::Cow,
     io,
-    net::IpAddr,
+    net::{IpAddr, Ipv6Addr},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -306,10 +306,29 @@ impl Debug for TcpAcceptor {
 // inbuxa: moved to utils so crates below common can use it
 pub use utils::public_ip::is_global_ip;
 
-pub fn ip_to_bytes(ip: &IpAddr) -> Vec<u8> {
-    match ip {
+/// inbuxa: the mask of an IPv6 /64, the block one host is given and can use
+/// any address of
+pub const IPV6_PREFIX_MASK: u128 = u128::MAX << 64;
+
+/// inbuxa: what failures and rate limits are counted by: the IPv4 address,
+/// or the /64 of an IPv6 one. An IPv4-mapped address is its IPv4 address.
+/// The relay groups its limits the same way.
+pub fn ip_rate_key(ip: &IpAddr) -> Vec<u8> {
+    match ip.to_canonical() {
         IpAddr::V4(ip) => ip.octets().to_vec(),
-        IpAddr::V6(ip) => ip.octets().to_vec(),
+        IpAddr::V6(ip) => ip.octets()[..8].to_vec(),
+    }
+}
+
+/// inbuxa: what a ban for failures counted by `ip_rate_key` covers: the
+/// IPv4 address, or the /64 of an IPv6 one
+pub fn ip_ban_scope(ip: IpAddr) -> IpAddrOrMask {
+    match ip.to_canonical() {
+        IpAddr::V6(ip) => IpAddrOrMask::V6 {
+            addr: Ipv6Addr::from(u128::from(ip) & IPV6_PREFIX_MASK),
+            mask: IPV6_PREFIX_MASK,
+        },
+        ip => IpAddrOrMask::from_ip(ip),
     }
 }
 

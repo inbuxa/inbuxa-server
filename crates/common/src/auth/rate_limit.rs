@@ -7,7 +7,7 @@
  */
 
 use crate::auth::AccessToken;
-use crate::network::ip_to_bytes;
+use crate::network::ip_rate_key;
 use crate::network::limiter::{InFlight, LimiterResult};
 use crate::{KV_RATE_LIMIT_HTTP_ANONYMOUS, KV_RATE_LIMIT_HTTP_AUTHENTICATED, Server};
 use registry::schema::enums::Permission;
@@ -86,7 +86,7 @@ impl Server {
                 .memory
                 .is_rate_allowed(
                     KV_RATE_LIMIT_HTTP_ANONYMOUS,
-                    &ip_to_bytes(&addr),
+                    &ip_rate_key(&addr),
                     rate,
                     false,
                 )

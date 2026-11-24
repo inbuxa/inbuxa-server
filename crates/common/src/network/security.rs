@@ -9,7 +9,7 @@
 use crate::{
     KV_RATE_LIMIT_AUTH, KV_RATE_LIMIT_LOITER, KV_RATE_LIMIT_RCPT, KV_RATE_LIMIT_SCAN, Server,
     ipc::{BroadcastEvent, RegistryChange},
-    network::ip_to_bytes,
+    network::{IPV6_PREFIX_MASK, ip_ban_scope, ip_rate_key},
 };
 use ahash::AHashSet;
 use registry::{
@@ -65,6 +65,8 @@ pub struct Security {
 #[derive(Default)]
 pub struct BlockedIps {
     pub blocked_ip_addresses: AHashSet<IpWithTtl<IpAddr>>,
+    // inbuxa: banned IPv6 /64s, by their upper 64 bits
+    pub blocked_ipv6_prefixes: AHashSet<IpWithTtl<u64>>,
     pub blocked_ip_networks: Vec<IpWithTtl<IpAddrOrMask>>,
     pub has_blocked_networks: bool,
 }
@@ -222,7 +224,7 @@ impl Server {
             let is_allowed = self.is_ip_allowed(ip)
                 || (self
                     .in_memory_store()
-                    .is_rate_allowed(KV_RATE_LIMIT_RCPT, &ip_to_bytes(&ip), rate, false)
+                    .is_rate_allowed(KV_RATE_LIMIT_RCPT, &ip_rate_key(&ip), rate, false)
                     .await?
                     .is_none()
                     && self
@@ -247,7 +249,7 @@ impl Server {
             let is_allowed = self.is_ip_allowed(ip)
                 || self
                     .in_memory_store()
-                    .is_rate_allowed(KV_RATE_LIMIT_SCAN, &ip_to_bytes(&ip), rate, false)
+                    .is_rate_allowed(KV_RATE_LIMIT_SCAN, &ip_rate_key(&ip), rate, false)
                     .await?
                     .is_none();
 
@@ -279,7 +281,7 @@ impl Server {
             let is_allowed = self.is_ip_allowed(ip)
                 || self
                     .in_memory_store()
-                    .is_rate_allowed(KV_RATE_LIMIT_LOITER, &ip_to_bytes(&ip), rate, false)
+                    .is_rate_allowed(KV_RATE_LIMIT_LOITER, &ip_rate_key(&ip), rate, false)
                     .await?
                     .is_none();
 
@@ -300,7 +302,7 @@ impl Server {
         {
             if self
                 .in_memory_store()
-                .is_rate_allowed(KV_RATE_LIMIT_AUTH, &ip_to_bytes(&ip), rate, false)
+                .is_rate_allowed(KV_RATE_LIMIT_AUTH, &ip_rate_key(&ip), rate, false)
                 .await?
                 .is_some()
             {
@@ -337,15 +339,32 @@ impl Server {
         Ok(false)
     }
 
+    /// inbuxa: bans what the failures were counted by, the IPv4 address or
+    /// the IPv6 /64 (see `ip_rate_key`)
     pub async fn block_ip(&self, ip: IpAddr, reason: BlockReason) -> trc::Result<()> {
-        self.block_ip_for(ip, reason, self.core.network.security.ban_period(reason))
-            .await
+        self.block_address(
+            ip_ban_scope(ip),
+            reason,
+            self.core.network.security.ban_period(reason),
+        )
+        .await
     }
 
-    /// inbuxa: a ban for `period` seconds (`None`: no end)
+    /// inbuxa: a ban of this one address for `period` seconds (`None`: no
+    /// end)
     pub async fn block_ip_for(
         &self,
         ip: IpAddr,
+        reason: BlockReason,
+        period: Option<u64>,
+    ) -> trc::Result<()> {
+        self.block_address(IpAddrOrMask::from_ip(ip.to_canonical()), reason, period)
+            .await
+    }
+
+    async fn block_address(
+        &self,
+        address: IpAddrOrMask,
         reason: BlockReason,
         period: Option<u64>,
     ) -> trc::Result<()> {
@@ -356,12 +375,12 @@ impl Server {
             .data
             .blocked_ips
             .write()
-            .block(IpWithTtl::new(ip, expires_at.unwrap_or(u64::MAX)));
+            .insert(address.clone(), expires_at.unwrap_or(u64::MAX));
 
         // Write blocked IP to config
         // inbuxa: AU-1.10: recorded as the server's automatic ban
         let blocked_ip = Object::from(BlockedIp {
-            address: IpAddrOrMask::from_ip(ip),
+            address,
             created_at: UTCDateTime::from_timestamp(now as i64),
             expires_at: expires_at.map(|ts| UTCDateTime::from_timestamp(ts as i64)),
             reason,
@@ -422,17 +441,7 @@ impl Server {
     }
 
     pub fn is_ip_blocked(&self, ip: IpAddr) -> bool {
-        let blocked_ips = self.inner.data.blocked_ips.read();
-        (blocked_ips
-            .blocked_ip_addresses
-            .get(&IpWithTtl::new(ip, 0))
-            .is_some_and(|v| !v.is_expired())
-            || (blocked_ips.has_blocked_networks
-                && blocked_ips
-                    .blocked_ip_networks
-                    .iter()
-                    .any(|network| network.ip.matches(&ip) && !network.is_expired())))
-            && !self.is_ip_allowed(ip)
+        self.inner.data.blocked_ips.read().is_blocked(ip) && !self.is_ip_allowed(ip)
     }
 
     pub fn is_ip_allowed(&self, ip: IpAddr) -> bool {
@@ -536,13 +545,7 @@ impl BlockedIps {
                 .unwrap_or(u64::MAX);
 
             if ip.expires_at.as_ref().is_none_or(|ip| ip.timestamp() > now) {
-                if let Some(ip) = ip.address.try_to_ip() {
-                    ips.blocked_ip_addresses
-                        .insert(IpWithTtl::new(ip, expires_at));
-                } else {
-                    ips.blocked_ip_networks
-                        .push(IpWithTtl::new(ip.address, expires_at));
-                }
+                ips.insert(ip.address, expires_at);
             } else {
                 expired_blocks.push((
                     id,
@@ -577,23 +580,64 @@ impl BlockedIps {
             );
         }
 
-        ips.has_blocked_networks = !ips.blocked_ip_networks.is_empty();
         ips
     }
 }
 
 impl BlockedIps {
-    /// inbuxa: bans an address. A set keeps the entry it already has, so an
-    /// address whose earlier ban has ended would otherwise stay unbanned;
-    /// the later of the two bans is kept.
-    pub fn block(&mut self, ip: IpWithTtl<IpAddr>) {
-        if self
-            .blocked_ip_addresses
-            .get(&ip)
-            .is_none_or(|existing| existing.expires_at < ip.expires_at)
-        {
-            self.blocked_ip_addresses.replace(ip);
+    /// inbuxa: bans an address, an IPv6 /64 or another network until
+    /// `expires_at`, at once, whether at start-up, for a new ban or for one
+    /// a peer reported. Of two bans of the same address or /64 the later
+    /// is kept: a set keeps the entry it already has, so one whose earlier
+    /// ban has ended would otherwise stay unbanned.
+    pub fn insert(&mut self, address: IpAddrOrMask, expires_at: u64) {
+        match address {
+            IpAddrOrMask::V6 { addr, mask } if mask == IPV6_PREFIX_MASK => keep_later(
+                &mut self.blocked_ipv6_prefixes,
+                IpWithTtl::new(ipv6_prefix(addr), expires_at),
+            ),
+            address => {
+                if let Some(ip) = address.try_to_ip() {
+                    keep_later(
+                        &mut self.blocked_ip_addresses,
+                        IpWithTtl::new(ip.to_canonical(), expires_at),
+                    );
+                } else {
+                    self.blocked_ip_networks
+                        .push(IpWithTtl::new(address, expires_at));
+                    self.has_blocked_networks = true;
+                }
+            }
         }
+    }
+
+    pub fn is_blocked(&self, ip: IpAddr) -> bool {
+        let ip = ip.to_canonical();
+        self.blocked_ip_addresses
+            .get(&IpWithTtl::new(ip, 0))
+            .is_some_and(|v| !v.is_expired())
+            || matches!(ip, IpAddr::V6(v6) if self
+                .blocked_ipv6_prefixes
+                .get(&IpWithTtl::new(ipv6_prefix(v6), 0))
+                .is_some_and(|v| !v.is_expired()))
+            || (self.has_blocked_networks
+                && self
+                    .blocked_ip_networks
+                    .iter()
+                    .any(|network| network.ip.matches(&ip) && !network.is_expired()))
+    }
+}
+
+fn ipv6_prefix(ip: std::net::Ipv6Addr) -> u64 {
+    (u128::from(ip) >> 64) as u64
+}
+
+fn keep_later<T: PartialEq + Eq + Hash>(set: &mut AHashSet<IpWithTtl<T>>, ip: IpWithTtl<T>) {
+    if set
+        .get(&ip)
+        .is_none_or(|existing| existing.expires_at < ip.expires_at)
+    {
+        set.replace(ip);
     }
 }
 
@@ -618,5 +662,68 @@ impl<T: PartialEq + Eq + Hash> IpWithTtl<T> {
 
     pub fn is_expired(&self) -> bool {
         self.expires_at <= now()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BlockedIps;
+    use crate::network::{ip_ban_scope, ip_rate_key};
+    use registry::types::ipmask::IpAddrOrMask;
+    use std::net::IpAddr;
+
+    fn ip(ip: &str) -> IpAddr {
+        ip.parse().unwrap()
+    }
+
+    // inbuxa: one IPv6 host holds a /64, so it is counted and banned as one
+    #[test]
+    fn ipv6_counted_and_banned_per_64() {
+        assert_eq!(
+            ip_rate_key(&ip("2001:db8:1:2::10")),
+            ip_rate_key(&ip("2001:db8:1:2:ffff:ffff:ffff:ffff"))
+        );
+        assert_ne!(
+            ip_rate_key(&ip("2001:db8:1:2::10")),
+            ip_rate_key(&ip("2001:db8:1:3::10"))
+        );
+        assert_ne!(ip_rate_key(&ip("10.0.0.1")), ip_rate_key(&ip("10.0.0.2")));
+        assert_eq!(
+            ip_rate_key(&ip("::ffff:10.0.0.1")),
+            ip_rate_key(&ip("10.0.0.1"))
+        );
+        assert_eq!(
+            ip_ban_scope(ip("2001:db8:1:2::10")).to_string(),
+            "2001:db8:1:2::/64"
+        );
+        assert_eq!(ip_ban_scope(ip("::ffff:10.0.0.1")).to_string(), "10.0.0.1");
+
+        let mut ips = BlockedIps::default();
+        ips.insert(ip_ban_scope(ip("2001:db8:1:2::10")), u64::MAX);
+        ips.insert(ip_ban_scope(ip("::ffff:10.0.0.1")), u64::MAX);
+        assert!(ips.is_blocked(ip("2001:db8:1:2::99")));
+        assert!(!ips.is_blocked(ip("2001:db8:1:3::10")));
+        assert!(ips.is_blocked(ip("10.0.0.1")));
+        assert!(ips.is_blocked(ip("::ffff:10.0.0.1")));
+        assert!(!ips.is_blocked(ip("10.0.0.2")));
+        assert!(!ips.has_blocked_networks, "a /64 is looked up, not scanned");
+    }
+
+    // inbuxa: a network added to the running list is enforced at once
+    #[test]
+    fn network_added_at_runtime_blocks() {
+        let mut ips = BlockedIps::default();
+        assert!(!ips.is_blocked(ip("192.0.2.7")));
+        ips.insert("192.0.2.0/24".parse::<IpAddrOrMask>().unwrap(), u64::MAX);
+        ips.insert("2001:db8:5::/48".parse::<IpAddrOrMask>().unwrap(), u64::MAX);
+        assert!(ips.is_blocked(ip("192.0.2.7")));
+        assert!(ips.is_blocked(ip("2001:db8:5:1::1")));
+        assert!(!ips.is_blocked(ip("198.51.100.1")));
+
+        // An ended ban doesn't hide a later one of the same /64
+        ips.insert("2001:db8:9::/64".parse::<IpAddrOrMask>().unwrap(), 1);
+        assert!(!ips.is_blocked(ip("2001:db8:9::1")));
+        ips.insert("2001:db8:9::/64".parse::<IpAddrOrMask>().unwrap(), u64::MAX);
+        assert!(ips.is_blocked(ip("2001:db8:9::1")));
     }
 }

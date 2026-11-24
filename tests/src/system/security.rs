@@ -961,6 +961,150 @@ async fn post_typed(path: &str, content_type: Option<&str>, body: &str) -> u16 {
         .map_or(0, |response| response.status().as_u16())
 }
 
+/// inbuxa: one IPv6 host holds a whole /64 and can use any address in it,
+/// so failures are counted and bans set per /64; IPv4 addresses stay one by
+/// one. A network banned while the server runs is enforced at once, not at
+/// the next reload.
+///
+/// Runs alone: `cargo test -p tests ipv6_ban_tests -- --ignored`.
+#[ignore]
+#[tokio::test(flavor = "multi_thread")]
+pub async fn ipv6_ban_tests() {
+    let test = crate::utils::server::TestServerBuilder::new("ipv6_ban_tests")
+        .await
+        .with_default_listeners()
+        .await
+        .build()
+        .await;
+    println!("Running IPv6 ban tests...");
+    let admin = test.create_admin_account("admin@example.com").await;
+    admin
+        .registry_update_setting(
+            Http {
+                use_x_forwarded: true,
+                ..Default::default()
+            },
+            &[Property::UseXForwarded],
+        )
+        .await;
+    admin
+        .registry_update_setting(
+            registry::schema::structs::Security {
+                auth_ban_rate: Some(registry::schema::structs::Rate {
+                    count: 3,
+                    period: registry::types::duration::Duration::from_millis(86_400_000),
+                }),
+                ..Default::default()
+            },
+            &[Property::AuthBanRate],
+        )
+        .await;
+    admin.reload_settings().await;
+    let ip = |ip: &str| ip.parse::<std::net::IpAddr>().unwrap();
+    let mut failures = Vec::new();
+
+    // A network ban that reaches this node while it runs, as an admin's new
+    // ban or a peer's broadcast does, on a node with no network bans yet
+    let network = "2001:db8:5::/48".parse::<IpAddrOrMask>().unwrap();
+    assert!(!test.server.is_ip_blocked(ip("2001:db8:5:1::1")));
+    let id = test
+        .server
+        .registry()
+        .write(RegistryWrite::insert(
+            &registry::schema::prelude::Object::from(BlockedIp {
+                address: network,
+                created_at: registry::types::datetime::UTCDateTime::from_timestamp(now() as i64),
+                expires_at: None,
+                reason: BlockReason::Manual,
+            }),
+        ))
+        .await
+        .unwrap()
+        .unwrap_id(trc::location!());
+    test.server
+        .reload_registry(RegistryChange::Insert(ObjectType::BlockedIp.id(id)))
+        .await
+        .unwrap();
+    if !test.server.is_ip_blocked(ip("2001:db8:5:1::1")) {
+        failures.push("a network banned at runtime isn't enforced until a reload");
+    }
+    assert!(!test.server.is_ip_blocked(ip("2001:db8:6::1")));
+
+    // Failed sign-ins from four addresses of one /64 add up
+    for (n, host) in ["::10", "::11", "::12", "::13"].into_iter().enumerate() {
+        validate_password_with_ip(
+            &format!("nobody{n}@example.com"),
+            "wrong password",
+            &format!("2001:db8:1:2{host}"),
+            false,
+        )
+        .await;
+    }
+    let prefix = "2001:db8:1:2::/64".parse::<IpAddrOrMask>().unwrap();
+    let blocked_id = test
+        .server
+        .registry()
+        .primary_key(
+            ObjectType::BlockedIp.into(),
+            Property::Address,
+            prefix.to_index_key(),
+        )
+        .await
+        .unwrap();
+    if !test.server.is_ip_blocked(ip("2001:db8:1:2:ffff::1")) || blocked_id.is_none() {
+        failures.push("failures from one /64 don't ban the /64");
+    }
+    assert!(failures.is_empty(), "{failures:?}");
+    let blocked_ip = test
+        .server
+        .registry()
+        .object::<BlockedIp>(blocked_id.unwrap().id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(blocked_ip.reason, BlockReason::AuthFailure);
+    assert!(!test.server.is_ip_blocked(ip("2001:db8:1:3::10")));
+    // An address of the /64 that never failed is turned away
+    validate_password_with_ip(
+        "admin@example.com",
+        admin.secret(),
+        "2001:db8:1:2::99",
+        false,
+    )
+    .await;
+
+    // IPv4 addresses are counted one by one; an IPv4-mapped address is the
+    // IPv4 address
+    for (n, address) in ["10.0.0.1", "10.0.0.1", "10.0.0.1", "10.0.0.2"]
+        .into_iter()
+        .enumerate()
+    {
+        validate_password_with_ip(
+            &format!("v4-{n}@example.com"),
+            "wrong password",
+            address,
+            false,
+        )
+        .await;
+    }
+    assert!(!test.server.is_ip_blocked(ip("10.0.0.1")));
+    assert!(!test.server.is_ip_blocked(ip("10.0.0.2")));
+    validate_password_with_ip(
+        "v4-mapped@example.com",
+        "wrong password",
+        "::ffff:10.0.0.1",
+        false,
+    )
+    .await;
+    assert!(test.server.is_ip_blocked(ip("10.0.0.1")));
+    assert!(test.server.is_ip_blocked(ip("::ffff:10.0.0.1")));
+    assert!(!test.server.is_ip_blocked(ip("10.0.0.2")));
+
+    if test.is_reset() {
+        test.temp_dir.delete();
+    }
+}
+
 /// GETs `path` on a new connection, with `Sec-Fetch-Site: site` when given,
 /// following redirects; the final status, or an error when the server
 /// turned the connection away

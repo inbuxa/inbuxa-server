@@ -11,7 +11,7 @@ use chrono::Utc;
 use common::{
     KV_RATE_LIMIT_CONTACT, Server,
     config::network::{ContactForm, FieldOrDefault},
-    network::ip_to_bytes,
+    network::ip_rate_key,
     psl,
 };
 use email::message::delivery::{
@@ -56,7 +56,7 @@ impl FormHandler for Server {
                 .in_memory_store()
                 .is_rate_allowed(
                     KV_RATE_LIMIT_CONTACT,
-                    &ip_to_bytes(&session.remote_ip),
+                    &ip_rate_key(&session.remote_ip),
                     rate,
                     false,
                 )
