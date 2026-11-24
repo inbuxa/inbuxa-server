@@ -2,9 +2,11 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
-use crate::utils::server::TestServer;
+use crate::utils::{jmap::JmapUtils, server::TestServer};
 use jmap_client::{
     Error, Set,
     client::Client,
@@ -16,6 +18,7 @@ use jmap_client::{
 };
 use jmap_proto::types::state::State;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use store::ahash::AHashMap;
 use types::id::Id;
 
@@ -636,6 +639,22 @@ pub async fn test(test: &TestServer) {
             .collect::<Vec<_>>(),
         ["inbox", "sent", "spam"]
     );
+
+    // inbuxa: a name exactly as long as the limit (255 bytes by default) is
+    // taken; one byte more is refused
+    let response = account
+        .jmap_create(
+            "Mailbox",
+            [
+                json!({ "name": "m".repeat(255) }),
+                json!({ "name": "m".repeat(256) }),
+            ],
+            Vec::<(&str, &str)>::new(),
+        )
+        .await;
+    response.created(0);
+    let too_long = response.not_created(1);
+    assert_eq!(too_long.typ(), "invalidProperties", "{too_long:?}");
 
     test.destroy_all_mailboxes(account).await;
     test.assert_is_empty().await;
