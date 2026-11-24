@@ -11,6 +11,7 @@ use crate::{
     core::{Session, SessionAddress},
     scripts::ScriptResult,
 };
+use ahash::AHashSet;
 use common::{
     KV_GREYLIST,
     config::smtp::session::Stage,
@@ -408,9 +409,7 @@ impl<T: SessionStream> Session<T> {
         // Expand list
         if let Some(members) = rcpt_members {
             let list_addr = self.data.rcpt_to.pop().unwrap();
-            // inbuxa (#529): a list that names no one but itself adds nobody
-            // to the envelope, so it's refused here rather than at DATA
-            let mut has_members = false;
+            let mut expanded = Vec::with_capacity(members.len());
             for member in members.as_ref() {
                 let member_lcase = member.to_lowercase();
                 let is_local = match self
@@ -452,19 +451,12 @@ impl<T: SessionStream> Session<T> {
                     }
                 };
 
-                let mut member_addr = SessionAddress::new(address);
-                if member_addr.address_lcase == list_addr.address_lcase {
-                    continue;
-                }
-                has_members = true;
-                if !self.data.rcpt_to.contains(&member_addr) {
-                    member_addr.dsn_info = list_addr.address_lcase.clone().into();
-                    member_addr.flags = list_addr.flags;
-                    self.data.rcpt_to.push(member_addr);
-                }
+                expanded.push(SessionAddress::new(address));
             }
 
-            if !has_members {
+            // inbuxa (#529): a list that names no one but itself adds nobody
+            // to the envelope, so it's refused here rather than at DATA
+            if !add_list_members(&mut self.data.rcpt_to, &list_addr, expanded) {
                 trc::event!(
                     Smtp(SmtpEvent::MailboxDoesNotExist),
                     SpanId = self.data.session_id,
@@ -555,9 +547,75 @@ pub(crate) fn rcpt_line_names_postmaster(line: &[u8]) -> bool {
     is_bare_postmaster(address.trim_ascii())
 }
 
+/// inbuxa: adds a mailing list's members to the envelope, in order,
+/// leaving out the list itself and anyone the envelope already has. Says
+/// whether the list named anyone but itself. The envelope's addresses go in
+/// a set once, so a list costs time in proportion to its size; comparing
+/// each member with the whole envelope made it the square.
+fn add_list_members(
+    rcpt_to: &mut Vec<SessionAddress>,
+    list_addr: &SessionAddress,
+    members: Vec<SessionAddress>,
+) -> bool {
+    let mut has_members = false;
+    let mut in_envelope = rcpt_to
+        .iter()
+        .map(|rcpt| rcpt.address_lcase.clone())
+        .collect::<AHashSet<_>>();
+    for mut member_addr in members {
+        if member_addr.address_lcase == list_addr.address_lcase {
+            continue;
+        }
+        has_members = true;
+        if in_envelope.insert(member_addr.address_lcase.clone()) {
+            member_addr.dsn_info = list_addr.address_lcase.clone().into();
+            member_addr.flags = list_addr.flags;
+            rcpt_to.push(member_addr);
+        }
+    }
+    has_members
+}
+
 #[cfg(test)]
 mod tests {
-    use super::rcpt_line_names_postmaster;
+    use super::{add_list_members, rcpt_line_names_postmaster};
+    use crate::core::SessionAddress;
+    use std::time::{Duration, Instant};
+
+    // A large list is expanded in time in proportion to its size, keeping
+    // its order and leaving out the list itself and repeated addresses
+    #[test]
+    fn list_expansion_is_linear() {
+        const MEMBERS: usize = 50_000;
+        let list = SessionAddress::new("list@example.org".to_string());
+        let mut rcpt_to = vec![SessionAddress::new("Member7@example.org".to_string())];
+        let mut members = vec![SessionAddress::new("list@example.org".to_string())];
+        for i in 0..MEMBERS {
+            members.push(SessionAddress::new(format!("member{i}@example.org")));
+            if i % 10 == 0 {
+                members.push(SessionAddress::new(format!("MEMBER{i}@example.org")));
+            }
+        }
+
+        let started = Instant::now();
+        assert!(add_list_members(&mut rcpt_to, &list, members));
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "expanding {MEMBERS} members took {elapsed:?}"
+        );
+
+        assert_eq!(rcpt_to.len(), MEMBERS);
+        assert_eq!(rcpt_to[0].address, "Member7@example.org");
+        assert!(rcpt_to[0].dsn_info.is_none());
+        let expected = (0..MEMBERS)
+            .filter(|&i| i != 7)
+            .map(|i| format!("member{i}@example.org"));
+        for (member, expected) in rcpt_to[1..].iter().zip(expected) {
+            assert_eq!(member.address, expected);
+            assert_eq!(member.dsn_info.as_deref(), Some("list@example.org"));
+        }
+    }
 
     #[test]
     fn rcpt_line_postmaster() {
