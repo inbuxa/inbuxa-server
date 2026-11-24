@@ -11,7 +11,7 @@ use crate::{
     op::ImapContext,
 };
 use ahash::AHashSet;
-use common::{ipc::PushNotification, network::SessionStream};
+use common::{auth::SESSION_RECHECK_INTERVAL, ipc::PushNotification, network::SessionStream};
 use imap_proto::{
     Command, StatusResponse,
     protocol::{
@@ -70,8 +70,17 @@ impl<T: SessionStream> Session<T> {
 
         let op_start = Instant::now();
         let mut buf = vec![0; 4];
+        // inbuxa: an idling session checks its sign-in now and then, and
+        // before it reports a change
+        let mut recheck = tokio::time::interval(SESSION_RECHECK_INTERVAL);
+        recheck.tick().await;
         loop {
             tokio::select! {
+                _ = recheck.tick() => {
+                    if let Err(err) = self.server.assert_session_current(&data.access_token, self.remote_addr).await {
+                        return self.end_idle(err, request.tag).await;
+                    }
+                }
                 result = tokio::time::timeout(self.server.core.imap.timeout_idle, self.stream_rx.read_exact(&mut buf)) => {
                     match result {
                         Ok(Ok(bytes_read)) => {
@@ -96,6 +105,10 @@ impl<T: SessionStream> Session<T> {
                     }
                 }
                 push_notification = push_rx.recv() => {
+                    // inbuxa: a session ended from elsewhere closes the channel
+                    if let Err(err) = self.server.assert_session_current(&data.access_token, self.remote_addr).await {
+                        return self.end_idle(err, request.tag).await;
+                    }
                     if let Some(push_notification) = push_notification {
                         let mut has_mailbox_changes = false;
                         let mut has_email_changes = false;
@@ -131,6 +144,20 @@ impl<T: SessionStream> Session<T> {
                 }
             }
         }
+    }
+}
+
+impl<T: SessionStream> Session<T> {
+    /// inbuxa: ends an IDLE whose sign-in is no longer valid.
+    async fn end_idle(&self, err: trc::Error, tag: String) -> trc::Result<()> {
+        trc::error!(err.span_id(self.session_id));
+        self.write_bytes(&b"* BYE Session no longer authorized.\r\n"[..])
+            .await
+            .ok();
+        Err(trc::NetworkEvent::Closed
+            .into_err()
+            .details("Session no longer authorized.")
+            .id(tag))
     }
 }
 

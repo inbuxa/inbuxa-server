@@ -232,7 +232,9 @@ impl ParseHttp for Server {
                         let (_in_flight, access_token) =
                             self.authenticate_headers(&req, &session).await?;
 
-                        return self.handle_event_source(req, access_token).await;
+                        return self
+                            .handle_event_source(req, access_token, session.remote_ip)
+                            .await;
                     }
                     ("ws", &Method::GET) => {
                         // Authenticate request

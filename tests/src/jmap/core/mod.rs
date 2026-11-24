@@ -10,4 +10,5 @@ pub mod blob;
 pub mod event_source;
 pub mod push_subscription;
 pub mod request_limits;
+pub mod session_checks; // inbuxa: streams end when their sign-in does
 pub mod websocket;

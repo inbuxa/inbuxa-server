@@ -2,10 +2,16 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::api::IntoPushObject;
-use common::{LONG_1D_SLUMBER, Server, auth::AccessToken, ipc::PushNotification};
+use common::{
+    LONG_1D_SLUMBER, Server,
+    auth::{AccessToken, SESSION_RECHECK_INTERVAL},
+    ipc::PushNotification,
+};
 use http_body_util::{StreamBody, combinators::BoxBody};
 use http_proto::*;
 use hyper::{
@@ -13,6 +19,7 @@ use hyper::{
     body::{Bytes, Frame},
 };
 use jmap_proto::{response::status::PushObject, types::state::State};
+use std::net::IpAddr;
 use std::time::{Duration, Instant};
 use std::{future::Future, str::FromStr};
 use types::{id::Id, type_state::DataType};
@@ -29,6 +36,7 @@ pub trait EventSourceHandler: Sync + Send {
         &self,
         req: HttpRequest,
         access_token: AccessToken,
+        remote_ip: IpAddr,
     ) -> impl Future<Output = trc::Result<HttpResponse>> + Send;
 }
 
@@ -37,6 +45,7 @@ impl EventSourceHandler for Server {
         &self,
         req: HttpRequest,
         access_token: AccessToken,
+        remote_ip: IpAddr,
     ) -> trc::Result<HttpResponse> {
         // Parse query
         let mut ping = 0;
@@ -100,17 +109,30 @@ impl EventSourceHandler for Server {
         let mut push_rx = self.subscribe_push_manager(&access_token, types).await?;
         let mut changed: VecMap<Id, VecMap<DataType, State>> = VecMap::new();
         let throttle = self.core.jmap.event_source_throttle;
+        let server = self.clone();
 
         Ok(HttpResponse::new(StatusCode::OK)
             .with_content_type("text/event-stream")
             .with_cache_control("no-store")
             .with_stream_body(BoxBody::new(StreamBody::new(async_stream::stream! {
                 let mut last_message = Instant::now() - throttle;
-                let mut timeout =
-                    ping.as_ref().map(|p| p.interval).unwrap_or(LONG_1D_SLUMBER);
+                let mut timeout = ping
+                    .as_ref()
+                    .map(|p| p.interval)
+                    .unwrap_or(LONG_1D_SLUMBER)
+                    .min(SESSION_RECHECK_INTERVAL);
 
                 loop {
-                    match tokio::time::timeout(timeout, push_rx.recv()).await {
+                    let event = tokio::time::timeout(timeout, push_rx.recv()).await;
+                    // inbuxa: the stream ends once the sign-in it was opened
+                    // with is no longer valid, or the account has lost
+                    // permissions or shares it holds
+                    if let Err(err) = server.assert_session_current(&access_token, remote_ip).await {
+                        trc::error!(err.details("EventSource stream ended"));
+                        break;
+                    }
+
+                    match event {
                         Ok(Some(notification)) => {
                             match notification {
                                 PushNotification::StateChange(state_change) => {
@@ -173,7 +195,8 @@ impl EventSourceHandler for Server {
                         }
                     } else {
                         LONG_1D_SLUMBER
-                    };
+                    }
+                    .min(SESSION_RECHECK_INTERVAL);
                 }
             }))))
     }

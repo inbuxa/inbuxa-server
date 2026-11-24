@@ -81,6 +81,21 @@ impl<T: SessionStream> Session<T> {
         }
 
         for request in requests {
+            // inbuxa: a session ends at its next command once the sign-in it
+            // was opened with is no longer valid, or the account has lost
+            // permissions or shares it holds; marked messages stay
+            if let State::Authenticated { access_token, .. } = &self.state
+                && let Err(err) = self
+                    .server
+                    .assert_session_current(access_token, self.remote_addr)
+                    .await
+            {
+                trc::error!(err.span_id(self.session_id));
+                let _ = self
+                    .write_bytes(&b"-ERR Session no longer authorized.\r\n"[..])
+                    .await;
+                return SessionResult::Close;
+            }
             let result = match request {
                 Ok(command) => match self.validate_request(command).await {
                     Ok(command) => match command {
