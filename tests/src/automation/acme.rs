@@ -171,11 +171,22 @@ pub async fn test(test: &TestServer) {
         .assert_type(SetErrorType::InvalidProperties)
         .assert_description_contains("At least one contact email is required");
 
+    // #608: contacts are plain addresses; a `mailto:` URI is refused
+    account
+        .registry_create_object_expect_err(AcmeProvider {
+            directory: "https://localhost:14000/dir".to_string(),
+            contact: Map::new(vec!["mailto:hello@tls.org".to_string()]),
+            ..Default::default()
+        })
+        .await
+        .assert_type(SetErrorType::InvalidPatch)
+        .assert_description_contains("Invalid email address");
+
     // Create an ACME provider using TLS-ALPN-01 challenge
     let tls_acme_id = account
         .registry_create_object(AcmeProvider {
             directory: "https://localhost:14000/dir".to_string(),
-            contact: Map::new(vec!["mailto:hello@tls.org".to_string()]),
+            contact: Map::new(vec!["hello@tls.org".to_string()]),
             challenge_type: AcmeChallengeType::TlsAlpn01,
             renew_before: AcmeRenewBefore::R12,
             ..Default::default()
@@ -185,7 +196,7 @@ pub async fn test(test: &TestServer) {
     assert_eq!(provider.directory, "https://localhost:14000/dir");
     assert_eq!(
         provider.contact,
-        Map::new(vec!["mailto:hello@tls.org".to_string()])
+        Map::new(vec!["hello@tls.org".to_string()])
     );
     assert!(
         provider.account_uri.starts_with("https://localhost:14000"),
@@ -321,7 +332,7 @@ pub async fn test(test: &TestServer) {
     let http_acme_id = account
         .registry_create_object(AcmeProvider {
             directory: "https://localhost:14000/dir".to_string(),
-            contact: Map::new(vec!["mailto:hello@example.org".to_string()]),
+            contact: Map::new(vec!["hello@example.org".to_string()]),
             challenge_type: AcmeChallengeType::Http01,
             ..Default::default()
         })
@@ -365,7 +376,7 @@ pub async fn test(test: &TestServer) {
     let dns_acme_id = account
         .registry_create_object(AcmeProvider {
             directory: "https://localhost:14000/dir".to_string(),
-            contact: Map::new(vec!["mailto:hello@dns.org".to_string()]),
+            contact: Map::new(vec!["hello@dns.org".to_string()]),
             challenge_type: AcmeChallengeType::Dns01,
             ..Default::default()
         })
@@ -485,7 +496,7 @@ pub async fn test(test: &TestServer) {
     let dns_acme_id = account
         .registry_create_object(AcmeProvider {
             directory: "https://localhost:14000/dir".to_string(),
-            contact: Map::new(vec!["mailto:hello@persist.org".to_string()]),
+            contact: Map::new(vec!["hello@persist.org".to_string()]),
             challenge_type: AcmeChallengeType::DnsPersist01,
             ..Default::default()
         })
@@ -531,7 +542,7 @@ pub async fn test(test: &TestServer) {
     let names_acme_id = account
         .registry_create_object(AcmeProvider {
             directory: "https://localhost:14000/dir".to_string(),
-            contact: Map::new(vec!["mailto:hello@names.org".to_string()]),
+            contact: Map::new(vec!["hello@names.org".to_string()]),
             challenge_type: AcmeChallengeType::TlsAlpn01,
             ..Default::default()
         })
@@ -746,7 +757,7 @@ pub async fn test(test: &TestServer) {
     let default_acme_id = account
         .registry_create_object(AcmeProvider {
             directory: "https://localhost:14000/dir".to_string(),
-            contact: Map::new(vec!["mailto:hello@chain.org".to_string()]),
+            contact: Map::new(vec!["hello@chain.org".to_string()]),
             challenge_type: AcmeChallengeType::TlsAlpn01,
             ..Default::default()
         })
@@ -801,7 +812,7 @@ pub async fn test(test: &TestServer) {
     let preferred_acme_id = account
         .registry_create_object(AcmeProvider {
             directory: "https://localhost:14000/dir".to_string(),
-            contact: Map::new(vec!["mailto:hello@chainalt.org".to_string()]),
+            contact: Map::new(vec!["hello@chainalt.org".to_string()]),
             challenge_type: AcmeChallengeType::TlsAlpn01,
             preferred_chain: Some(preferred_root.clone()),
             ..Default::default()
@@ -864,7 +875,7 @@ pub async fn test(test: &TestServer) {
         let reuse_acme_id = account
             .registry_create_object(AcmeProvider {
                 directory: "https://localhost:14000/dir".to_string(),
-                contact: Map::new(vec!["mailto:hello@reuse.org".to_string()]),
+                contact: Map::new(vec!["hello@reuse.org".to_string()]),
                 challenge_type: AcmeChallengeType::TlsAlpn01,
                 reuse_key,
                 ..Default::default()

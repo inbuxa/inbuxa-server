@@ -10,9 +10,11 @@
 
 use crate::v016::migrate_v0_16;
 use common::{DATABASE_SCHEMA_VERSION, INBUXA_STORE_VERSION, Server};
+use registry::schema::{prelude::Object, structs::AcmeProvider};
 use store::{
     IterateParams, SUBSPACE_PROPERTY, SUBSPACE_QUEUE_MESSAGE, SUBSPACE_REPORT_IN,
     SUBSPACE_REPORT_OUT, SerializeInfallible,
+    registry::write::RegistryWrite,
     write::{AnyClass, AnyKey, BatchBuilder, ValueClass},
 };
 use trc::AddContext;
@@ -96,6 +98,12 @@ async fn migrate(server: &Server, run: layout::Run) -> trc::Result<layout::Outco
     // inbuxa: before the version check, which returns early on a current
     // store, and before migrate_v0_16, which reads the renamed key.
     rename_spam_blobs(server).await?;
+    // inbuxa: #608: also before the version check, and on every start; it
+    // only writes when a provider still holds a `mailto:` contact. A failure
+    // is logged, never fatal: the old form still works for renewals.
+    if let Err(err) = plain_acme_contacts(server).await {
+        trc::error!(err.details("Failed to store ACME contacts as plain addresses"));
+    }
 
     match server
         .store()
@@ -259,4 +267,95 @@ async fn rename_spam_blobs(server: &Server) -> trc::Result<()> {
         );
     }
     Ok(())
+}
+
+/// inbuxa: #608: ACME providers created before #608 were saved with their
+/// contacts as `mailto:` URIs, which the provider's email validation refuses
+/// on the next edit. Each one becomes the plain address. Older builds read
+/// either form, so this needs no store layout step and a rollback is safe.
+async fn plain_acme_contacts(server: &Server) -> trc::Result<()> {
+    for provider in server
+        .registry()
+        .list::<AcmeProvider>()
+        .await
+        .caused_by(trc::location!())?
+    {
+        let Some(contact) = plain_contacts(provider.object.contact.as_slice())
+            .filter(|contact| !contact.is_empty())
+        else {
+            continue;
+        };
+        let old = Object {
+            inner: provider.object.clone().into(),
+            revision: provider.revision,
+        };
+        let mut updated = provider.object;
+        updated.contact = registry::types::map::Map::new(contact);
+        let new = Object {
+            inner: updated.into(),
+            revision: provider.revision,
+        };
+        server
+            .registry()
+            .write(RegistryWrite::update(provider.id.id(), &new, &old))
+            .await
+            .caused_by(trc::location!())?;
+        trc::event!(
+            Server(trc::ServerEvent::Startup),
+            Details = "Stored an ACME provider's contacts as plain addresses",
+            Id = provider.id.id().id().to_string(),
+        );
+    }
+    Ok(())
+}
+
+/// The contacts with any `mailto:` prefix taken off, or `None` when none
+/// had one. A contact that is then a duplicate is dropped.
+fn plain_contacts(contacts: &[String]) -> Option<Vec<String>> {
+    if !contacts
+        .iter()
+        .any(|contact| has_mailto_prefix(contact.trim()))
+    {
+        return None;
+    }
+    let mut plain: Vec<String> = Vec::with_capacity(contacts.len());
+    for contact in contacts {
+        let contact = contact.trim();
+        let address = if has_mailto_prefix(contact) {
+            contact[7..].trim()
+        } else {
+            contact
+        };
+        if !address.is_empty() && !plain.iter().any(|known| known == address) {
+            plain.push(address.to_string());
+        }
+    }
+    Some(plain)
+}
+
+fn has_mailto_prefix(contact: &str) -> bool {
+    contact
+        .get(..7)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("mailto:"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::plain_contacts;
+
+    #[test]
+    fn acme_contacts_lose_mailto() {
+        let s = |v: &[&str]| v.iter().map(|v| v.to_string()).collect::<Vec<_>>();
+        assert_eq!(plain_contacts(&s(&["admin@example.org"])), None);
+        assert_eq!(plain_contacts(&[]), None);
+        assert_eq!(
+            plain_contacts(&s(&["mailto:admin@example.org", "ops@example.org"])),
+            Some(s(&["admin@example.org", "ops@example.org"]))
+        );
+        assert_eq!(
+            plain_contacts(&s(&[" MAILTO:admin@example.org", "admin@example.org"])),
+            Some(s(&["admin@example.org"]))
+        );
+        assert_eq!(plain_contacts(&s(&["mailto:"])), Some(vec![]));
+    }
 }

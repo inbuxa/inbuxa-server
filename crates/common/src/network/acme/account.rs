@@ -45,10 +45,16 @@ pub async fn acme_create_account(
         ));
     }
 
+    // inbuxa: #608: the provider keeps plain addresses, as its schema says;
+    // only the request to the CA carries them as `mailto:` URIs. The
+    // provider used to be saved with the URIs, which its own email
+    // validation then refused on the next edit.
+    let mut contact_uris = Vec::with_capacity(provider.contact.len());
     for contact in provider.contact.iter_mut() {
         let email = sanitize_email(contact.trim().strip_prefix("mailto:").unwrap_or(contact))
             .ok_or_else(|| AcmeError::Invalid(format!("Invalid contact email: {}", contact)))?;
-        *contact = format!("mailto:{}", email);
+        contact_uris.push(format!("mailto:{}", email));
+        *contact = email;
     }
 
     let directory = Directory::discover(
@@ -68,7 +74,7 @@ pub async fn acme_create_account(
 
     let payload = serde_json::to_string(&NewAccountPayload {
         tos_agreed: true,
-        contact: provider.contact.as_slice(),
+        contact: contact_uris.as_slice(),
         eab,
     })
     .unwrap_or_default();
