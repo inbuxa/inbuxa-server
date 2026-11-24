@@ -81,6 +81,8 @@ pub struct SessionData {
     pub rcpt_to: Vec<SessionAddress>,
     pub rcpt_errors: usize,
     pub rcpt_oks: usize,
+    // inbuxa: lists this transaction expanded, as named and as resolved
+    pub expanded_lists: Vec<String>,
     pub message: Vec<u8>,
 
     pub authenticated_as: Option<AccountInfo>,
@@ -209,6 +211,7 @@ impl SessionData {
             valid_until: Instant::now(),
             rcpt_errors: 0,
             rcpt_oks: 0,
+            expanded_lists: Vec::new(),
             message: Vec::with_capacity(0),
             auth_errors: 0,
             messages_sent: 0,
@@ -338,6 +341,7 @@ impl SessionData {
             rcpt_to,
             rcpt_errors: 0,
             rcpt_oks: 0,
+            expanded_lists: Vec::new(),
             message,
             authenticated_as: Some(authenticated_as),
             auth_errors: 0,

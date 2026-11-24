@@ -118,7 +118,11 @@ impl<T: SessionStream> Session<T> {
             dsn_info: to.orcpt.map(|e| e.into_owned()),
         };
 
-        if self.data.rcpt_to.contains(&rcpt) {
+        // inbuxa: a list this transaction already expanded is a duplicate
+        // too; its members are in the envelope and aren't looked up again
+        if self.data.rcpt_to.contains(&rcpt)
+            || self.data.expanded_lists.contains(&rcpt.address_lcase)
+        {
             trc::event!(
                 Smtp(SmtpEvent::RcptToDuplicate),
                 SpanId = self.data.session_id,
@@ -127,6 +131,7 @@ impl<T: SessionStream> Session<T> {
             self.data.rcpt_oks += 1;
             return self.write(b"250 2.1.5 OK\r\n").await;
         }
+        let rcpt_named = rcpt.address_lcase.clone();
         self.data.rcpt_to.push(rcpt);
 
         // Address rewriting and Sieve filtering
@@ -470,6 +475,11 @@ impl<T: SessionStream> Session<T> {
                     )
                     .await;
             }
+
+            if list_addr.address_lcase != rcpt_named {
+                self.data.expanded_lists.push(rcpt_named);
+            }
+            self.data.expanded_lists.push(list_addr.address_lcase);
         }
 
         self.data.rcpt_oks += 1;

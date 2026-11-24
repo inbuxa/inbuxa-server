@@ -565,6 +565,7 @@ impl<T: AsyncWrite + AsyncRead + Unpin> Session<T> {
         self.data.mail_from = None;
         self.data.spf_mail_from = None;
         self.data.rcpt_to.clear();
+        self.data.expanded_lists.clear();
         self.data.message = Vec::with_capacity(0);
         self.data.priority = 0;
         self.data.delivery_by = 0;
