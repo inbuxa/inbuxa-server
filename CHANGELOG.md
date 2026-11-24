@@ -11,6 +11,23 @@ https://github.com/inbuxa/inbuxa-server/security/advisories.
 Every version PR adds that version's entry here. CI refuses a version this
 file has no entry for (`tools/release/changelog-check.py`).
 
+## [2026.11.24] - 2026-11-24
+
+2026.11.23.1 with two bug fixes from the 27.1 bug sweep, for data loss and
+DKIM signing. Both are also in 27.1-rc.44.
+
+### Fixed
+- IMAP: when SELECT or EXAMINE fails, no mailbox is left selected, so a
+  following CLOSE or EXPUNGE can no longer remove messages from the
+  mailbox that was open before. (#540, #612)
+- DKIM: automatic key rotation keeps the replaced key's settings (signed
+  headers, canonicalization, AUID, expiry, reporting, third-party signing,
+  DKIM2 flags) instead of resetting them to defaults. (#534, #612)
+
+### Upgrading
+- 2026.11.23.1 to 2026.11.24 updates like any 2026.x release, with no store
+  layout step.
+
 ## [2026.11.23.1] - 2026-11-23
 
 2026.11.23 with security fixes from an internal security review (two high,
