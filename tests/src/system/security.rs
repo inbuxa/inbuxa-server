@@ -752,6 +752,83 @@ pub async fn scan_ban_tests() {
     }
 }
 
+/// inbuxa: a request too large to parse, a URI over the server's limit or a
+/// head over its buffer, gets its 414 or 431 and counts nothing toward the
+/// scan ban. A page on any site can make its visitors' browsers send one,
+/// with an `<img src>` URL of 100 KB. Requests that don't parse for any
+/// other reason still count.
+///
+/// Runs alone: `cargo test -p tests parse_error_ban_tests -- --ignored`.
+#[ignore]
+#[tokio::test(flavor = "multi_thread")]
+pub async fn parse_error_ban_tests() {
+    let test = crate::utils::server::TestServerBuilder::new("parse_error_ban_tests")
+        .await
+        .with_default_listeners()
+        .await
+        .build()
+        .await;
+    println!("Running parse error ban tests...");
+    let localhost: std::net::IpAddr = Ipv4Addr::LOCALHOST.into();
+
+    // More than the default scan ban rate, 30 a day
+    let uri_too_long = format!(
+        "GET /{} HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        "a".repeat(70_000)
+    );
+    for n in 0..35 {
+        let status = send_raw(uri_too_long.as_bytes())
+            .await
+            .unwrap_or_else(|| panic!("URI too long #{n}: turned away"));
+        assert_eq!(status, Some(414), "URI too long #{n}");
+        assert!(
+            !test.server.is_ip_blocked(localhost),
+            "URI too long #{n} banned its address"
+        );
+    }
+    let head_too_large = format!(
+        "GET / HTTP/1.1\r\nHost: localhost\r\nX-Padding: {}\r\n\r\n",
+        "a".repeat(500_000)
+    );
+    for n in 0..5 {
+        // The server may close before it read everything, so the 431 can
+        // be lost; the address must not be banned either way
+        send_raw(head_too_large.as_bytes())
+            .await
+            .unwrap_or_else(|| panic!("head too large #{n}: turned away"));
+        assert!(
+            !test.server.is_ip_blocked(localhost),
+            "head too large #{n} banned its address"
+        );
+    }
+
+    // A head that isn't HTTP still counts
+    let mut banned = false;
+    for _ in 0..35 {
+        if send_raw(b"\x01\x02 not http\r\n\r\n").await.is_none()
+            || test.server.is_ip_blocked(localhost)
+        {
+            banned = true;
+            break;
+        }
+    }
+    assert!(banned, "malformed requests no longer count toward the ban");
+
+    if test.is_reset() {
+        test.temp_dir.delete();
+    }
+}
+
+/// Sends `request` on a new TLS connection to the HTTP listener: None when
+/// the connection was turned away, else the response status if one came
+async fn send_raw(request: &[u8]) -> Option<Option<u16>> {
+    use tokio::io::AsyncWriteExt;
+    let mut stream = crate::utils::http::raw_https_connect().await.ok()?;
+    let _ = stream.write_all(request).await;
+    let _ = stream.flush().await;
+    Some(crate::utils::http::read_http_status(&mut stream, Duration::from_secs(5)).await)
+}
+
 /// GETs `path` on a new connection, with `Sec-Fetch-Site: site` when given,
 /// following redirects; the final status, or an error when the server
 /// turned the connection away
