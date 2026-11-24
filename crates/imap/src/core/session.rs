@@ -13,14 +13,17 @@ use crate::{
 };
 use common::{
     BuildServer,
-    network::{SessionData, SessionManager, SessionResult, SessionStream, stream::NullIo},
+    network::{
+        SessionData, SessionManager, SessionResult, SessionStream, stream::NullIo,
+        write_stall::write_all_or_stall,
+    },
 };
 use imap_proto::{
     protocol::{ProtocolVersion, SerializeResponse},
     receiver::{PRE_AUTH_MAX_REQUEST_SIZE, Receiver},
 };
 use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncReadExt;
 use tokio_rustls::server::TlsStream;
 
 impl SessionManager for ImapSessionManager {
@@ -134,7 +137,15 @@ impl<T: SessionStream> Session<T> {
             (false, false) => &GREETING_WITHOUT_TLS_LOGIN_DISABLED,
         };
 
-        if let Err(err) = session.stream.write_all(greeting).await {
+        // inbuxa: a client that never reads its greeting is dropped once it
+        // has stood still for the sign-in timeout
+        if let Err(err) = write_all_or_stall(
+            &mut session.stream,
+            greeting,
+            server.core.imap.timeout_unauth,
+        )
+        .await
+        {
             trc::event!(
                 Network(trc::NetworkEvent::WriteError),
                 Reason = err.to_string(),
@@ -143,7 +154,6 @@ impl<T: SessionStream> Session<T> {
             );
             return Err(());
         }
-        let _ = session.stream.flush().await;
 
         // Split stream into read and write halves
         let (stream_rx, stream_tx) = tokio::io::split(session.stream);
@@ -265,16 +275,22 @@ impl<T: SessionStream> Session<T> {
             Contents = trc::Value::from_maybe_string(bytes),
         );
 
-        let mut stream = self.stream_tx.lock().await;
-        if let Err(err) = stream.write_all(bytes).await {
-            Err(trc::NetworkEvent::WriteError
-                .into_err()
-                .reason(err)
-                .details("Failed to write to stream"))
+        // inbuxa: a client that stops reading is dropped once the answer has
+        // stood still for the session's read timeout
+        let stall = if !matches!(self.state, State::NotAuthenticated { .. }) {
+            self.server.core.imap.timeout_auth
         } else {
-            let _ = stream.flush().await;
-            Ok(())
-        }
+            self.server.core.imap.timeout_unauth
+        };
+        let mut stream = self.stream_tx.lock().await;
+        write_all_or_stall(&mut *stream, bytes, stall)
+            .await
+            .map_err(|err| {
+                trc::NetworkEvent::WriteError
+                    .into_err()
+                    .reason(err)
+                    .details("Failed to write to stream")
+            })
     }
 
     pub async fn write_error(&self, err: trc::Error) -> bool {
@@ -308,16 +324,17 @@ impl<T: SessionStream> super::SessionData<T> {
             Contents = trc::Value::from_maybe_string(bytes),
         );
 
+        // inbuxa: a client that stops reading is dropped once the answer has
+        // stood still for the signed-in timeout
         let mut stream = self.stream_tx.lock().await;
-        if let Err(err) = stream.write_all(bytes.as_ref()).await {
-            Err(trc::NetworkEvent::WriteError
-                .into_err()
-                .reason(err)
-                .details("Failed to write to stream"))
-        } else {
-            let _ = stream.flush().await;
-            Ok(())
-        }
+        write_all_or_stall(&mut *stream, bytes, self.server.core.imap.timeout_auth)
+            .await
+            .map_err(|err| {
+                trc::NetworkEvent::WriteError
+                    .into_err()
+                    .reason(err)
+                    .details("Failed to write to stream")
+            })
     }
 
     pub async fn write_error(&self, err: trc::Error) -> trc::Result<()> {

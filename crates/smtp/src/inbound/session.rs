@@ -9,7 +9,7 @@
 use common::{
     config::server::ServerProtocol,
     expr::{self, functions::ResolveVariable, *},
-    network::SessionStream,
+    network::{SessionStream, write_stall::write_all_or_stall},
 };
 
 use compact_str::ToCompactString;
@@ -21,13 +21,17 @@ use smtp_proto::{
     },
     *,
 };
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
 use trc::{NetworkEvent, SecurityEvent, SmtpEvent};
 
 use crate::core::{Session, State};
 use crate::inbound::rcpt::rcpt_line_names_postmaster;
 
 use super::auth::{AUTH_BEARER, SaslToken};
+
+/// inbuxa: how long a reply may stand still before the session's own
+/// timeout is known (a refusal at connect); the timeout's default
+const WRITE_STALL_BEFORE_PARAMS: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 
 impl<T: SessionStream> Session<T> {
     /// inbuxa: TLS on this session, or between the sender and the relay
@@ -556,27 +560,32 @@ impl<T: AsyncWrite + AsyncRead + Unpin> Session<T> {
 
     #[inline(always)]
     pub async fn write(&mut self, bytes: &[u8]) -> Result<(), ()> {
-        match self.stream.write_all(bytes).await {
-            Ok(_) => match self.stream.flush().await {
-                Ok(_) => {
-                    trc::event!(
-                        Smtp(SmtpEvent::RawOutput),
-                        SpanId = self.data.session_id,
-                        Size = bytes.len(),
-                        Contents = trc::Value::from_maybe_string(bytes),
-                    );
+        // inbuxa: a client that stops reading is dropped once the reply has
+        // stood still for the session's read timeout (SMTP-3)
+        let stall = if self.params.timeout.is_zero() {
+            WRITE_STALL_BEFORE_PARAMS
+        } else {
+            self.params.timeout
+        };
+        match write_all_or_stall(&mut self.stream, bytes, stall).await {
+            Ok(_) => {
+                trc::event!(
+                    Smtp(SmtpEvent::RawOutput),
+                    SpanId = self.data.session_id,
+                    Size = bytes.len(),
+                    Contents = trc::Value::from_maybe_string(bytes),
+                );
 
-                    Ok(())
-                }
-                Err(err) => {
-                    trc::event!(
-                        Network(NetworkEvent::FlushError),
-                        SpanId = self.data.session_id,
-                        Reason = err.to_string(),
-                    );
-                    Err(())
-                }
-            },
+                Ok(())
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::TimedOut => {
+                trc::event!(
+                    Network(NetworkEvent::Timeout),
+                    SpanId = self.data.session_id,
+                    Reason = err.to_string(),
+                );
+                Err(())
+            }
             Err(err) => {
                 trc::event!(
                     Network(NetworkEvent::WriteError),

@@ -48,6 +48,7 @@ pub mod security;
 pub mod stream;
 pub mod tls;
 pub mod webpush;
+pub mod write_stall; // inbuxa: writes to a client that stopped reading time out
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
 pub enum RcptResolution {
