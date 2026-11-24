@@ -188,13 +188,16 @@ pub async fn test(test: &mut TestServer) {
     .assert_type(SetErrorType::Forbidden)
     .assert_description_contains("The specified domain is not valid for this account.");
 
+    // inbuxa: the mask lives a few seconds, so it still takes mail at the
+    // RCPT below; with one second it could expire before the RCPT got there
+    let masked_prefix_expires = now() + 5;
     let response = john
         .registry_create_many(
             ObjectType::MaskedEmail,
             [json!({
                 Property::EmailDomain: "example.org",
                 Property::EmailPrefix: "secretive",
-                Property::ExpiresAt: UTCDateTime::from_timestamp((now() + 1) as i64)
+                Property::ExpiresAt: UTCDateTime::from_timestamp(masked_prefix_expires as i64)
             })],
         )
         .await;
@@ -424,6 +427,11 @@ END:VCARD
     lmtp.vrfy("members@example.org", 5).await;
     lmtp.vrfy("non_existant@example.org", 5).await;
     lmtp.vrfy(masked_random_email.as_str(), 2).await;
+    // inbuxa: wait until the mask has expired (expiresAt <= now), so the
+    // refusal doesn't depend on how fast the steps above ran
+    while now() < masked_prefix_expires {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
     lmtp.vrfy(masked_prefix_email.as_str(), 5).await; // Should have expired
 
     // Delivering to a mailing list
