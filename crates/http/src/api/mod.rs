@@ -23,7 +23,7 @@ use common::{
 use groupware::calendar::itip::{ItipIngest, RsvpRequest};
 use http_body_util::{StreamBody, combinators::BoxBody};
 use http_proto::{
-    HttpRequest, HttpResponse, HttpSessionData, JsonResponse, ToHttpResponse,
+    HttpRequest, HttpResponse, HttpSessionData, JsonProblemResponse, JsonResponse, ToHttpResponse,
     request::{decode_path_element, fetch_body},
 };
 use hyper::{
@@ -35,6 +35,30 @@ use jmap_proto::error::request::RequestError;
 use registry::schema::enums::Permission;
 use std::time::Duration;
 use utils::url_params::UrlParams;
+
+/// inbuxa: the routes that take a password read JSON only. A page on
+/// another site can POST `text/plain` or a form here without a CORS
+/// preflight, but not `application/json`; it could otherwise fail sign-ins
+/// in its visitors' names until their address was banned. Parameters such
+/// as `; charset=utf-8` are fine.
+fn is_json_request(req: &HttpRequest) -> bool {
+    req.headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value
+                .split_once(';')
+                .map_or(value, |(media_type, _)| media_type)
+                .trim()
+                .eq_ignore_ascii_case("application/json")
+        })
+}
+
+/// inbuxa: the answer to a request `is_json_request` refuses. It is no
+/// failed sign-in and counts toward no ban.
+fn unsupported_media_type() -> HttpResponse {
+    JsonProblemResponse(StatusCode::UNSUPPORTED_MEDIA_TYPE).into_http_response()
+}
 
 pub trait ManagementApi: Sync + Send {
     fn handle_api_request(
@@ -73,6 +97,9 @@ impl ManagementApi for Server {
                 crate::auth::passkey::challenge(self).await
             }
             "auth" if is_post => {
+                if !is_json_request(req) {
+                    return Ok(unsupported_media_type());
+                }
                 self.is_http_anonymous_request_allowed(session.remote_ip)
                     .await?;
                 Box::pin(self.handle_login_request(
@@ -83,6 +110,9 @@ impl ManagementApi for Server {
             }
             // inbuxa: passkeys: the registration page's two steps (PK-6 to PK-8)
             "passkey" if is_post && path.get(1).copied() == Some("register") => {
+                if !is_json_request(req) {
+                    return Ok(unsupported_media_type());
+                }
                 self.is_http_anonymous_request_allowed(session.remote_ip)
                     .await?;
                 Box::pin(self.handle_passkey_registration(
