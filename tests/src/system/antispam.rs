@@ -280,6 +280,53 @@ pub async fn test(test: &mut TestServer) {
     assert_eq!(samples.iter().filter(|x| x.1.is_spam).count(), 12);
     assert_eq!(samples.len(), 21);
 
+    // inbuxa: #594: Email/set create trains the classifier only on a verdict,
+    // as Email/import does: $Junk, $NotJunk or Junk as the mailbox. A plain
+    // create in the Inbox adds no sample.
+    let email = |mailbox_id: u32, keyword: Option<Keyword>, subject: &str| {
+        json!({
+            "mailboxIds": { Id::from(mailbox_id).to_string(): true },
+            "keywords": keyword
+                .map(|keyword| json!({ keyword.to_string(): true }))
+                .unwrap_or_else(|| json!({})),
+            "from": [{ "email": "bill@example.org" }],
+            "subject": subject,
+            "bodyValues": { "1": { "value": "A message created over JMAP." } },
+            "textBody": [{ "partId": "1", "type": "text/plain" }],
+        })
+    };
+    let count_samples = || async {
+        let samples = account.spam_training_samples().await;
+        (
+            samples.iter().filter(|x| !x.1.is_spam).count(),
+            samples.iter().filter(|x| x.1.is_spam).count(),
+        )
+    };
+    for (mailbox_id, keyword, subject, expected) in [
+        (INBOX_ID, None, "created in the inbox", (9, 12)),
+        (
+            INBOX_ID,
+            Some(Keyword::NotJunk),
+            "created as not junk",
+            (10, 12),
+        ),
+        (JUNK_ID, None, "created in junk", (10, 13)),
+    ] {
+        account
+            .jmap_create(
+                "Email",
+                [email(mailbox_id, keyword, subject)],
+                Vec::<(&str, &str)>::new(),
+            )
+            .await
+            .created(0);
+        assert_eq!(
+            count_samples().await,
+            expected,
+            "ham and spam samples after Email/set create of {subject:?}"
+        );
+    }
+
     // Delete account
     test.destroy_all_mailboxes(&account).await;
     account
