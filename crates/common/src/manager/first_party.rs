@@ -25,8 +25,9 @@
 //!
 //! A missing client is created. An existing one gains any redirect URI it
 //! lacks and, for inbuxa-webmail, the configured secret; nothing an operator
-//! added is removed. This runs on every start, and again whenever
-//! `inbuxa:FrontEnds` is set.
+//! added is removed. One that a tenant owns is left alone and reported:
+//! these ids are reserved for the server (`is_reserved_client_id`). This
+//! runs on every start, and again whenever `inbuxa:FrontEnds` is set.
 
 use directory::core::secret::{hash_secret, verify_secret_hash};
 use inbuxa_features::security::front_ends::{self, FrontEnds};
@@ -57,6 +58,19 @@ const LEGACY_WEB_INTERFACE_CLIENT_ID: &str = "stalwart-webui";
 /// Where upstream's web interface is downloaded from, whatever the release.
 /// Only ever read to switch it off in a store brought over from Stalwart.
 const UPSTREAM_WEB_INTERFACE_URL: &str = "https://github.com/stalwartlabs/webui/";
+
+/// Whether a client id is one of the server's own, which only the server
+/// registers: never a tenant's client.
+pub fn is_reserved_client_id(client_id: &str) -> bool {
+    [
+        WEB_INTERFACE_CLIENT_ID,
+        ADMIN_CLIENT_ID,
+        WEBMAIL_CLIENT_ID,
+        LEGACY_WEB_INTERFACE_CLIENT_ID,
+    ]
+    .iter()
+    .any(|reserved| client_id.trim().eq_ignore_ascii_case(reserved))
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FirstPartyClient {
@@ -425,6 +439,24 @@ async fn ensure_client(bp: &mut Bootstrap, client: FirstPartyClient) -> trc::Res
             .map(|object| (object_id.id(), object.revision, OAuthClient::from(object))),
         None => None,
     };
+
+    // A client a tenant registered under this id, before ids were reserved,
+    // is left as it is: adopting it would give the tenant's redirect URIs
+    // the server's own client. It also can't sign in anyone outside the
+    // tenant, so the operator removes it to have the front end working.
+    if let Some((_, _, current)) = &existing
+        && let Some(tenant_id) = current.member_tenant_id
+    {
+        trc::event!(
+            Auth(trc::AuthEvent::Error),
+            Id = client.client_id.clone(),
+            Details = format!(
+                "A tenant (id {}) owns an OAuth client with this first-party client id; it was not registered for the front end. Remove that client to register it.",
+                tenant_id.document_id()
+            )
+        );
+        return Ok(());
+    }
 
     let result = if let Some((id, revision, current)) = existing {
         let mut updated = current.clone();

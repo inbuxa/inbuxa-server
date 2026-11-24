@@ -30,6 +30,7 @@ pub mod masked_email;
 pub mod masked_secrets; // inbuxa: "****" is never saved as a secret
 pub mod migration; // inbuxa: migrations into this server
 pub mod monitoring;
+pub mod oauth_sign_in; // inbuxa: who an OAuth sign-in may be for
 pub mod oidc;
 pub mod passkeys; // inbuxa: passkeys
 pub mod purge;
@@ -96,6 +97,7 @@ pub async fn system_tests() {
     directory::test(&test).await;
     authentication::test(&test).await;
     oidc::test(&mut test).await;
+    oauth_sign_in::test(&mut test).await;
     authorization::test(&mut test).await;
     tenant::test(&mut test).await;
     masked_email::test(&mut test).await;

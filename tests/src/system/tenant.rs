@@ -1730,7 +1730,7 @@ impl TestServer {
 }
 
 impl Account {
-    async fn create_tenant(&self, name: &str) -> Id {
+    pub(super) async fn create_tenant(&self, name: &str) -> Id {
         self.registry_create_object(Tenant {
             name: name.to_string(),
             ..Default::default()
@@ -1738,7 +1738,7 @@ impl Account {
         .await
     }
 
-    async fn create_tenant_domain(&self, name: &str, tenant_id: Option<Id>) -> Id {
+    pub(super) async fn create_tenant_domain(&self, name: &str, tenant_id: Option<Id>) -> Id {
         self.registry_create_object(Domain {
             name: name.to_string(),
             is_enabled: true,
@@ -1769,7 +1769,7 @@ impl Account {
         .await
     }
 
-    async fn make_tenant_admin(&self, account_id: Id) {
+    pub(super) async fn make_tenant_admin(&self, account_id: Id) {
         self.registry_update_object(
             ObjectType::Account,
             account_id,

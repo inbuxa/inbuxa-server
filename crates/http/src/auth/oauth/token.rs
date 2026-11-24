@@ -309,6 +309,19 @@ impl TokenHandler for Server {
                             )
                             .into_http_response());
                         }
+                        // inbuxa: a tenant's client is refreshed only for
+                        // that tenant's accounts
+                        if !client_id.is_empty()
+                            && !self
+                                .client_serves_account(client_id, token_info.account_id)
+                                .await?
+                        {
+                            return Ok(JsonResponse::with_status(
+                                StatusCode::BAD_REQUEST,
+                                TokenResponse::error(ErrorType::InvalidGrant),
+                            )
+                            .into_http_response());
+                        }
 
                         self.issue_token(
                             token_info.account_id,

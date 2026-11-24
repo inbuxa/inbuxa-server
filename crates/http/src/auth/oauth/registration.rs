@@ -63,6 +63,18 @@ pub trait ClientRegistrationHandler: Sync + Send {
         client_id: &str,
         client_secret: Option<&str>,
     ) -> impl Future<Output = trc::Result<Option<ErrorType>>> + Send;
+
+    fn client_serves_tenant(
+        &self,
+        client_id: &str,
+        tenant_id: Option<u32>,
+    ) -> impl Future<Output = trc::Result<bool>> + Send;
+
+    fn client_serves_account(
+        &self,
+        client_id: &str,
+        account_id: u32,
+    ) -> impl Future<Output = trc::Result<bool>> + Send;
 }
 impl ClientRegistrationHandler for Server {
     async fn handle_oauth_registration_request(
@@ -244,6 +256,11 @@ impl ClientRegistrationHandler for Server {
         if decode_client_id(self.core.oauth.oauth_key.as_bytes(), client_id).is_some() {
             return Ok(None);
         }
+        // inbuxa: a client a tenant registered serves only that tenant's
+        // accounts, whether or not registration is required
+        if !self.client_serves_account(client_id, account_id).await? {
+            return Ok(Some(ErrorType::InvalidClient));
+        }
         if !self.core.oauth.require_client_authentication {
             return Ok(None);
         }
@@ -353,6 +370,72 @@ impl ClientRegistrationHandler for Server {
             _ => Ok(None),
         }
     }
+
+    /// inbuxa: whether `client_id` may sign in an account of `tenant_id`
+    /// (`None`: an account in no tenant, or the recovery administrator). A
+    /// registered client that a tenant owns serves that tenant's accounts
+    /// only; any other client, registered by the server or stateless, is
+    /// not limited here.
+    async fn client_serves_tenant(
+        &self,
+        client_id: &str,
+        tenant_id: Option<u32>,
+    ) -> trc::Result<bool> {
+        let owner = client_owner(self, client_id).await?;
+        Ok(owner_serves(client_id, owner, tenant_id))
+    }
+
+    /// inbuxa: `client_serves_tenant` for an account known by its id. An
+    /// account that can't be looked up counts as in no tenant.
+    async fn client_serves_account(&self, client_id: &str, account_id: u32) -> trc::Result<bool> {
+        let Some(owner) = client_owner(self, client_id).await? else {
+            return Ok(true);
+        };
+        let tenant_id = match self.access_token(account_id).await {
+            Ok(token) => token.build().tenant_id(),
+            Err(_) => None,
+        };
+        Ok(owner_serves(client_id, Some(owner), tenant_id))
+    }
+}
+
+fn owner_serves(client_id: &str, owner: Option<u32>, tenant_id: Option<u32>) -> bool {
+    match owner {
+        Some(owner) if tenant_id != Some(owner) => {
+            trc::event!(
+                Security(trc::SecurityEvent::Unauthorized),
+                Id = client_id.to_string(),
+                Details = "A tenant's OAuth client was refused for an account outside that tenant."
+            );
+            false
+        }
+        _ => true,
+    }
+}
+
+/// inbuxa: the tenant that owns a registered client, if one does.
+async fn client_owner(server: &Server, client_id: &str) -> trc::Result<Option<u32>> {
+    if decode_client_id(server.core.oauth.oauth_key.as_bytes(), client_id).is_some() {
+        return Ok(None);
+    }
+    let Some(object_id) = server
+        .registry()
+        .primary_key(
+            ObjectType::OAuthClient.into(),
+            Property::ClientId,
+            client_id.as_bytes().to_vec(),
+        )
+        .await?
+    else {
+        return Ok(None);
+    };
+    Ok(server
+        .registry()
+        .object::<OAuthClient>(object_id.id())
+        .await
+        .caused_by(trc::location!())?
+        .and_then(|client| client.member_tenant_id)
+        .map(|tenant| tenant.document_id()))
 }
 
 fn registration_error(error: ClientRegistrationError) -> HttpResponse {
