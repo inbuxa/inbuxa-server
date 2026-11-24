@@ -888,9 +888,21 @@ impl<T: SessionStream> Session<T> {
         } else {
             MessageSource::Authenticated
         };
+        // inbuxa: SPF passed for the return path's domain, so a Sieve
+        // rejection of this message may go back to it
+        let spf_pass = !self.is_authenticated()
+            && !mail_from.address.is_empty()
+            && self
+                .data
+                .spf_mail_from
+                .as_ref()
+                .is_some_and(|spf| spf.result() == SpfResult::Pass);
         let mut message = self
             .build_message(mail_from, rcpt_to, source, message_id, self.data.session_id)
             .await;
+        if spf_pass {
+            message.message.flags |= queue::FROM_SPF_PASS;
+        }
 
         // Add Return-Path
         if self

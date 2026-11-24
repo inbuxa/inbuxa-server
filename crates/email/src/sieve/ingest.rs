@@ -58,6 +58,7 @@ pub trait SieveScriptIngest: Sync + Send {
         raw_message: &[u8],
         envelope_from: &str,
         verified_sender: VerifiedSender,
+        return_path_verified: bool,
         envelope_to: &IngestRecipient,
         session_id: u64,
         active_script: ActiveScript,
@@ -96,6 +97,7 @@ impl SieveScriptIngest for Server {
         raw_message: &[u8],
         envelope_from: &str,
         verified_sender: VerifiedSender,
+        return_path_verified: bool,
         envelope_to: &IngestRecipient,
         session_id: u64,
         active_script: ActiveScript,
@@ -607,11 +609,27 @@ impl SieveScriptIngest for Server {
         }
 
         if let Some(reject_reason) = reject_reason {
-            Err(
-                trc::EventType::MessageIngest(trc::MessageIngestEvent::Error)
-                    .ctx(trc::Key::Code, 571)
-                    .ctx(trc::Key::Reason, reject_reason),
-            )
+            if return_path_verified {
+                Err(
+                    trc::EventType::MessageIngest(trc::MessageIngestEvent::Error)
+                        .ctx(trc::Key::Code, 571)
+                        .ctx(trc::Key::Reason, reject_reason),
+                )
+            } else {
+                // inbuxa: the message was accepted before the script ran, so
+                // a rejection is a notice to the envelope sender (RFC 5429,
+                // 2.1.2). One this server couldn't verify may be forged, and
+                // the notice would go to whoever was named: the message is
+                // discarded without one.
+                trc::event!(
+                    Sieve(SieveEvent::ActionReject),
+                    From = envelope_from.to_string(),
+                    Reason = reject_reason,
+                    Details = "Envelope sender not verified: discarded without a rejection notice",
+                    SpanId = session_id
+                );
+                Ok(ingested_message)
+            }
         } else if has_delivered || last_temp_error.is_none() {
             Ok(ingested_message)
         } else {

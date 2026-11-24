@@ -181,6 +181,7 @@ impl FormHandler for Server {
                 .deliver_message(IngestMessage {
                     sender_address: from_email,
                     verified_sender: VerifiedSender::None,
+                    return_path_verified: false,
                     recipients: form
                         .rcpt_to
                         .iter()
