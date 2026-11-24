@@ -15,7 +15,7 @@ use crate::utils::{
 use registry::{
     schema::{
         enums::{EventPolicy, LogRotateFrequency, TracingLevel},
-        prelude::ObjectType,
+        prelude::{ObjectType, Property},
         structs::{Expression, MtaStageAuth, Tracer, TracerLog},
     },
     types::map::Map,
@@ -149,6 +149,37 @@ async fn test_log_tracer_moves(test: &TestServer) {
     assert!(
         new_seq.iter().any(|c| *c > 0),
         "no event of the stream reached the new file"
+    );
+
+    // inbuxa: the log viewer reads only the files this tracer writes, not
+    // another program's file in the same directory, a file named like the
+    // log with something else after it, or a link to a file elsewhere
+    let foreign =
+        "2026-11-23T10:00:00Z INFO Licensing (server.licensing) details = \"foreign-line\"\n";
+    std::fs::write(new_dir.join("other-program.log"), foreign).unwrap();
+    std::fs::write(new_dir.join(format!("{PREFIX}.secret")), foreign).unwrap();
+    let outside = test.temp_dir.path.join("tracer-outside.log");
+    std::fs::write(&outside, foreign).unwrap();
+    std::os::unix::fs::symlink(&outside, new_dir.join(format!("{PREFIX}.2026-11-23"))).unwrap();
+    let own = admin
+        .registry_query_ids(
+            ObjectType::Log,
+            [(Property::Text, "marker-after")],
+            Vec::<&str>::new(),
+        )
+        .await;
+    assert!(!own.is_empty(), "the tracer's own lines are found");
+    let read_foreign = admin
+        .registry_query_ids(
+            ObjectType::Log,
+            [(Property::Text, "foreign-line")],
+            Vec::<&str>::new(),
+        )
+        .await;
+    assert!(
+        read_foreign.is_empty(),
+        "the log viewer read {} lines from files the tracer didn't write",
+        read_foreign.len()
     );
 
     // Removing the tracer stops it
