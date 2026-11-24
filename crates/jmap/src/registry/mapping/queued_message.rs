@@ -344,14 +344,22 @@ pub(crate) async fn queued_message_get(
         };
         let message_in = message_archive.unarchive::<Message>()?;
         // inbuxa: MT-5: a tenant sees what it reaches of the message
-        match reach_of(tenant_domains.as_ref(), message_in) {
+        let reach = reach_of(tenant_domains.as_ref(), message_in);
+        match reach {
             QueueReach::Whole => {
-                get.insert(id, map_message(message_in).into_value());
+                let message = hide_client_ip(
+                    map_message(message_in),
+                    reach,
+                    tenant_domains.as_ref(),
+                    message_in,
+                );
+                get.insert(id, message.into_value());
             }
-            reach @ QueueReach::OwnRecipients => {
+            QueueReach::OwnRecipients => {
                 let message = only_recipients(map_message(message_in), |address| {
                     shows(reach, tenant_domains.as_ref(), address)
                 });
+                let message = hide_client_ip(message, reach, tenant_domains.as_ref(), message_in);
                 get.insert(id, message.into_value());
             }
             QueueReach::Nothing => {
@@ -655,6 +663,28 @@ fn reach_of(domains: Option<&AHashSet<String>>, message: &ArchivedMessage) -> Qu
     domains.map_or(QueueReach::Whole, |domains| {
         tenant_reach_archived(domains, message)
     })
+}
+
+/// inbuxa: MT-5: where the sender connected from, shown to a tenant only
+/// with the whole message and never for another tenant's signed-in sender
+/// (as the unspecified address).
+fn hide_client_ip(
+    mut message: QueuedMessage,
+    reach: QueueReach,
+    domains: Option<&AHashSet<String>>,
+    message_in: &ArchivedMessage,
+) -> QueuedMessage {
+    if let Some(domains) = domains
+        && !inbuxa_features::tenancy::queue::shows_client_ip(
+            reach,
+            domains,
+            &message_in.return_path,
+            message_in.flags.to_native() & FROM_AUTHENTICATED != 0,
+        )
+    {
+        message.received_from_ip = IpAddr(std::net::Ipv4Addr::UNSPECIFIED.into());
+    }
+    message
 }
 
 /// Whether the caller is shown this recipient of a message it reaches.

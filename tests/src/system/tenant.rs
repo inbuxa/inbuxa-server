@@ -917,9 +917,8 @@ pub async fn test(test: &mut TestServer) {
             .is_empty(),
         "MT-5"
     );
-    // Mail from outside: the recipients' tenant administrator sees its
-    // recipients, but the content is the sender's, and nobody's in a tenant
-    // here; no tenant downloads it
+    // Mail from outside to D's people only: everything in it is D's, so D's
+    // administrator downloads it too, and no other tenant does
     let blob_id = d_admin
         .registry_get_many(ObjectType::QueuedMessage, queued.clone())
         .await
@@ -927,7 +926,7 @@ pub async fn test(test: &mut TestServer) {
         .as_str()
         .unwrap()
         .to_string();
-    for (account, expected) in [(admin, 200), (&d_admin, 404), (&t_admin, 404)] {
+    for (account, expected) in [(admin, 200), (&d_admin, 200), (&t_admin, 404)] {
         assert_eq!(
             download_queued(account, &blob_id).await,
             expected,
@@ -1404,6 +1403,16 @@ async fn tenant_queue_reach(
         recipients(&u_view.list()[0]),
         ["uuser@u.example.org"],
         "U sees only its own recipient"
+    );
+    // ... and not where T's person connected from, which T sees
+    assert_ne!(
+        queued["receivedFromIp"], "0.0.0.0",
+        "the sender's tenant sees the client address: {queued}"
+    );
+    assert_eq!(
+        u_view.list()[0]["receivedFromIp"],
+        "0.0.0.0",
+        "U doesn't see T's person's client address"
     );
     for (account, to, found) in [
         (u_admin, "uuser@u.example.org", true),
