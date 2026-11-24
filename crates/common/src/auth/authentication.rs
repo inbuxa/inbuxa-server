@@ -417,6 +417,7 @@ impl Server {
                             };
                             // inbuxa: the sign-in lasts no longer than the token
                             let expires_at = JwtClaims::expires_at(token);
+                            let account_name = result.email.clone();
                             let token = self
                                 .build_directory_token(directory, result, req.remote_ip)
                                 .await?;
@@ -427,6 +428,14 @@ impl Server {
                                     .ctx(trc::Key::AccountId, token.account_id())
                                     .reason("Authenticated using an email alias but account does not have AuthenticateAlias permission"));
                             }
+                            // inbuxa: logged as the other sign-ins are, never the token
+                            trc::event!(
+                                Auth(trc::AuthEvent::Success),
+                                AccountName = account_name,
+                                AccountId = token.account_id(),
+                                SpanId = req.session_id,
+                                Details = "Authenticated with a directory token",
+                            );
                             // inbuxa: AU-5
                             return Ok(token
                                 .with_origin(Via::Directory)
@@ -449,6 +458,13 @@ impl Server {
                         .and_then(|token| AccessToken::new(token, req.remote_ip))
                         // inbuxa: AU-5
                         .map(|token| {
+                            // inbuxa: logged as the other sign-ins are, never the token
+                            trc::event!(
+                                Auth(trc::AuthEvent::Success),
+                                AccountId = token.account_id(),
+                                SpanId = req.session_id,
+                                Details = "Authenticated with an OAuth token",
+                            );
                             token
                                 .with_origin(Via::OAuth {
                                     client: token_info
