@@ -87,6 +87,18 @@ impl<T: SessionStream> Session<T> {
             return self.write(b"501 5.5.4 Invalid ORCPT parameter.\r\n").await;
         }
 
+        // inbuxa (#532): `<>` is the null sender and names no recipient, so
+        // it's refused even where relaying is allowed
+        if to.address.is_empty() {
+            trc::event!(
+                Smtp(SmtpEvent::InvalidRecipientAddress),
+                SpanId = self.data.session_id,
+            );
+            return self
+                .write(b"501 5.1.3 Bad destination mailbox address syntax.\r\n")
+                .await;
+        }
+
         // Build RCPT
         let address_lcase = to.address.to_lowercase_address(true);
         let rcpt = SessionAddress {

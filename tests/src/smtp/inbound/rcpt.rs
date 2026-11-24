@@ -295,4 +295,16 @@ async fn rcpt() {
     session.rcpt_to("jane-list@foobar.org", "250").await;
     assert_eq!(session.data.rcpt_to.len(), 1);
     assert_eq!(session.data.rcpt_to[0].address_lcase, "jane@foobar.org");
+
+    // inbuxa (#532): an empty recipient is refused where relaying is allowed
+    // (10.0.0.2 here, a signed-in sender in practice), and nothing is queued
+    let mut session = test.new_mta_session();
+    session.data.remote_ip_str = "10.0.0.2".into();
+    session.eval_session_params().await;
+    session.ehlo("mx1.foobar.org").await;
+    session.mail_from("john@example.net", "250").await;
+    session.rcpt_to("<>", "501 5.1.3").await;
+    session.rcpt_to("< >", "501 5.1.3").await;
+    assert!(session.data.rcpt_to.is_empty());
+    session.cmd("DATA", "503 5.5.1").await;
 }
