@@ -15,8 +15,8 @@ use registry::{
         enums::Permission,
         prelude::{ObjectType, Property},
         structs::{
-            self, AccountSettings, Credential, CustomRoles, PasswordCredential, Role, UserAccount,
-            UserRoles,
+            self, AccountSettings, Authentication, Credential, CustomRoles, PasswordCredential,
+            Role, UserAccount, UserRoles,
         },
     },
     types::{EnumImpl, list::List, map::Map},
@@ -214,6 +214,80 @@ pub async fn test(test: &mut TestServer) {
         num_objects_verified, 0,
         "No object read permissions were verified in the test"
     );
+
+    // An account on the default roles loses a permission at once when the
+    // default user role drops it, though nothing links the account to the
+    // role, and again when another role becomes the default
+    let auth = admin.registry_get::<Authentication>(Id::singleton()).await;
+    let default_role_id = auth.default_user_role_ids.as_slice()[0];
+    let default_permissions = admin
+        .registry_get::<Role>(default_role_id)
+        .await
+        .enabled_permissions
+        .as_slice()
+        .to_vec();
+    assert!(default_permissions.contains(&Permission::SysAccountSettingsGet));
+    let without_get = default_permissions
+        .iter()
+        .filter(|p| **p != Permission::SysAccountSettingsGet)
+        .copied()
+        .collect::<Vec<_>>();
+    let as_map = |permissions: &[Permission]| {
+        permissions
+            .iter()
+            .map(|p| (p.as_str().to_string(), serde_json::Value::Bool(true)))
+            .collect::<serde_json::Map<String, serde_json::Value>>()
+    };
+    assert!(reads_settings(&user).await, "default role: before");
+    admin
+        .registry_update_object(
+            ObjectType::Role,
+            default_role_id,
+            json!({ Property::EnabledPermissions: as_map(&without_get) }),
+        )
+        .await;
+    assert!(
+        !reads_settings(&user).await,
+        "default role: a permission taken from it is gone at once"
+    );
+    admin
+        .registry_update_object(
+            ObjectType::Role,
+            default_role_id,
+            json!({ Property::EnabledPermissions: as_map(&default_permissions) }),
+        )
+        .await;
+    assert!(reads_settings(&user).await, "default role: given back");
+    let narrower_role_id = admin
+        .registry_create_object(Role {
+            description: "Narrower default".to_string(),
+            enabled_permissions: Map::new(without_get),
+            ..Default::default()
+        })
+        .await;
+    admin
+        .registry_update_object(
+            ObjectType::Authentication,
+            Id::singleton(),
+            json!({ Property::DefaultUserRoleIds: Map::new(vec![narrower_role_id]) }),
+        )
+        .await;
+    assert!(
+        !reads_settings(&user).await,
+        "default role: another default applies at once"
+    );
+    admin
+        .registry_update_object(
+            ObjectType::Authentication,
+            Id::singleton(),
+            json!({ Property::DefaultUserRoleIds: auth.default_user_role_ids }),
+        )
+        .await;
+    assert!(reads_settings(&user).await, "default role: put back");
+    admin
+        .registry_destroy(ObjectType::Role, [narrower_role_id])
+        .await
+        .assert_destroyed(&[narrower_role_id]);
 
     // Deleting a linked role should not be allowed
     admin
@@ -600,6 +674,17 @@ async fn roles_bring_their_parents(
         )
         .await;
     vec![signer_role_id, muted_role_id, middle_role_id]
+}
+
+/// Whether the account may read its own settings.
+async fn reads_settings(account: &crate::utils::account::Account) -> bool {
+    account
+        .registry_get_many(ObjectType::AccountSettings, [Id::singleton()])
+        .await
+        .method_response()
+        .get("type")
+        .and_then(|t| t.as_str())
+        != Some("forbidden")
 }
 
 const SMIME_CERTIFICATE: &str = "-----BEGIN CERTIFICATE-----

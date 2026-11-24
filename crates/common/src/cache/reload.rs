@@ -13,7 +13,7 @@ use crate::{
         storage::Storage,
         telemetry::Telemetry,
     },
-    ipc::{BroadcastEvent, QueueEvent, RegistryChange},
+    ipc::{BroadcastEvent, CacheInvalidation, QueueEvent, RegistryChange},
     network::security::BlockedIps,
 };
 use ahash::AHashMap;
@@ -139,8 +139,23 @@ impl Server {
                         .await;
 
                     if !self.has_new_build_errors(&bootstrap.errors) {
+                        // inbuxa: an account on the default roles keeps the
+                        // old ones in its cached access token
+                        let defaults_changed = {
+                            let running = self.inner.shared_core.load();
+                            let (old, new) = (&running.network.security, &core.network.security);
+                            old.default_role_ids_user != new.default_role_ids_user
+                                || old.default_role_ids_group != new.default_role_ids_group
+                                || old.default_role_ids_tenant != new.default_role_ids_tenant
+                                || old.default_role_ids_admin != new.default_role_ids_admin
+                        };
+
                         // Update core
                         self.inner.shared_core.store(core.into());
+                        if defaults_changed {
+                            self.invalidate_local_caches(&[CacheInvalidation::AllAccessTokens])
+                                .await;
+                        }
 
                         // Update tracers
                         tracers.update();
