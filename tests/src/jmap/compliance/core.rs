@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use super::{CompCtx, TestOutcome, check, check_contains, check_eq};
@@ -99,6 +101,10 @@ pub async fn run(ctx: &CompCtx<'_>) {
         error_method_calls_not_array(ctx),
     )
     .await;
+    ctx.run("core/error-not-json-type", error_not_json_type(ctx))
+        .await;
+    ctx.run("core/error-not-request-type", error_not_request_type(ctx))
+        .await;
 
     // --- method errors ---
     ctx.run("core/error-unknown-method", error_unknown_method(ctx))
@@ -456,6 +462,36 @@ async fn error_method_calls_not_array(ctx: &CompCtx<'_>) -> TestOutcome {
         resp.is_client_error(),
         format!("Expected 4xx client error, got {}", resp.status),
     )
+}
+
+// inbuxa: a body that isn't JSON is notJSON, JSON that isn't a Request
+// is notRequest (RFC 8620 §3.6.1).
+async fn error_not_json_type(ctx: &CompCtx<'_>) -> TestOutcome {
+    for body in ["{", "this is not json"] {
+        let resp = ctx.primary.jmap_raw_post(body, "application/json").await;
+        check_eq(resp.status, 400, format!("status for {body:?}"))?;
+        check_eq(
+            resp.json()
+                .and_then(|v| v["type"].as_str().map(String::from)),
+            Some("urn:ietf:params:jmap:error:notJSON".to_string()),
+            format!("type for {body:?}"),
+        )?;
+    }
+    Ok(())
+}
+
+async fn error_not_request_type(ctx: &CompCtx<'_>) -> TestOutcome {
+    for body in ["[]", r#"{"foo": "bar"}"#] {
+        let resp = ctx.primary.jmap_raw_post(body, "application/json").await;
+        check_eq(resp.status, 400, format!("status for {body:?}"))?;
+        check_eq(
+            resp.json()
+                .and_then(|v| v["type"].as_str().map(String::from)),
+            Some("urn:ietf:params:jmap:error:notRequest".to_string()),
+            format!("type for {body:?}"),
+        )?;
+    }
+    Ok(())
 }
 
 // --- method errors ---

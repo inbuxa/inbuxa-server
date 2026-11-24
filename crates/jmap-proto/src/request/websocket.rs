@@ -10,7 +10,7 @@ use super::Request;
 use crate::{
     error::request::{RequestError, RequestErrorType, RequestLimitError},
     object::AnyId,
-    request::{Call, deserialize::DeserializeArguments},
+    request::{Call, deserialize::DeserializeArguments, parser::is_json},
     response::{Response, ResponseMethod, serialize::serialize_hex, status::PushObject},
 };
 use serde::{
@@ -128,6 +128,10 @@ impl<'x> WebSocketMessage<'x> {
                     Err(with_request_id(trc::LimitEvent::CallsIn.into_err(), req.id))
                 }
                 Ok(msg) => Ok(msg),
+                // inbuxa: notJSON for a message that isn't JSON at all
+                Err(err) if !is_json(json) => {
+                    Err(trc::JmapEvent::NotJson.into_err().details(err.to_string()))
+                }
                 Err(err) => Err(with_request_id(
                     trc::JmapEvent::NotRequest
                         .into_err()
