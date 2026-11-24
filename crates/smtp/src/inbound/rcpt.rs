@@ -87,12 +87,32 @@ impl<T: SessionStream> Session<T> {
             return self.write(b"501 5.5.4 Invalid ORCPT parameter.\r\n").await;
         }
 
+        // inbuxa (#532): `<>` is the null sender and names no recipient, so
+        // it's refused even where relaying is allowed
+        if to.address.is_empty() {
+            trc::event!(
+                Smtp(SmtpEvent::InvalidRecipientAddress),
+                SpanId = self.data.session_id,
+            );
+            return self
+                .write(b"501 5.1.3 Bad destination mailbox address syntax.\r\n")
+                .await;
+        }
+
+        // inbuxa (#531): a bare postmaster, in any case, is the postmaster of
+        // the default domain (RFC 5321, Section 4.5.1)
+        let address = if is_bare_postmaster(to.address.as_bytes()) {
+            format!("postmaster@{}", self.server.core.email.default_domain_name)
+        } else {
+            to.address.into_owned()
+        };
+
         // Build RCPT
-        let address_lcase = to.address.to_lowercase_address(true);
+        let address_lcase = address.to_lowercase_address(true);
         let rcpt = SessionAddress {
             domain: address_lcase.domain_part().into(),
             address_lcase,
-            address: to.address.into_owned(),
+            address,
             flags: to.flags,
             dsn_info: to.orcpt.map(|e| e.into_owned()),
         };
@@ -507,6 +527,65 @@ impl<T: SessionStream> Session<T> {
             self.write(b"451 4.3.0 Too many errors, disconnecting.\r\n")
                 .await?;
             Err(())
+        }
+    }
+}
+
+/// inbuxa (#531): whether an address is a bare `postmaster`, which RFC 5321
+/// (Section 4.5.1) says must be taken without a domain, in any case
+fn is_bare_postmaster(address: &[u8]) -> bool {
+    address.eq_ignore_ascii_case(b"postmaster")
+}
+
+/// inbuxa (#531): the command parser reads `RCPT TO:<postmaster>` as
+/// `RCPT TO:<>`, so this reads the address back from the command line to
+/// tell them apart. A source route before it is skipped, as the parser does.
+pub(crate) fn rcpt_line_names_postmaster(line: &[u8]) -> bool {
+    let Some(start) = line.iter().position(|&ch| ch == b'<') else {
+        return false;
+    };
+    let rest = &line[start + 1..];
+    let Some(end) = rest.iter().position(|&ch| ch == b'>') else {
+        return false;
+    };
+    let mut address = &rest[..end];
+    if address.first() == Some(&b'@') {
+        address = address.rsplit(|&ch| ch == b':').next().unwrap_or_default();
+    }
+    is_bare_postmaster(address.trim_ascii())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rcpt_line_names_postmaster;
+
+    #[test]
+    fn rcpt_line_postmaster() {
+        for line in [
+            &b"RCPT TO:<postmaster>\r\n"[..],
+            b"RCPT TO:<Postmaster>\r\n",
+            b"rcpt to: <POSTMASTER> NOTIFY=NEVER\r\n",
+            b"RCPT TO:< postmaster >\r\n",
+            b"RCPT TO:<@relay.example.org:postmaster>\r\n",
+        ] {
+            assert!(
+                rcpt_line_names_postmaster(line),
+                "{}",
+                String::from_utf8_lossy(line)
+            );
+        }
+        for line in [
+            &b"RCPT TO:<>\r\n"[..],
+            b"RCPT TO:< >\r\n",
+            b"RCPT TO:<postmaster@example.org>\r\n",
+            b"RCPT TO:<postmasters>\r\n",
+            b"RCPT TO:postmaster\r\n",
+        ] {
+            assert!(
+                !rcpt_line_names_postmaster(line),
+                "{}",
+                String::from_utf8_lossy(line)
+            );
         }
     }
 }

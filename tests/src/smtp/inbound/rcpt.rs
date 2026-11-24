@@ -57,6 +57,13 @@ async fn rcpt() {
             "Cornelius Strauss",
             &[],
         ),
+        // inbuxa (#531): the default domain's postmaster
+        (
+            "postmaster@example.org",
+            "p4ssw0rd + extra safety",
+            "Postmaster",
+            &[],
+        ),
     ] {
         admin
             .create_user_account(name, secret, description, aliases, vec![])
@@ -295,4 +302,33 @@ async fn rcpt() {
     session.rcpt_to("jane-list@foobar.org", "250").await;
     assert_eq!(session.data.rcpt_to.len(), 1);
     assert_eq!(session.data.rcpt_to[0].address_lcase, "jane@foobar.org");
+
+    // inbuxa (#532): an empty recipient is refused where relaying is allowed
+    // (10.0.0.2 here, a signed-in sender in practice), and nothing is queued
+    let mut session = test.new_mta_session();
+    session.data.remote_ip_str = "10.0.0.2".into();
+    session.eval_session_params().await;
+    session.ehlo("mx1.foobar.org").await;
+    session.mail_from("john@example.net", "250").await;
+    session.rcpt_to("<>", "501 5.1.3").await;
+    session.rcpt_to("< >", "501 5.1.3").await;
+    assert!(session.data.rcpt_to.is_empty());
+    session.cmd("DATA", "503 5.5.1").await;
+
+    // inbuxa (#531): a bare postmaster, in any case, is the default domain's
+    // postmaster, also where relaying isn't allowed (RFC 5321, Section 4.5.1)
+    let postmaster = format!("postmaster@{}", test.server.core.email.default_domain_name);
+    let mut session = test.new_mta_session();
+    session.data.remote_ip_str = "10.0.0.1".into();
+    session.eval_session_params().await;
+    session.ehlo("mx1.foobar.org").await;
+    session.mail_from("bounces@example.net", "250").await;
+    session.rcpt_to("Postmaster", "250").await;
+    session.rcpt_to("POSTMASTER", "250").await;
+    assert_eq!(session.data.rcpt_to.len(), 1);
+    assert_eq!(session.data.rcpt_to[0].address_lcase, postmaster);
+    assert_eq!(session.data.rcpt_to[0].domain, "example.org");
+    // ... and `<>` is still refused
+    session.rcpt_to("<>", "501 5.1.3").await;
+    assert_eq!(session.data.rcpt_to.len(), 1);
 }

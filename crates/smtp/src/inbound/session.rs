@@ -25,6 +25,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use trc::{NetworkEvent, SecurityEvent, SmtpEvent};
 
 use crate::core::{Session, State};
+use crate::inbound::rcpt::rcpt_line_names_postmaster;
 
 use super::auth::{AUTH_BEARER, SaslToken};
 
@@ -42,9 +43,24 @@ impl<T: SessionStream> Session<T> {
         'outer: loop {
             match &mut state {
                 State::Request(receiver) => loop {
+                    // inbuxa (#531): the start of a command split across reads,
+                    // and where this read starts, so RCPT can read its line
+                    let held = (!receiver.buf().is_empty()).then(|| receiver.buf().clone());
+                    let line_start = iter.as_slice();
                     match receiver.ingest(&mut iter) {
                         Ok(request) => match request {
-                            Request::Rcpt { to } => {
+                            Request::Rcpt { mut to } => {
+                                if to.address.is_empty() {
+                                    let tail =
+                                        &line_start[..line_start.len() - iter.as_slice().len()];
+                                    let line = match &held {
+                                        Some(held) => [held.as_slice(), tail].concat(),
+                                        None => tail.to_vec(),
+                                    };
+                                    if rcpt_line_names_postmaster(&line) {
+                                        to.address = "postmaster".into();
+                                    }
+                                }
                                 self.handle_rcpt_to(to).await?;
                             }
                             Request::Mail { from } => {

@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
@@ -819,6 +821,136 @@ async fn dane_test() {
             }))
         );
     }
+}
+
+// inbuxa (#530): the admin Delivery Test makes the certificate check delivery
+// makes. A host with a self-signed certificate and a matching TLSA record
+// takes mail, so the test reports STARTTLS and DANE as passing; without DANE
+// the certificate is still checked against the web PKI.
+#[tokio::test]
+#[serial_test::serial]
+async fn dane_delivery_test_matches_delivery() {
+    let local = TestServerBuilder::new("smtp_dane_delivery_test_local")
+        .await
+        .with_http_listener(19062)
+        .await
+        .disable_services()
+        .capture_queue()
+        .build()
+        .await;
+    // The Delivery Test always connects to port 25
+    let mut remote = TestServerBuilder::new("smtp_dane_delivery_test_remote")
+        .await
+        .with_dummy_tls_cert(["*.foobar.org"])
+        .await
+        .with_http_listener(19063)
+        .await
+        .with_smtp_listener(25)
+        .await
+        .disable_services()
+        .capture_queue()
+        .build()
+        .await;
+
+    let remote_admin = remote.account("admin");
+    remote_admin.mta_no_auth().await;
+    remote_admin.mta_allow_relaying().await;
+    remote_admin.mta_allow_non_fqdn().await;
+    remote_admin.reload_settings().await;
+    remote.reload_core();
+
+    local.server.mx_add(
+        "foobar.org",
+        vec![MX {
+            exchanges: vec!["mx.foobar.org".into()].into_boxed_slice(),
+            preference: 10,
+        }],
+        DnssecStatus::Secure,
+        Instant::now() + Duration::from_secs(30),
+    );
+    local.server.ipv4_add(
+        "mx.foobar.org",
+        vec!["127.0.0.1".parse().unwrap()],
+        Instant::now() + Duration::from_secs(30),
+    );
+    local.server.txt_add(
+        "_smtp._tls.foobar.org",
+        TlsRpt::parse(b"v=TLSRPTv1; rua=mailto:reports@foobar.org").unwrap(),
+        Instant::now() + Duration::from_secs(30),
+    );
+    // The SPKI digest of the test certificate
+    local.server.tlsa_add(
+        "_25._tcp.mx.foobar.org",
+        Arc::new(Tlsa {
+            entries: vec![TlsaEntry {
+                is_end_entity: true,
+                is_spki: true,
+                matching: TlsaMatching::Sha256,
+                data: vec![
+                    73, 186, 44, 106, 13, 198, 100, 180, 0, 44, 158, 188, 15, 195, 39, 198, 61,
+                    254, 215, 237, 100, 26, 15, 155, 219, 235, 120, 64, 128, 172, 17, 0,
+                ],
+            }],
+            has_end_entities: true,
+            has_intermediates: false,
+        }),
+        Instant::now() + Duration::from_secs(30),
+    );
+
+    let admin = local.account("admin");
+    let stages = delivery_test_stages(&admin.base_url(), &admin.basic_auth()).await;
+    assert!(
+        stages.iter().any(|s| s == "tlsaLookupSuccess"),
+        "{stages:?}"
+    );
+    assert!(stages.iter().any(|s| s == "startTlsSuccess"), "{stages:?}");
+    assert!(
+        stages.iter().any(|s| s == "daneVerifySuccess"),
+        "{stages:?}"
+    );
+    assert!(!stages.iter().any(|s| s == "startTlsError"), "{stages:?}");
+
+    // Without DNSSEC, DANE doesn't apply and the test certificate fails the
+    // web PKI check
+    local.server.mx_add(
+        "foobar.org",
+        vec![MX {
+            exchanges: vec!["mx.foobar.org".into()].into_boxed_slice(),
+            preference: 10,
+        }],
+        DnssecStatus::Insecure,
+        Instant::now() + Duration::from_secs(30),
+    );
+    let stages = delivery_test_stages(&admin.base_url(), &admin.basic_auth()).await;
+    assert!(stages.iter().any(|s| s == "tlsaNotFound"), "{stages:?}");
+    assert!(stages.iter().any(|s| s == "startTlsError"), "{stages:?}");
+    assert!(
+        !stages.iter().any(|s| s == "daneVerifySuccess"),
+        "{stages:?}"
+    );
+}
+
+/// Runs the admin Delivery Test for foobar.org and returns the stage types
+/// it reported, in order
+async fn delivery_test_stages(base_url: &str, auth: &str) -> Vec<String> {
+    let body = reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .timeout(Duration::from_secs(60))
+        .build()
+        .unwrap()
+        .get(format!("{base_url}/api/live/delivery/foobar.org?timeout=5"))
+        .header("authorization", auth)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    body.lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .flat_map(|data| serde_json::from_str::<Vec<serde_json::Value>>(data).unwrap())
+        .filter_map(|stage| stage["type"].as_str().map(|s| s.to_string()))
+        .collect()
 }
 
 pub fn decode_hex(s: &str) -> Result<Vec<u8>, ParseIntError> {
