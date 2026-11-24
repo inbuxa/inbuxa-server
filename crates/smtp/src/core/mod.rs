@@ -48,6 +48,8 @@ pub enum State {
     Sasl(LineReceiver<SaslToken>),
     SkipData(DummyDataReceiver, &'static [u8]),
     RequestTooLarge(DummyLineReceiver),
+    // inbuxa: the rest of a line the parser refused
+    SkipLine(DummyLineReceiver),
     Accepted(QueueId),
     None,
 }
