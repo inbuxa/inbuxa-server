@@ -99,6 +99,11 @@ jobs:
       # --no-run: the workflow compiled every test target without running them,
       # which catches a test that no longer builds without paying for the suite.
       - run: cargo test --workspace --locked --no-run
+      # The feature set the image and release binaries are built with (see
+      # Dockerfile). Default features are RocksDB only, and the other store
+      # backends change what compiles: 27.1-rc.45 had green CI and a release
+      # build that failed on Sync bounds only those backends bring in.
+      - run: cargo check -p inbuxa --locked --no-default-features --features "sqlite postgres mysql rocks s3 redis azure nats"
       # The release profile, on main only. It is the profile the image is
       # built with, and it fails in ways the dev profile does not: v2026.9.24
       # was tagged on a commit whose CI was green and whose release build
@@ -108,7 +113,7 @@ jobs:
       #
       # Pull requests stay on the dev profile, where the wait is worth less.
       - if: github.event_name == 'push'
-        run: cargo build -p inbuxa --locked --release
+        run: cargo build -p inbuxa --locked --release --no-default-features --features "sqlite postgres mysql rocks s3 redis azure nats"
       # Keep the cache from growing without bound: past 60 GB the target dir
       # is dropped and the next build starts cold. The download cache stays.
       # Two builds (dev + test profiles) already fill ~22 GB, so the limit
