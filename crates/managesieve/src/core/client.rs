@@ -2,15 +2,17 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use super::{Command, ResponseCode, SerializeResponse, Session, State};
 use common::{
     KV_RATE_LIMIT_IMAP,
-    network::{SessionResult, SessionStream},
+    network::{SessionResult, SessionStream, write_stall::write_all_or_stall},
 };
 use imap_proto::receiver::{self, Request};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
 use trc::{AddContext, SecurityEvent};
 use types::{collection::Collection, field::SieveField};
 
@@ -86,6 +88,21 @@ impl<T: SessionStream> Session<T> {
         }
 
         for request in requests {
+            // inbuxa: a session ends at its next command once the sign-in it
+            // was opened with is no longer valid, or the account has lost
+            // permissions or shares it holds
+            if let State::Authenticated { access_token, .. } = &self.state
+                && let Err(err) = self
+                    .server
+                    .assert_session_current(access_token, self.remote_addr)
+                    .await
+            {
+                trc::error!(err.span_id(self.session_id));
+                let _ = self
+                    .write(b"BYE \"Session no longer authorized.\"\r\n")
+                    .await;
+                return SessionResult::Close;
+            }
             let command = request.command;
             match match command {
                 Command::ListScripts => self.handle_listscripts().await,
@@ -223,20 +240,21 @@ impl<T: AsyncWrite + AsyncRead + Unpin> Session<T> {
             Contents = trc::Value::from_maybe_string(bytes),
         );
 
-        self.stream.write_all(bytes).await.map_err(|err| {
-            trc::NetworkEvent::WriteError
-                .into_err()
-                .reason(err)
-                .caused_by(trc::location!())
-        })?;
-        self.stream.flush().await.map_err(|err| {
-            trc::NetworkEvent::FlushError
-                .into_err()
-                .reason(err)
-                .caused_by(trc::location!())
-        })?;
-
-        Ok(())
+        // inbuxa: a client that stops reading is dropped once the answer has
+        // stood still for the session's read timeout
+        let stall = if !matches!(self.state, State::NotAuthenticated { .. }) {
+            self.server.core.imap.timeout_auth
+        } else {
+            self.server.core.imap.timeout_unauth
+        };
+        write_all_or_stall(&mut self.stream, bytes, stall)
+            .await
+            .map_err(|err| {
+                trc::NetworkEvent::WriteError
+                    .into_err()
+                    .reason(err)
+                    .caused_by(trc::location!())
+            })
     }
 
     pub async fn write_error(&mut self, error: trc::Error) -> trc::Result<()> {

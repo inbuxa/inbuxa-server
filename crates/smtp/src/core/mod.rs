@@ -48,6 +48,8 @@ pub enum State {
     Sasl(LineReceiver<SaslToken>),
     SkipData(DummyDataReceiver, &'static [u8]),
     RequestTooLarge(DummyLineReceiver),
+    // inbuxa: the rest of a line the parser refused
+    SkipLine(DummyLineReceiver),
     Accepted(QueueId),
     None,
 }
@@ -72,11 +74,15 @@ pub struct SessionData {
     pub remote_port: u16,
     pub asn_geo_data: AsnGeoLookupResult,
     pub helo_domain: String,
+    // inbuxa: SMTP-5: EHLO and HELO domains the session has named
+    pub helo_domains: usize,
 
     pub mail_from: Option<SessionAddress>,
     pub rcpt_to: Vec<SessionAddress>,
     pub rcpt_errors: usize,
     pub rcpt_oks: usize,
+    // inbuxa: lists this transaction expanded, as named and as resolved
+    pub expanded_lists: Vec<String>,
     pub message: Vec<u8>,
 
     pub authenticated_as: Option<AccountInfo>,
@@ -197,6 +203,7 @@ impl SessionData {
             remote_port,
             asn_geo_data,
             helo_domain: String::new(),
+            helo_domains: 0,
             mail_from: None,
             rcpt_to: Vec::new(),
             authenticated_as: None,
@@ -204,6 +211,7 @@ impl SessionData {
             valid_until: Instant::now(),
             rcpt_errors: 0,
             rcpt_oks: 0,
+            expanded_lists: Vec::new(),
             message: Vec::with_capacity(0),
             auth_errors: 0,
             messages_sent: 0,
@@ -328,10 +336,12 @@ impl SessionData {
             session_id,
             asn_geo_data: AsnGeoLookupResult::default(),
             helo_domain: "localhost".into(),
+            helo_domains: 0,
             mail_from,
             rcpt_to,
             rcpt_errors: 0,
             rcpt_oks: 0,
+            expanded_lists: Vec::new(),
             message,
             authenticated_as: Some(authenticated_as),
             auth_errors: 0,

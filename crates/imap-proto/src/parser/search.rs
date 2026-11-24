@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use std::borrow::Cow;
@@ -18,7 +20,7 @@ use crate::protocol::search::{ModSeqEntry, ResultOption};
 use crate::protocol::{Flag, ProtocolVersion};
 use crate::receiver::{Request, Token, bad};
 
-use super::{parse_date, parse_number, parse_sequence_set};
+use super::{limits, parse_date, parse_number, parse_sequence_set};
 
 impl Request<Command> {
     #[allow(clippy::while_let_on_iterator)]
@@ -102,6 +104,8 @@ pub fn parse_filters(
 ) -> super::Result<Vec<Filter>> {
     let mut filters = Vec::new();
     let mut filters_len = 0;
+    let mut criteria = 0;
+    let mut sequence_items = 0;
     let mut filters_stack = Vec::new();
     let mut operator = Filter::And;
 
@@ -469,6 +473,26 @@ pub fn parse_filters(
                 );
 
                 filters_len += 1;
+                // inbuxa: see limits
+                criteria += 1;
+                if criteria > limits::MAX_SEARCH_CRITERIA {
+                    return Err(Cow::from(format!(
+                        "Too many search criteria, the limit is {}.",
+                        limits::MAX_SEARCH_CRITERIA
+                    )));
+                }
+                if let Some(Filter::Sequence(sequence, _)) = filters.last() {
+                    sequence_items += match sequence {
+                        crate::protocol::Sequence::List { items } => items.len(),
+                        _ => 1,
+                    };
+                    if sequence_items > limits::MAX_SEQUENCE_ITEMS {
+                        return Err(Cow::from(format!(
+                            "Too many sequence set items, the limit is {}.",
+                            limits::MAX_SEQUENCE_ITEMS
+                        )));
+                    }
+                }
             }
             Token::ParenthesisOpen => {
                 if filters_stack.len() > 10 {

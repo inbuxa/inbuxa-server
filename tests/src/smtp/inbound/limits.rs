@@ -2,17 +2,31 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
-    smtp::session::{TestSession, VerifyResponse},
+    smtp::session::{TestServerInstance, TestSession, VerifyResponse},
     utils::server::TestServerBuilder,
 };
+use common::network::{ServerInstance, SessionStream};
 use registry::{
     schema::structs::{Expression, ExpressionMatch, MtaInboundSession},
     types::list::List,
 };
-use std::time::{Duration, Instant};
+use smtp::core::{Session, SessionData, SessionParameters, State};
+use std::{
+    borrow::Cow,
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Poll},
+    time::{Duration, Instant},
+};
+use tokio::{
+    io::{AsyncRead, AsyncWrite, ReadBuf},
+    sync::watch,
+};
 
 #[tokio::test]
 async fn limits() {
@@ -89,4 +103,83 @@ async fn limits() {
     session.write_rx("MAIL FROM:<this_is_a_long@command_over_10_chars.com>\r\n");
     session.handle_conn().await;
     session.response().assert_code("221 2.0.0");
+
+    // inbuxa: SMTP-3: a client that never reads its replies is dropped once
+    // a reply has stood still for the session timeout
+    let mut session = Session {
+        state: State::default(),
+        instance: Arc::new(ServerInstance::test_with_shutdown(watch::channel(false).1)),
+        server: test.server.clone(),
+        stream: StalledIo {
+            rx_buf: b"NOOP\r\n".to_vec(),
+        },
+        data: SessionData::new(
+            "10.0.0.2".parse().unwrap(),
+            0,
+            "10.0.0.2".parse().unwrap(),
+            0,
+            Default::default(),
+            0,
+        ),
+        params: SessionParameters::default(),
+        hostname: "localhost".into(),
+    };
+    session.eval_session_params().await;
+    assert!(
+        tokio::time::timeout(Duration::from_secs(10), session.handle_conn())
+            .await
+            .is_ok(),
+        "the session was still writing to a client that doesn't read 10 s later"
+    );
+}
+
+/// inbuxa: a client that sends what it has and then never reads
+struct StalledIo {
+    rx_buf: Vec<u8>,
+}
+
+impl AsyncRead for StalledIo {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        if !self.rx_buf.is_empty() {
+            buf.put_slice(&std::mem::take(&mut self.rx_buf));
+            Poll::Ready(Ok(()))
+        } else {
+            Poll::Pending
+        }
+    }
+}
+
+impl AsyncWrite for StalledIo {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        _buf: &[u8],
+    ) -> Poll<Result<usize, std::io::Error>> {
+        Poll::Pending
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), std::io::Error>> {
+        Poll::Pending
+    }
+
+    fn poll_shutdown(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+    ) -> Poll<Result<(), std::io::Error>> {
+        Poll::Pending
+    }
+}
+
+impl SessionStream for StalledIo {
+    fn is_tls(&self) -> bool {
+        false
+    }
+
+    fn tls_version_and_cipher(&self) -> (Cow<'static, str>, Cow<'static, str>) {
+        ("".into(), "".into())
+    }
 }

@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use compact_str::ToCompactString;
@@ -16,7 +18,7 @@ use crate::{
     utf7::utf7_maybe_decode,
 };
 
-use super::parse_datetime;
+use super::{limits, parse_datetime};
 
 enum State {
     None,
@@ -105,6 +107,16 @@ impl Request<Command> {
                                     }
                                 }
                                 State::Flags => {
+                                    // inbuxa: see limits
+                                    if message.flags.len() >= limits::MAX_FLAGS {
+                                        return Err(bad(
+                                            self.tag.to_compact_string(),
+                                            format!(
+                                                "Too many flags, the limit is {}.",
+                                                limits::MAX_FLAGS
+                                            ),
+                                        ));
+                                    }
                                     message.flags.push(
                                         Flag::parse_imap(value)
                                             .map_err(|v| bad(self.tag.to_compact_string(), v))?,

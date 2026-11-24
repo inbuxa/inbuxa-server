@@ -25,6 +25,9 @@ use utils::DomainPart;
 
 impl<T: SessionStream> Session<T> {
     pub async fn handle_mail_from(&mut self, from: MailFrom<Cow<'_, str>>) -> Result<(), ()> {
+        // inbuxa: each message is sent only while the session's sign-in holds
+        self.assert_sign_in_current().await?;
+
         if self.data.helo_domain.is_empty()
             && (self.params.ehlo_require
                 || self.params.spf_ehlo.verify()

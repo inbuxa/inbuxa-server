@@ -2,9 +2,11 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
-use super::{PushUnique, parse_number, parse_sequence_set};
+use super::{PushUnique, limits, parse_number, parse_sequence_set};
 use crate::{
     Command,
     protocol::fetch::{self, Attribute, Section},
@@ -33,10 +35,21 @@ impl Request<Command> {
         .map_err(|v| bad(self.tag.to_compact_string(), v))?;
 
         let mut in_parentheses = false;
+        let mut header_fields = 0;
 
         while let Some(token) = tokens.next() {
             match token {
                 Token::Argument(value) => {
+                    // inbuxa: see limits
+                    if attributes.len() >= limits::MAX_FETCH_ATTRIBUTES {
+                        return Err(bad(
+                            CompactString::from_string_buffer(self.tag),
+                            format_compact!(
+                                "Too many FETCH attributes, the limit is {}.",
+                                limits::MAX_FETCH_ATTRIBUTES
+                            ),
+                        ));
+                    }
                     hashify::fnc_map_ignore_case!(value.as_slice(),
                         "ALL" => {
                             attributes = vec![
@@ -191,6 +204,17 @@ impl Request<Command> {
                                                     match token {
                                                         Token::ParenthesisClose => break,
                                                         Token::Argument(value) => {
+                                                            // inbuxa: see limits
+                                                            header_fields += 1;
+                                                            if header_fields > limits::MAX_FETCH_HEADER_FIELDS {
+                                                                return Err(bad(
+                                                                    CompactString::from_string_buffer(self.tag),
+                                                                    format_compact!(
+                                                                        "Too many header field names, the limit is {}.",
+                                                                        limits::MAX_FETCH_HEADER_FIELDS
+                                                                    ),
+                                                                ));
+                                                            }
                                                             fields.push(String::from_utf8(value).map_err(
                                                             |_| bad(self.tag.to_compact_string(),"Invalid UTF-8 in header field name."),
                                                         )?);

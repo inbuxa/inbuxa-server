@@ -34,7 +34,7 @@ use types::id::Id;
 pub(crate) async fn log_get(
     mut get: RegistryGetResponse<'_>,
 ) -> trc::Result<RegistryGetResponse<'_>> {
-    let Some(path) = get.server.core.metrics.log_path.clone() else {
+    let Some(files) = get.server.core.metrics.log_files.clone() else {
         return Err(trc::JmapEvent::InvalidArguments
             .into_err()
             .details("No log tracers configured on the server"));
@@ -47,7 +47,7 @@ pub(crate) async fn log_get(
         let limit = get.server.core.jmap.get_max_objects;
         let (tx, rx) = oneshot::channel();
         tokio::task::spawn_blocking(move || {
-            let _ = tx.send(read_log_entries(path, ids, limit));
+            let _ = tx.send(read_log_entries(&files.path, &files.prefix, ids, limit));
         });
 
         rx.await
@@ -74,7 +74,7 @@ pub(crate) async fn log_get(
 pub(crate) async fn log_query(
     mut req: RegistryQueryResponse<'_>,
 ) -> trc::Result<QueryResponseBuilder> {
-    let Some(path) = req.server.core.metrics.log_path.clone() else {
+    let Some(files) = req.server.core.metrics.log_files.clone() else {
         return Err(trc::JmapEvent::InvalidArguments
             .into_err()
             .details("No log tracers configured on the server"));
@@ -166,7 +166,13 @@ pub(crate) async fn log_query(
     let (tx, rx) = oneshot::channel();
 
     tokio::task::spawn_blocking(move || {
-        let _ = tx.send(read_log_offsets(path, &filter, anchor, limit));
+        let _ = tx.send(read_log_offsets(
+            &files.path,
+            &files.prefix,
+            &filter,
+            anchor,
+            limit,
+        ));
     });
 
     // Build response
@@ -281,8 +287,44 @@ fn log_header(line: &str) -> Option<LogHeader<'_>> {
     })
 }
 
+/// inbuxa: the files the Log tracer writes in `dir`, newest first: one named
+/// `prefix` (never rotated) or `prefix.` and the date and time it was
+/// rotated at. Whatever else is there, links included, isn't the log and
+/// isn't read.
+fn tracer_log_files(dir: &Path, prefix: &str) -> io::Result<Vec<fs::DirEntry>> {
+    let mut logs = Vec::new();
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        // A DirEntry's type is the link's own, not its target's
+        if entry.file_type()?.is_file()
+            && entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| is_tracer_log_name(name, prefix))
+        {
+            logs.push(entry);
+        }
+    }
+    logs.sort_by_key(|b| std::cmp::Reverse(b.file_name()));
+    Ok(logs)
+}
+
+fn is_tracer_log_name(name: &str, prefix: &str) -> bool {
+    !prefix.is_empty()
+        && name.strip_prefix(prefix).is_some_and(|rest| {
+            rest.is_empty()
+                || rest.strip_prefix('.').is_some_and(|rotation| {
+                    !rotation.is_empty()
+                        && rotation
+                            .bytes()
+                            .all(|b| b.is_ascii_digit() || matches!(b, b'-' | b'T' | b':'))
+                })
+        })
+}
+
 fn read_log_offsets(
     path: impl AsRef<Path>,
+    prefix: &str,
     filter: &LogFilter,
     anchor: u64,
     limit: usize,
@@ -292,8 +334,7 @@ fn read_log_offsets(
         return Ok(Vec::new());
     }
 
-    let mut logs = fs::read_dir(path)?.collect::<Result<Vec<_>, _>>()?;
-    logs.sort_by_key(|b| std::cmp::Reverse(b.file_name()));
+    let logs = tracer_log_files(path.as_ref(), prefix)?;
 
     let mut entries = Vec::with_capacity(limit);
     let mut file_number = 0u64;
@@ -301,10 +342,6 @@ fn read_log_offsets(
     let file_anchor = anchor >> 48;
 
     'outer: for log in logs.into_iter() {
-        if !log.file_type()?.is_file() {
-            continue;
-        }
-
         if !found_anchor && file_anchor != file_number {
             file_number += 1;
             continue;
@@ -357,6 +394,7 @@ fn read_log_offsets(
 
 pub(crate) fn read_log_entries(
     path: impl AsRef<Path>,
+    prefix: &str,
     ids: Option<Vec<Id>>,
     limit: usize,
 ) -> io::Result<Vec<(Id, Log)>> {
@@ -365,13 +403,11 @@ pub(crate) fn read_log_entries(
         ids.truncate(limit);
         ids
     } else {
-        read_log_offsets(path, &LogFilter::default(), 0, limit)?
+        read_log_offsets(path, prefix, &LogFilter::default(), 0, limit)?
     };
 
-    let mut logs = fs::read_dir(path)?.collect::<Result<Vec<_>, _>>()?;
-
-    // Sort the entries by file name in reverse order.
-    logs.sort_by_key(|b| std::cmp::Reverse(b.file_name()));
+    // Sorted by file name in reverse order
+    let logs = tracer_log_files(path, prefix)?;
 
     let mut entries = Vec::with_capacity(ids.len());
 
@@ -391,10 +427,6 @@ pub(crate) fn read_log_entries(
     let mut line = String::with_capacity(256);
 
     'outer: for log in logs.into_iter() {
-        if !log.file_type()?.is_file() {
-            continue;
-        }
-
         if let Some(offsets) = offset_map.get(&file_number) {
             let mut reader = BufReader::new(File::open(log.path())?);
 
@@ -693,7 +725,7 @@ impl<R: Read + Seek> Iterator for RevLines<R> {
 
 #[cfg(test)]
 mod tests {
-    use super::{LogFilter, read_log_entries, read_log_offsets};
+    use super::{LogFilter, is_tracer_log_name, read_log_entries, read_log_offsets};
 
     #[test]
     fn limit_zero_reads_no_entries() {
@@ -705,8 +737,8 @@ mod tests {
         )
         .unwrap();
 
-        let none = read_log_offsets(&dir, &LogFilter::default(), 0, 0).unwrap();
-        let all = read_log_offsets(&dir, &LogFilter::default(), 0, 10).unwrap();
+        let none = read_log_offsets(&dir, "server.log", &LogFilter::default(), 0, 0).unwrap();
+        let all = read_log_offsets(&dir, "server.log", &LogFilter::default(), 0, 10).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
 
         assert!(none.is_empty(), "limit 0 returned {none:?}");
@@ -728,7 +760,11 @@ mod tests {
             ),
         )
         .unwrap();
-        let count = |filter: LogFilter| read_log_offsets(&dir, &filter, 0, 10).unwrap().len();
+        let count = |filter: LogFilter| {
+            read_log_offsets(&dir, "inbuxa.log", &filter, 0, 10)
+                .unwrap()
+                .len()
+        };
 
         let at_least_warn = count(LogFilter {
             level: Some(1),
@@ -779,7 +815,7 @@ mod tests {
             ),
         )
         .unwrap();
-        let ids = |filter: LogFilter| read_log_offsets(&dir, &filter, 0, 10).unwrap();
+        let ids = |filter: LogFilter| read_log_offsets(&dir, "inbuxa.log", &filter, 0, 10).unwrap();
 
         let all = ids(LogFilter::default());
         let at_least_warn = ids(LogFilter {
@@ -799,7 +835,7 @@ mod tests {
             text: Some("comma".into()),
             ..Default::default()
         });
-        let entries = read_log_entries(&dir, Some(all.clone()), 10).unwrap();
+        let entries = read_log_entries(&dir, "inbuxa.log", Some(all.clone()), 10).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
 
         assert_eq!(all.len(), 4);
@@ -865,6 +901,7 @@ mod tests {
         std::fs::write(dir.join("inbuxa.log"), &line).unwrap();
         let ids = read_log_offsets(
             &dir,
+            "inbuxa.log",
             &LogFilter {
                 level: Some(3),
                 event: Some("smtp.rcpt-to".into()),
@@ -874,7 +911,7 @@ mod tests {
             10,
         )
         .unwrap();
-        let entries = read_log_entries(&dir, Some(ids), 10).unwrap();
+        let entries = read_log_entries(&dir, "inbuxa.log", Some(ids), 10).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
 
         assert_eq!(entries.len(), 1);
@@ -887,5 +924,45 @@ mod tests {
             data,
             serde_json::json!({"to": "a \"b\", c@example.org", "remoteIp": "192.0.2.1"})
         );
+    }
+
+    // inbuxa: only the names the Log tracer gives its files are read
+    #[test]
+    fn reads_only_the_tracers_files() {
+        for (name, expected) in [
+            ("inbuxa", true),
+            ("inbuxa.2026-11-23", true),
+            ("inbuxa.2026-11-23T10", true),
+            ("inbuxa.2026-11-23T10:05", true),
+            ("inbuxa.", false),
+            ("inbuxa.2026-11-23.gz", false),
+            ("inbuxa.secret", false),
+            ("inbuxa2026", false),
+            ("other.log", false),
+            ("..", false),
+        ] {
+            assert_eq!(is_tracer_log_name(name, "inbuxa"), expected, "{name}");
+        }
+        assert!(!is_tracer_log_name("anything", ""));
+
+        let dir = std::env::temp_dir().join(format!("inbuxa-log-own-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let line = |marker: &str| {
+            format!(
+                "2026-11-23T10:00:00Z INFO Licensing (server.licensing) details = \"{marker}\"\n"
+            )
+        };
+        std::fs::write(dir.join("inbuxa.2026-11-23"), line("own")).unwrap();
+        std::fs::write(dir.join("other.log"), line("foreign")).unwrap();
+        let outside = dir.with_extension("outside");
+        std::fs::write(&outside, line("linked")).unwrap();
+        std::os::unix::fs::symlink(&outside, dir.join("inbuxa.2026-11-22")).unwrap();
+        let entries = read_log_entries(&dir, "inbuxa", None, 10).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        std::fs::remove_file(&outside).unwrap();
+
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        assert!(entries[0].1.details.contains("own"), "{entries:?}");
     }
 }

@@ -139,13 +139,12 @@ impl ParseHttp for Server {
                             }
                         }
 
+                        // inbuxa: read no more than a request may be; the
+                        // upload limit, or none for UnlimitedUploads, is
+                        // for uploads
                         let bytes = fetch_body(
                             &mut req,
-                            if !access_token.has_permission(Permission::UnlimitedUploads) {
-                                self.core.jmap.upload_max_size
-                            } else {
-                                0
-                            },
+                            self.core.jmap.request_max_size,
                             session.session_id,
                         )
                         .await
@@ -239,7 +238,9 @@ impl ParseHttp for Server {
                         let (_in_flight, access_token) =
                             self.authenticate_headers(&req, &session).await?;
 
-                        return self.handle_event_source(req, access_token).await;
+                        return self
+                            .handle_event_source(req, access_token, session.remote_ip)
+                            .await;
                     }
                     ("ws", &Method::GET) => {
                         // Authenticate request
@@ -971,7 +972,10 @@ async fn handle_session<T: SessionStream>(inner: Arc<Inner>, session: SessionDat
     .await
         && !http_err.is_timeout()
     {
-        if http_err.is_parse() {
+        // inbuxa: a head too large to parse (answered 414 or 431) counts
+        // nothing: a page on any site can make its visitors' browsers send
+        // one, with a long enough URL in an `<img>`
+        if http_err.is_parse() && !http_err.is_parse_too_large() {
             let server = inner.build_server();
             // inbuxa: a trusted proxy's address stands for many clients
             if !(server.core.network.http.use_forwarded

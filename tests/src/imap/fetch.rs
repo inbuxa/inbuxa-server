@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use super::{AssertResult, ImapConnection, Type};
@@ -180,4 +182,20 @@ pub async fn test(imap: &mut ImapConnection, imap_check: &mut ImapConnection) {
         .await
         .assert_contains("_p BAD")
         .assert_contains("* 1 FETCH (UID 1");
+
+    // inbuxa: one message's answer holds at most four copies of the message
+    // (plus 64 KiB), so sixty overlapping copies of message 10 are refused
+    let copies = (0..60)
+        .map(|offset| format!("BODY.PEEK[]<{offset}.2000>"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    imap.send(&format!("FETCH 10 ({copies})")).await;
+    imap.assert_read(Type::Tagged, ResponseType::No)
+        .await
+        .assert_contains("[LIMIT]");
+    imap.send("FETCH 10 (BODY.PEEK[] BODY.PEEK[HEADER] BODY.PEEK[TEXT] BINARY.PEEK[1])")
+        .await;
+    imap.assert_read(Type::Tagged, ResponseType::Ok)
+        .await
+        .assert_contains("* 10 FETCH (");
 }

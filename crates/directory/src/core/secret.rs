@@ -24,6 +24,13 @@ use std::sync::{Arc, LazyLock};
 use tokio::sync::Semaphore;
 use totp_rs::Totp;
 
+/// inbuxa: the longest secret, in bytes, that is checked against a hash.
+/// SHA-crypt and MD5-crypt hash the whole password again in every round,
+/// so their cost grows with its length; a longer secret fails as a wrong
+/// one does, before any hash runs. Passwords set here are at most 1,000
+/// bytes (the `passwordMaxLength` ceiling), so none is locked out.
+pub const MAX_SECRET_LEN: usize = 1024;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SecretVerificationResult {
     Valid,
@@ -164,7 +171,9 @@ async fn verify_hash_prefix(hashed_secret: &str, secret: &[u8]) -> trc::Result<b
 }
 
 pub async fn verify_secret_hash(hashed_secret: &str, secret: &[u8]) -> trc::Result<bool> {
-    if hashed_secret.starts_with('$') {
+    if secret.len() > MAX_SECRET_LEN {
+        Ok(false)
+    } else if hashed_secret.starts_with('$') {
         verify_hash_prefix(hashed_secret, secret).await
     } else if hashed_secret.starts_with('_') {
         // Enhanced DES-based hash
@@ -511,6 +520,40 @@ mod tests {
             );
         }
         ticker.abort();
+    }
+
+    // inbuxa: SHA-crypt and MD5-crypt work grows with the password's
+    // length, so a secret over the cap is refused before any hash runs,
+    // even against its own hash
+    #[tokio::test(flavor = "current_thread")]
+    #[allow(deprecated)] // old schemes, as imported accounts still have them
+    async fn secrets_over_the_cap_never_match() {
+        let at_cap = "a".repeat(MAX_SECRET_LEN);
+        let over_cap = "a".repeat(MAX_SECRET_LEN + 1);
+        for (secret, matches) in [(&at_cap, true), (&over_cap, false)] {
+            for hash in [
+                sha512_crypt::hash_with("$6$rounds=1000$saltsalt", secret.as_bytes()).unwrap(),
+                sha256_crypt::hash_with("$5$rounds=1000$saltsalt", secret.as_bytes()).unwrap(),
+                md5_crypt::hash_with("$1$saltsalt", secret.as_bytes()).unwrap(),
+                format!("{{PLAIN}}{secret}"),
+            ] {
+                assert_eq!(
+                    verify_secret_hash(&hash, secret.as_bytes()).await.unwrap(),
+                    matches,
+                    "a {}-byte secret against {}",
+                    secret.len(),
+                    &hash[..10]
+                );
+            }
+            let result =
+                verify_mfa_secret_hash(None, None, &format!("{{PLAIN}}{secret}"), secret).await;
+            assert_eq!(
+                result.unwrap() == SecretVerificationResult::Valid,
+                matches,
+                "a {}-byte password sign-in",
+                secret.len()
+            );
+        }
     }
 
     #[test]

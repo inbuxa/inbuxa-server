@@ -530,12 +530,111 @@ impl Server {
     }
 }
 
+impl Server {
+    /// inbuxa: a long-lived session's access token as it stands now. A
+    /// session outlives the sign-in that opened it, so this fails once the
+    /// bearer token it signed in with expires or is revoked, the account is
+    /// locked or removed, its password changes, or the app password or API
+    /// key it used goes; and for an impersonation, once the master may no
+    /// longer impersonate. The token returned carries the account's current
+    /// permissions and shares.
+    pub async fn renew_session_token(
+        &self,
+        signed_in: &AccessToken,
+        remote_ip: IpAddr,
+    ) -> trc::Result<AccessToken> {
+        if signed_in
+            .expires_at
+            .is_some_and(|expires_at| expires_at <= now())
+        {
+            return Err(trc::AuthEvent::TokenExpired.into_err());
+        }
+        let inner = self.access_token(signed_in.account_id()).await?;
+        if inner.is_locked() {
+            return Err(trc::AuthEvent::Failed
+                .into_err()
+                .details("Account is locked"));
+        }
+        if signed_in
+            .oauth_token_id
+            .is_some_and(|token_id| inner.is_oauth_token_revoked(token_id))
+        {
+            return Err(trc::AuthEvent::TokenExpired
+                .into_err()
+                .details("Token revoked"));
+        }
+
+        let renewed = if let Some(inbuxa_features::audit::Via::Master { account_id, .. }) =
+            signed_in.origin()
+        {
+            // The impersonated account's own credentials weren't used, so
+            // what must still hold is the master's right to sign in as it
+            if let Some(master_id) = account_id {
+                let master = AccessToken::new(self.access_token(*master_id).await?, remote_ip)?;
+                if master.is_locked()
+                    || !master.has_permission(Permission::Impersonate)
+                    || !master.has_permission(Permission::Authenticate)
+                {
+                    return Err(trc::SecurityEvent::Unauthorized
+                        .into_err()
+                        .account_id(*master_id)
+                        .details("Impersonation no longer allowed"));
+                }
+            }
+            AccessToken::new_maybe_invalid(inner)
+        } else {
+            // A session that signed in with an app password or API key ends
+            // when that credential goes, which renewing it below checks
+            if signed_in.scope_idx == 0
+                && inner.credential_version != signed_in.inner.credential_version
+            {
+                return Err(trc::AuthEvent::TokenExpired
+                    .into_err()
+                    .details("Credentials changed"));
+            }
+            AccessToken::renew(inner, signed_in.credential_id(), remote_ip)?
+        };
+
+        Ok(renewed
+            .with_origin_arc(signed_in.origin_arc())
+            .with_expires_at(signed_in.expires_at)
+            .with_oauth_token_id(signed_in.oauth_token_id))
+    }
+
+    /// inbuxa: as `renew_session_token`, for a session that keeps acting
+    /// with the token it signed in with (IMAP, POP3, ManageSieve, an
+    /// EventSource stream). It also fails when the account may no longer
+    /// sign in or has lost anything the session holds, so the session ends
+    /// instead of acting on permissions or shares that are gone.
+    pub async fn assert_session_current(
+        &self,
+        signed_in: &AccessToken,
+        remote_ip: IpAddr,
+    ) -> trc::Result<()> {
+        let current = self.renew_session_token(signed_in, remote_ip).await?;
+        if !current.has_permission(Permission::Authenticate) {
+            Err(trc::AuthEvent::Failed
+                .into_err()
+                .account_id(current.account_id())
+                .details("Account may no longer sign in"))
+        } else if current.has_lost_access_since(signed_in) {
+            Err(trc::SecurityEvent::Unauthorized
+                .into_err()
+                .account_id(current.account_id())
+                .details("Permissions or shares changed"))
+        } else {
+            Ok(())
+        }
+    }
+}
+
 impl AccessToken {
     pub fn new(inner: Arc<AccessTokenInner>, remote_ip: IpAddr) -> trc::Result<Self> {
         AccessToken {
             scope_idx: 0,
             origin: None,
             expires_at: None,
+            oauth_token_id: None,
             inner,
         }
         .assert_is_valid(remote_ip)
@@ -546,6 +645,7 @@ impl AccessToken {
             scope_idx: 0,
             origin: None,
             expires_at: None,
+            oauth_token_id: None,
             inner,
         }
     }
@@ -571,6 +671,7 @@ impl AccessToken {
                 inner,
                 origin: None,
                 expires_at: None,
+                oauth_token_id: None,
             })
             .and_then(|token| token.assert_is_valid(remote_ip))
     }
@@ -587,6 +688,7 @@ impl AccessToken {
                 scope_idx: 0,
                 origin: None,
                 expires_at: None,
+                oauth_token_id: None,
                 inner,
             }
             .assert_is_valid(remote_ip)
@@ -792,6 +894,7 @@ impl AccessToken {
                     scope_idx: access_token.scope_idx,
                     origin: access_token.origin.clone(),
                     expires_at: access_token.expires_at,
+                    oauth_token_id: access_token.oauth_token_id,
                     inner: Arc::new(inner),
                 };
             }
@@ -1054,11 +1157,62 @@ impl AccessToken {
         self.inner.credential_version
     }
 
+    /// inbuxa: the OAuth access token this session signed in with, as its
+    /// revocation list names it (RFC 7009). None when it signed in otherwise.
+    pub fn oauth_token_id(&self) -> Option<u128> {
+        self.oauth_token_id
+    }
+
+    /// inbuxa: records the OAuth access token this session signed in with.
+    pub fn with_oauth_token_id(mut self, oauth_token_id: Option<u128>) -> Self {
+        self.oauth_token_id = oauth_token_id;
+        self
+    }
+
+    /// inbuxa: whether this token, the account as it stands now, lacks
+    /// anything `before` had: a permission, a group, a share or a
+    /// delegation, or the account or tenant it was for. Gaining something
+    /// isn't a loss.
+    fn has_lost_access_since(&self, before: &AccessToken) -> bool {
+        if Arc::ptr_eq(&self.inner, &before.inner) && self.scope_idx == before.scope_idx {
+            return false;
+        }
+        let (now, then) = (&self.inner, &before.inner);
+        let lost_permission = match (
+            now.scopes.get(self.scope_idx),
+            then.scopes.get(before.scope_idx),
+        ) {
+            (Some(now_scope), Some(then_scope)) => {
+                let mut lost = then_scope.permissions.clone();
+                lost.clear_many(&now_scope.permissions);
+                !lost.is_empty()
+            }
+            (None, Some(_)) => true,
+            _ => false,
+        };
+        lost_permission
+            || now.account_id != then.account_id
+            || now.tenant_id != then.tenant_id
+            || then.member_of.iter().any(|id| !now.member_of.contains(id))
+            || then.access_to.iter().any(|had| {
+                !now.access_to.iter().any(|has| {
+                    let mut kept = had.collections;
+                    kept.intersection(&has.collections);
+                    has.account_id == had.account_id && kept == had.collections
+                })
+            })
+            || then
+                .delegations
+                .iter()
+                .any(|delegation| !now.delegations.contains(delegation))
+    }
+
     pub fn new_admin() -> AccessToken {
         AccessToken {
             scope_idx: 0,
             origin: None,
             expires_at: None,
+            oauth_token_id: None,
             inner: Arc::new(AccessTokenInner::new_admin()),
         }
     }
@@ -1075,6 +1229,7 @@ impl AccessToken {
             scope_idx: 0,
             origin: None,
             expires_at: None,
+            oauth_token_id: None,
             inner: Arc::new(AccessTokenInner {
                 account_id,
                 tenant_id: Default::default(),

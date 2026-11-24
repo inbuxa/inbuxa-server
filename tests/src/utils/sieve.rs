@@ -89,6 +89,16 @@ impl SieveConnection {
         }
     }
 
+    /// inbuxa: the server has closed the connection (a TLS stream may end
+    /// without a close_notify, which reads as an error).
+    pub async fn assert_disconnect(&mut self) {
+        match tokio::time::timeout(Duration::from_millis(1500), self.reader.next_line()).await {
+            Ok(Ok(None)) | Ok(Err(_)) => {}
+            Ok(Ok(Some(line))) => panic!("Expected the connection to close, got {line:?}"),
+            Err(_) => panic!("Timeout while waiting for the connection to close."),
+        }
+    }
+
     pub async fn read_line(&mut self) -> String {
         tokio::time::timeout(Duration::from_millis(1500), self.reader.next_line())
             .await

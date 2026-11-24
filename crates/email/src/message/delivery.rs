@@ -40,6 +40,9 @@ pub enum VerifiedSender {
 pub struct IngestMessage {
     pub sender_address: String,
     pub verified_sender: VerifiedSender,
+    /// inbuxa: the envelope sender was verified (signed in, passed SPF, or
+    /// is this server's own), so a rejection may be sent back to it
+    pub return_path_verified: bool,
     pub recipients: Vec<IngestRecipient>,
     pub message_blob: BlobHash,
     pub message_size: u64,
@@ -297,6 +300,7 @@ impl MailDelivery for Server {
                                 raw_message,
                                 &message.sender_address,
                                 message.verified_sender,
+                                message.return_path_verified,
                                 &rcpt,
                                 message.session_id,
                                 active_script,

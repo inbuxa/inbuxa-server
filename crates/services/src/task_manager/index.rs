@@ -71,6 +71,7 @@ impl SearchIndexTask for Server {
         let mut results: Vec<IndexTaskResult> = Vec::with_capacity(tasks.len());
         let mut batch = BatchBuilder::new();
         let mut document_insertions = Vec::new();
+        let mut inserted = Vec::new();
         let mut document_deletions: [AHashMap<u32, Vec<u32>>; NUM_INDEXES] =
             std::array::from_fn(|_| AHashMap::new());
 
@@ -108,6 +109,7 @@ impl SearchIndexTask for Server {
                     let result = match document {
                         Ok(BuildResult::Document(doc)) if !doc.is_empty() => {
                             document_insertions.push(doc);
+                            inserted.push((task.document_type, account_id, document_id));
                             TaskResult::Success(vec![])
                         }
                         Err(err) => {
@@ -298,6 +300,46 @@ impl SearchIndexTask for Server {
             return results;
         }
 
+        // inbuxa: a document whose data went while it was being indexed (its
+        // account destroyed, say) is taken out again, so nothing of it stays
+        for (document_type, account_id, document_id) in inserted {
+            let (key, idx) = match document_type {
+                IndexDocumentType::Email => (
+                    ValueKey::property(
+                        account_id,
+                        Collection::Email,
+                        document_id,
+                        EmailField::Metadata,
+                    ),
+                    0,
+                ),
+                IndexDocumentType::Calendar => (
+                    ValueKey::archive(account_id, Collection::CalendarEvent, document_id),
+                    1,
+                ),
+                IndexDocumentType::Contacts => (
+                    ValueKey::archive(account_id, Collection::ContactCard, document_id),
+                    2,
+                ),
+                IndexDocumentType::File => continue,
+            };
+            match self.store().get_value::<Archive<AlignedBytes>>(key).await {
+                Ok(Some(_)) => {}
+                Ok(None) => document_deletions[idx]
+                    .entry(account_id)
+                    .or_default()
+                    .push(document_id),
+                Err(err) => {
+                    trc::error!(
+                        err.account_id(account_id)
+                            .document_id(document_id)
+                            .caused_by(trc::location!())
+                            .details("Failed to check an indexed document still exists")
+                    );
+                }
+            }
+        }
+
         // Delete documents
         for (accounts, index) in document_deletions.into_iter().zip([
             SearchIndex::Email,
@@ -460,6 +502,30 @@ pub(crate) async fn reindex_account(server: &Server, account_id: u32) -> trc::Re
     // Request indexing
     server.notify_task_queue();
 
+    Ok(())
+}
+
+/// inbuxa: tests only: writes an account's emails to the search index as an
+/// index task would, for tests that need one to run at a set moment.
+#[cfg(feature = "test_mode")]
+pub(crate) async fn index_emails_now(server: &Server, account_id: u32) -> trc::Result<()> {
+    let mut documents = Vec::new();
+    for message in server
+        .get_cached_messages(account_id)
+        .await?
+        .emails
+        .items
+        .iter()
+    {
+        if let BuildResult::Document(document) =
+            build_email_document(server, account_id, message.document_id).await?
+        {
+            documents.push(document);
+        }
+    }
+    if !documents.is_empty() {
+        server.search_store().index(documents).await?;
+    }
     Ok(())
 }
 

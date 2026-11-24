@@ -220,9 +220,99 @@ pub fn recovery_mode_port(value: Option<&str>) -> Result<u16, String> {
     }
 }
 
+/// inbuxa: where the recovery-mode and bootstrap listener binds: an
+/// address, with or without a port (`127.0.0.1`, `::1`, `[::1]:8080`).
+pub const RECOVERY_BIND_ENV_VAR: &str = "INBUXA_RECOVERY_MODE_BIND";
+
+/// The recovery-mode listener's address, from [`RECOVERY_BIND_ENV_VAR`] and
+/// [`RECOVERY_PORT_ENV_VAR`]: every address (`[::]`) on port 8080 when
+/// neither is set. A value that isn't an address is refused, as a port that
+/// isn't one is, rather than the listener binding somewhere else.
+pub fn recovery_mode_addr(
+    bind: Option<&str>,
+    port: Option<&str>,
+) -> Result<std::net::SocketAddr, String> {
+    use std::net::{IpAddr, Ipv6Addr, SocketAddr};
+
+    let port_is_set = port.is_some_and(|port| !port.trim().is_empty());
+    let port = recovery_mode_port(port)?;
+    let Some(bind) = bind.map(str::trim).filter(|bind| !bind.is_empty()) else {
+        return Ok(SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), port));
+    };
+    let invalid = || {
+        format!(
+            "{RECOVERY_BIND_ENV_VAR}: '{bind}' is not an IP address, or an address and port \
+             (for example 127.0.0.1, ::1 or [::1]:8080)"
+        )
+    };
+
+    if let Ok(addr) = bind.parse::<SocketAddr>() {
+        if addr.port() == 0 {
+            Err(invalid())
+        } else if port_is_set && addr.port() != port {
+            Err(format!(
+                "{RECOVERY_BIND_ENV_VAR} gives port {} and {RECOVERY_PORT_ENV_VAR} gives {port}; \
+                 give the port in one of them",
+                addr.port()
+            ))
+        } else {
+            Ok(addr)
+        }
+    } else {
+        bind.strip_prefix('[')
+            .and_then(|bind| bind.strip_suffix(']'))
+            .unwrap_or(bind)
+            .parse::<IpAddr>()
+            .map(|ip| SocketAddr::new(ip, port))
+            .map_err(|_| invalid())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recovery_mode_addr_read() {
+        for (bind, port, expected) in [
+            (None, None, "[::]:8080"),
+            (Some(" "), None, "[::]:8080"),
+            (None, Some("9090"), "[::]:9090"),
+            (Some("127.0.0.1"), None, "127.0.0.1:8080"),
+            (Some(" 127.0.0.1 "), Some("9090"), "127.0.0.1:9090"),
+            (Some("::1"), None, "[::1]:8080"),
+            (Some("[::1]"), Some("9090"), "[::1]:9090"),
+            (Some("[::1]:9091"), None, "[::1]:9091"),
+            (Some("10.0.0.5:9091"), Some("9091"), "10.0.0.5:9091"),
+            (Some("0.0.0.0"), None, "0.0.0.0:8080"),
+        ] {
+            assert_eq!(
+                recovery_mode_addr(bind, port).map(|addr| addr.to_string()),
+                Ok(expected.to_string()),
+                "{bind:?} {port:?}"
+            );
+        }
+        for value in [
+            "localhost",
+            "127.0.0.256",
+            "127.0.0.1:0",
+            "127.0.0.1:70000",
+            "[::1",
+            "::1]:80",
+            "127.0.0.1/8",
+        ] {
+            let err = recovery_mode_addr(Some(value), None).unwrap_err();
+            assert!(
+                err.contains(RECOVERY_BIND_ENV_VAR) && err.contains(&format!("'{value}'")),
+                "{value}: {err}"
+            );
+        }
+        // Two different ports, or a bad port beside a good address
+        let err = recovery_mode_addr(Some("127.0.0.1:9091"), Some("9090")).unwrap_err();
+        assert!(err.contains(RECOVERY_BIND_ENV_VAR) && err.contains(RECOVERY_PORT_ENV_VAR));
+        let err = recovery_mode_addr(Some("127.0.0.1"), Some("80a")).unwrap_err();
+        assert!(err.contains(RECOVERY_PORT_ENV_VAR), "{err}");
+    }
 
     #[test]
     fn recovery_mode_port_read() {

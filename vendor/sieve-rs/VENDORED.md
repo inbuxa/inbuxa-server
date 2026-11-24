@@ -115,6 +115,22 @@ Every changed file carries the AGPL 5(a) notice in its header.
   a second `Auto-Submitted`), and let a URI's `Date` or `Message-ID`
   replace the generated one. The `sieve_notify_mailto_ignores_unsafe_uri_headers`
   test in `crates/common` covers it.
+- `src/runtime/expression.rs`: a string or array that `+` builds holds at
+  most `max_variable_size` bytes (counted as `Variable::len` counts them),
+  cut at a character or before the item that doesn't fit
+  (`Variable::op_add_limited`). Upstream built every sum in full, and only
+  `let` truncated the end result, so one expression of thousands of terms
+  copied gigabytes in one instruction, which the cpu limit doesn't see. The
+  `concat_limit_tests` in `expression.rs` cover it (run like
+  `scan_limit_tests`).
+- `src/runtime/actions/action_mime.rs`: the message `enclose` builds
+  carries the Received headers of the message it encloses at its top level
+  (CR and LF taken out, each cut to `max_header_size`). Upstream started it
+  with none, so the server's hop limit, which counts the Received headers
+  of each message it delivers, never stopped a script that encloses and
+  redirects to an account that sends the mail back. The
+  `enclose_hop_tests` in `action_mime.rs` cover it (run like
+  `scan_limit_tests`).
 - `Cargo.toml`: the example target is dropped, with the top-level
   `examples/` and `tests/`, which the server never builds. (`src/` keeps its
   own `tests` modules: the crate declares them.)

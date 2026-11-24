@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
@@ -641,6 +643,12 @@ pub(crate) async fn account_set(
         }
         if account.credentials != old_account.credentials {
             cache_invalidator.invalidate(CacheInvalidation::AccessToken(set.account_id));
+        }
+        // inbuxa: sessions opened with the old password end at once
+        if account.password_credential().map(|c| &c.secret)
+            != old_account.password_credential().map(|c| &c.secret)
+        {
+            cache_invalidator.end_sessions(set.account_id);
         }
 
         let object = Object::new(ObjectInner::Account(Account::User(account)));

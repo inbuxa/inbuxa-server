@@ -167,18 +167,6 @@ async fn destroy_account(server: &Server, task: &TaskDestroyAccount) -> trc::Res
         server.store().write(batch.build_all()).await?;
     }
 
-    // Remove search index
-    for index in [
-        SearchIndex::Email,
-        SearchIndex::Contacts,
-        SearchIndex::Calendar,
-    ] {
-        server
-            .search_store()
-            .unindex(SearchQuery::new(index).with_account_id(account_id))
-            .await?;
-    }
-
     // Unlink all accounts's blobs
     destroy_account_blobs(server, account_id).await?;
 
@@ -200,12 +188,31 @@ async fn destroy_account(server: &Server, task: &TaskDestroyAccount) -> trc::Res
     };
     let used = server.get_used_quota_account(account_id).await?.max(0);
 
+    #[cfg(feature = "test_mode")]
+    if test_hooks::take(account_id) {
+        super::index::index_emails_now(server, account_id).await?;
+    }
+
     // Destroy account data
     server
         .store()
         .danger_destroy_account(account_id)
         .await
         .caused_by(trc::location!())?;
+
+    // Remove search index
+    // inbuxa: after the data, so an index task that ran while the account
+    // was being destroyed can't have written any of it back
+    for index in [
+        SearchIndex::Email,
+        SearchIndex::Contacts,
+        SearchIndex::Calendar,
+    ] {
+        server
+            .search_store()
+            .unindex(SearchQuery::new(index).with_account_id(account_id))
+            .await?;
+    }
 
     if let Some(tenant_id) = tenant_id
         && used > 0
@@ -222,6 +229,33 @@ async fn destroy_account(server: &Server, task: &TaskDestroyAccount) -> trc::Res
     }
 
     Ok(TaskResult::Success(vec![]))
+}
+
+/// inbuxa: tests only: an index task that runs while an account is being
+/// destroyed, just before its data goes.
+#[cfg(feature = "test_mode")]
+pub mod test_hooks {
+    static INDEX_WHILE_DESTROYING: std::sync::Mutex<Vec<u32>> = std::sync::Mutex::new(Vec::new());
+
+    /// The account's emails are indexed once more during its destruction.
+    pub fn index_while_destroying(account_id: u32) {
+        INDEX_WHILE_DESTROYING.lock().unwrap().push(account_id);
+    }
+
+    /// Whether that is still to happen for the account.
+    pub fn is_pending(account_id: u32) -> bool {
+        INDEX_WHILE_DESTROYING.lock().unwrap().contains(&account_id)
+    }
+
+    pub(super) fn take(account_id: u32) -> bool {
+        let mut accounts = INDEX_WHILE_DESTROYING.lock().unwrap();
+        if let Some(pos) = accounts.iter().position(|id| *id == account_id) {
+            accounts.swap_remove(pos);
+            true
+        } else {
+            false
+        }
+    }
 }
 
 /// inbuxa: #562: removes the account's queued calendar alarms. Each is
