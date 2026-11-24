@@ -145,6 +145,23 @@ async fn milter_session() {
         .await;
     test.assert_no_events();
 
+    // inbuxa: a header that isn't valid UTF-8 reaches the milter as it was
+    // sent, not as an empty value; the mock milter rejects the message when
+    // it sees the Subject's raw bytes
+    session.mail_from("raw_header@doe.org", "250").await;
+    session.rcpt_to("bill@foobar.org", "250").await;
+    session.ingest(b"DATA\r\n").await.unwrap();
+    session.response().assert_code("354");
+    session
+        .ingest(
+            b"From: john@doe.org\r\nTo: bill@foobar.org\r\n\
+              Subject: Caf\xe9 offer\r\n\r\nHello\r\n.\r\n",
+        )
+        .await
+        .unwrap();
+    session.response().assert_code("503 5.5.3");
+    test.assert_no_events();
+
     // Test reply code
     session
         .send_message(
@@ -735,6 +752,9 @@ async fn accept_milter(
     let mut receiver = Receiver::with_max_frame_len(5000000);
     let mut action = None;
     let mut modifications = None;
+    // inbuxa: "raw_header": reject once the raw Subject arrives
+    let mut check_raw_subject = false;
+    let mut raw_subject = false;
 
     'outer: loop {
         let br = tokio::select! {
@@ -765,10 +785,15 @@ async fn accept_milter(
 
                     let response = match cmd {
                         Command::Abort | Command::Macro { .. } => continue,
+                        Command::Header { name, value } => {
+                            if name == b"Subject" && value == b"Caf\xe9 offer" {
+                                raw_subject = true;
+                            }
+                            Response::Action(Action::Accept)
+                        }
                         Command::Body { .. }
                         | Command::Data
                         | Command::Connect { .. }
-                        | Command::Header { .. }
                         | Command::Helo { .. }
                         | Command::Rcpt { .. }
                         | Command::QuitNewConnection
@@ -797,6 +822,11 @@ async fn accept_milter(
                                     code: *b"321",
                                     text: "test".into(),
                                 },
+                                "raw_header" => {
+                                    check_raw_subject = true;
+                                    raw_subject = false;
+                                    Action::Accept
+                                }
                                 test_num => {
                                     modifications = tests[test_num.parse::<usize>().unwrap()]
                                         .modifications
@@ -822,6 +852,13 @@ async fn accept_milter(
                                 }
                             }
 
+                            if std::mem::take(&mut check_raw_subject) {
+                                action = Some(if std::mem::take(&mut raw_subject) {
+                                    Action::Reject
+                                } else {
+                                    Action::Accept
+                                });
+                            }
                             Response::Action(action.take().unwrap())
                         }
                     };
