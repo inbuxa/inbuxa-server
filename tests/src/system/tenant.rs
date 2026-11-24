@@ -1003,8 +1003,9 @@ pub async fn test(test: &mut TestServer) {
             .is_empty(),
         "MT-5"
     );
-    // The recipient's tenant administrator downloads the queued message by
-    // the blob id the queue gives it; another tenant's can't
+    // Mail from outside: the recipients' tenant administrator sees its
+    // recipients, but the content is the sender's, and nobody's in a tenant
+    // here; no tenant downloads it
     let blob_id = d_admin
         .registry_get_many(ObjectType::QueuedMessage, queued.clone())
         .await
@@ -1012,22 +1013,20 @@ pub async fn test(test: &mut TestServer) {
         .as_str()
         .unwrap()
         .to_string();
-    for (account, expected) in [(&d_admin, 200), (&t_admin, 404)] {
-        let response = account
-            .http_get_raw(
-                &format!(
-                    "{}/jmap/download/{}/{blob_id}/queued.eml",
-                    account.base_url(),
-                    account.id_string()
-                ),
-                None,
-            )
-            .await;
-        assert_eq!(response.status, expected, "queued message download");
+    for (account, expected) in [(admin, 200), (&d_admin, 404), (&t_admin, 404)] {
+        assert_eq!(
+            download_queued(account, &blob_id).await,
+            expected,
+            "queued message download"
+        );
     }
     admin
         .registry_destroy(ObjectType::QueuedMessage, queued)
         .await;
+
+    // One of T's people sends to both tenants: U's administrator sees and
+    // cancels only U's recipient, and only T's has the whole message
+    tenant_queue_reach(&admin, &t_admin, &t_user, &u_admin).await;
 
     // inbuxa-admin#257: an account's disk quota can't exceed its tenant's,
     // whoever sets it, and neither can its accounts' quotas together
@@ -1543,6 +1542,197 @@ async fn tenant_certificate_names(
         .registry_destroy(ObjectType::AcmeProvider, [provider])
         .await
         .assert_destroyed(&[provider]);
+}
+
+/// The status code of a queued message's download.
+async fn download_queued(account: &Account, blob_id: &str) -> u16 {
+    account
+        .http_get_raw(
+            &format!(
+                "{}/jmap/download/{}/{blob_id}/queued.eml",
+                account.base_url(),
+                account.id_string()
+            ),
+            None,
+        )
+        .await
+        .status
+}
+
+/// A message one of T's people sends to both tenants (MT-5). T's
+/// administrator has all of it. U's sees only U's recipient: it finds the
+/// message, cancels delivery to that recipient and no other, and can't
+/// download the content, change the message as a whole or delete it.
+async fn tenant_queue_reach(
+    admin: &Account,
+    t_admin: &Account,
+    t_user: &Account,
+    u_admin: &Account,
+) {
+    let created = |response: &Value, method: &str| {
+        response
+            .pointer("/methodResponses/0/1/created")
+            .and_then(|c| c.as_object())
+            .and_then(|c| c.values().next())
+            .and_then(|c| c["id"].as_str())
+            .unwrap_or_else(|| panic!("{method}: {response}"))
+            .to_string()
+    };
+    let account_id = t_user.id_string();
+    let response = t_user
+        .jmap_method_call(
+            "Identity/set",
+            json!({"accountId": account_id,
+                "create": {"i": {"name": "T user", "email": "tuser@t.example.org"}}}),
+        )
+        .await;
+    let identity = created(&response.0, "Identity/set");
+    let response = t_user
+        .jmap_method_call(
+            "Mailbox/set",
+            json!({"accountId": account_id, "create": {"m": {"name": "Queue reach"}}}),
+        )
+        .await;
+    let mailbox = created(&response.0, "Mailbox/set");
+    let response = t_user
+        .jmap_method_call(
+            "Email/set",
+            json!({"accountId": account_id, "create": {"e": {
+                "mailboxIds": {mailbox.as_str(): true},
+                "from": [{"email": "tuser@t.example.org"}],
+                "to": [{"email": "uuser@u.example.org"}],
+                "subject": "Held for a day",
+                "bodyValues": {"b": {"value": "Across tenants, with a blind copy."}},
+                "textBody": [{"partId": "b", "type": "text/plain"}]
+            }}}),
+        )
+        .await;
+    let email = created(&response.0, "Email/set");
+    // Held for a day, so it waits in the queue; T's administrator is the
+    // blind copy
+    let response = t_user
+        .jmap_method_call(
+            "EmailSubmission/set",
+            json!({"accountId": account_id, "create": {"s": {
+                "emailId": email,
+                "identityId": identity,
+                "envelope": {
+                    "mailFrom": {"email": "tuser@t.example.org", "parameters": {"HOLDFOR": "86400"}},
+                    "rcptTo": [{"email": "uuser@u.example.org"}, {"email": "tadmin@t.example.org"}]
+                }
+            }}}),
+        )
+        .await;
+    created(&response.0, "EmailSubmission/set");
+
+    let mut queued = None;
+    for _ in 0..40 {
+        queued = t_admin
+            .registry_get_many(ObjectType::QueuedMessage, Vec::<Id>::new())
+            .await
+            .list()
+            .iter()
+            .find(|m| m["returnPath"] == "tuser@t.example.org")
+            .cloned();
+        if queued.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+    let queued = queued.expect("T's administrator sees its own person's message");
+    let id = Id::from_str(queued["id"].as_str().unwrap()).unwrap();
+    let recipients = |message: &Value| {
+        let mut names = message["recipients"]
+            .as_object()
+            .unwrap_or_else(|| panic!("{message}"))
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        names.sort();
+        names
+    };
+    assert_eq!(
+        recipients(&queued),
+        ["tadmin@t.example.org", "uuser@u.example.org"],
+        "the sender's tenant sees every recipient"
+    );
+
+    // U sees the message, and only its own recipient of it
+    let u_view = u_admin
+        .registry_get_many(ObjectType::QueuedMessage, [id])
+        .await;
+    assert_eq!(u_view.list().len(), 1, "U sees mail to its people");
+    assert_eq!(
+        recipients(&u_view.list()[0]),
+        ["uuser@u.example.org"],
+        "U sees only its own recipient"
+    );
+    for (account, to, found) in [
+        (u_admin, "uuser@u.example.org", true),
+        (u_admin, "tadmin@t.example.org", false),
+        (t_admin, "tadmin@t.example.org", true),
+    ] {
+        assert_eq!(
+            account
+                .registry_query_ids(
+                    ObjectType::QueuedMessage,
+                    [(Property::To.as_str(), to)],
+                    Vec::<&str>::new(),
+                )
+                .await
+                .contains(&id),
+            found,
+            "query by a recipient {to}"
+        );
+    }
+
+    // Only T downloads the content
+    let blob_id = queued["blobId"].as_str().unwrap().to_string();
+    for (account, expected) in [(t_admin, 200), (u_admin, 404)] {
+        assert_eq!(
+            download_queued(account, &blob_id).await,
+            expected,
+            "queued message download"
+        );
+    }
+
+    // U can't delete it or change it as a whole
+    u_admin
+        .registry_destroy(ObjectType::QueuedMessage, [id])
+        .await
+        .not_destroyed(&id.to_string());
+    u_admin
+        .registry_update(ObjectType::QueuedMessage, [(id, json!({"priority": 50}))])
+        .await
+        .not_updated(&id.to_string());
+
+    // U cancels delivery to all it sees: its own recipient, no other
+    u_admin
+        .registry_update(ObjectType::QueuedMessage, [(id, json!({"recipients": {}}))])
+        .await
+        .updated_id(id);
+    let message = admin
+        .registry_get_many(ObjectType::QueuedMessage, [id])
+        .await
+        .list()
+        .first()
+        .cloned()
+        .expect("the message is still queued for T's recipient");
+    assert_eq!(
+        message["recipients"]["uuser@u.example.org"]["status"]["@type"], "PermanentFailure",
+        "{message}"
+    );
+    assert_eq!(
+        message["recipients"]["tadmin@t.example.org"]["status"]["@type"], "Scheduled",
+        "{message}"
+    );
+    assert_eq!(message["priority"], queued["priority"], "{message}");
+
+    // T deletes it
+    t_admin
+        .registry_destroy(ObjectType::QueuedMessage, [id])
+        .await
+        .assert_destroyed(&[id]);
 }
 
 /// A tenant's own ACME and DNS providers only reach public HTTPS addresses,
