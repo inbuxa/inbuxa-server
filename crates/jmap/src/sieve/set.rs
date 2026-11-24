@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{blob::download::BlobDownload, changes::state::StateManager};
@@ -93,9 +95,10 @@ impl SieveScriptSet for Server {
         };
         let will_destroy = ctx.response.collect_will_destroy(request.unwrap_destroy());
 
-        // Validate active script id
+        // Validate active script id: one that doesn't exist, or that this
+        // call destroys, is ignored (RFC 9661, 2.4)
         if let Some(MaybeIdReference::Id(id)) = &request.arguments.on_success_activate_script
-            && !sieve_ids.contains(id.document_id())
+            && (!sieve_ids.contains(id.document_id()) || will_destroy.contains(id))
         {
             request.arguments.on_success_activate_script = None;
         }
@@ -103,6 +106,7 @@ impl SieveScriptSet for Server {
         // Process creates
         let mut batch = BatchBuilder::new();
         let mut activations = Vec::new();
+        let mut created_ids = Vec::new();
         for (id, object) in request.unwrap_create() {
             if sieve_ids.len()
                 < self.object_quota(account.object_quotas(), StorageQuota::MaxSieveScripts) as u64
@@ -149,7 +153,7 @@ impl SieveScriptSet for Server {
                             activations.push((document_id, set_item));
                         }
 
-                        let mut result = Map::with_capacity(1)
+                        let result = Map::with_capacity(1)
                             .with_key_value(SieveProperty::Id, SieveValue::Id(document_id.into()))
                             .with_key_value(
                                 SieveProperty::BlobId,
@@ -175,10 +179,10 @@ impl SieveScriptSet for Server {
                         {
                             request.arguments.on_success_activate_script =
                                 Some(MaybeIdReference::Id(Id::from(document_id)));
-                            result.insert_unchecked(SieveProperty::IsActive, true);
                         }
 
                         // Add result with updated blobId
+                        created_ids.push((document_id, id.clone()));
                         ctx.response.created.insert(id, result.into());
                     }
                     Err(err) => {
@@ -296,14 +300,6 @@ impl SieveScriptSet for Server {
                             );
                         }
 
-                        // Add active script property if needed
-                        if let Some(MaybeIdReference::Id(id)) =
-                            &request.arguments.on_success_activate_script
-                            && document_id == id.document_id()
-                        {
-                            result.insert_unchecked(SieveProperty::IsActive, true);
-                        }
-
                         // Add result
                         ctx.response.updated.append(
                             id,
@@ -341,7 +337,7 @@ impl SieveScriptSet for Server {
                 } else {
                     ctx.response.not_destroyed.append(
                         id,
-                        SetError::new(SetErrorType::ScriptIsActive)
+                        SetError::new(SetErrorType::SieveIsActive)
                             .with_description("Deactivate Sieve script before deletion."),
                     );
                 }
@@ -369,24 +365,44 @@ impl SieveScriptSet for Server {
         }
 
         // Activate / deactivate scripts
+        let mut activated = None;
+        let mut deactivated = None;
         if ctx.response.not_created.is_empty()
             && ctx.response.not_updated.is_empty()
             && ctx.response.not_destroyed.is_empty()
-            && (request.arguments.on_success_activate_script.is_some()
-                || on_success_deactivate_script)
         {
+            let active_id = active_script_id.filter(|id| sieve_ids.contains(*id));
             if let Some(MaybeIdReference::Id(id)) = request.arguments.on_success_activate_script {
+                let document_id = id.document_id();
                 batch
                     .with_account_id(account_id)
                     .with_collection(Collection::Principal)
                     .with_document(0)
-                    .set(PrincipalField::ActiveScriptId, id.document_id().serialize());
+                    .set(PrincipalField::ActiveScriptId, document_id.serialize());
+                activated = Some(document_id);
+                deactivated = active_id.filter(|id| *id != document_id);
             } else if on_success_deactivate_script {
                 batch
                     .with_account_id(account_id)
                     .with_collection(Collection::Principal)
                     .with_document(0)
                     .clear(PrincipalField::ActiveScriptId);
+                deactivated = active_id;
+            }
+
+            // inbuxa: a script whose isActive changes is updated, for
+            // SieveScript/changes (one created in this call is logged as
+            // created already)
+            for document_id in [activated.filter(|id| active_id != Some(*id)), deactivated]
+                .into_iter()
+                .flatten()
+                .filter(|id| sieve_ids.contains(*id))
+            {
+                batch
+                    .with_account_id(account_id)
+                    .with_collection(Collection::SieveScript)
+                    .with_document(document_id)
+                    .log_item_update(SyncCollection::SieveScript, None);
             }
         }
 
@@ -399,6 +415,32 @@ impl SieveScriptSet for Server {
                 .last_change_id(account_id)
         {
             ctx.response.new_state = State::Exact(change_id).into();
+        }
+
+        // inbuxa: isActive is reported once the change is committed, true for
+        // the activated script (in created or updated) and false for the
+        // deactivated one (RFC 9661, 2.4)
+        for (document_id, is_active) in [(activated, true), (deactivated, false)]
+            .into_iter()
+            .filter_map(|(id, is_active)| id.map(|id| (id, is_active)))
+        {
+            if let Some((_, create_id)) = created_ids.iter().find(|(id, _)| *id == document_id) {
+                if let Some(Value::Object(result)) = ctx.response.created.get_mut(create_id) {
+                    result.insert_unchecked(SieveProperty::IsActive, is_active);
+                }
+            } else {
+                let result = ctx
+                    .response
+                    .updated
+                    .get_mut_or_insert_with(Id::from(document_id), || None);
+                if let Some(Value::Object(result)) = result {
+                    result.insert_unchecked(SieveProperty::IsActive, is_active);
+                } else {
+                    *result = Some(Value::Object(
+                        Map::with_capacity(1).with_key_value(SieveProperty::IsActive, is_active),
+                    ));
+                }
+            }
         }
 
         Ok(ctx.response)

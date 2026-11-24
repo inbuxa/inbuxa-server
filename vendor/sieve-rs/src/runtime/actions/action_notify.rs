@@ -22,6 +22,19 @@ use super::{
     action_vacation::{MAX_SUBJECT_LEN, is_auto_submitted},
 };
 
+// inbuxa: mailto URI headers a notification never takes (RFC 5436, 2.7,
+// plus the ones the server writes about the message and its body)
+const URI_HEADERS_IGNORED: &[&str] = &[
+    "from",
+    "auto-submitted",
+    "received",
+    "date",
+    "message-id",
+    "x-sieve",
+    "content-type",
+    "content-transfer-encoding",
+];
+
 impl Notify {
     pub(crate) fn exec(&self, ctx: &mut Context) {
         // Do not notify on Auto-Submitted messages
@@ -123,24 +136,23 @@ impl Notify {
             }
 
             let mut has_subject = None;
-            let mut has_date = false;
-            let mut has_message_id = false;
             for (header, value) in &params.headers {
-                match header {
-                    HeaderName::Subject => {
-                        has_subject = value.into();
-                        continue;
-                    }
-                    HeaderName::Date => {
-                        has_date = true;
-                    }
-                    HeaderName::MessageId => {
-                        has_message_id = true;
-                    }
-                    HeaderName::From => {
-                        continue;
-                    }
-                    _ => (),
+                if header == &HeaderName::Subject {
+                    has_subject = value.into();
+                    continue;
+                }
+                // inbuxa: RFC 5436 (2.7) says to ignore URI headers named
+                // From, Auto-Submitted, Received, Date and Message-ID; the
+                // server writes these, and X-Sieve and the body's
+                // Content-Type, itself. A second Auto-Submitted ("no") could
+                // make a receiving system answer the notification. The name
+                // is compared as text: a parameter with no value is kept as
+                // HeaderName::Other whatever its name.
+                if URI_HEADERS_IGNORED
+                    .iter()
+                    .any(|name| header.as_str().eq_ignore_ascii_case(name))
+                {
+                    continue;
                 }
                 message.extend_from_slice(header.as_str().as_bytes());
                 message.extend_from_slice(b": ");
@@ -148,17 +160,13 @@ impl Notify {
                 message.extend_from_slice(b"\r\n");
             }
 
-            if !has_date {
-                message.extend_from_slice(b"Date: ");
-                message.extend_from_slice(Date::now().to_rfc822().as_bytes());
-                message.extend_from_slice(b"\r\n");
-            }
+            message.extend_from_slice(b"Date: ");
+            message.extend_from_slice(Date::now().to_rfc822().as_bytes());
+            message.extend_from_slice(b"\r\n");
 
-            if !has_message_id {
-                message.extend_from_slice(b"Message-ID: ");
-                generate_message_id_header(&mut message, &ctx.runtime.local_hostname).unwrap();
-                message.extend_from_slice(b"\r\n");
-            }
+            message.extend_from_slice(b"Message-ID: ");
+            generate_message_id_header(&mut message, &ctx.runtime.local_hostname).unwrap();
+            message.extend_from_slice(b"\r\n");
 
             let (importance, priority) =
                 self.importance

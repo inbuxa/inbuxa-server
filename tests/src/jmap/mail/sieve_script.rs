@@ -27,11 +27,18 @@ use registry::{
     },
     types::float::Float,
 };
+use serde_json::{Value, json};
 use std::{
     fs,
     path::PathBuf,
+    str::FromStr,
     time::{Duration, Instant},
 };
+use store::{
+    query::log::{Change, Query},
+    write::LogCollection,
+};
+use types::{collection::SyncCollection, id::Id};
 
 pub async fn test(test: &TestServer) {
     println!("Running Sieve tests...");
@@ -130,16 +137,168 @@ pub async fn test(test: &TestServer) {
         vec![script_ids.first().unwrap().to_string()]
     );
 
-    // Destroying an active script should not work
-    assert!(matches!(
+    // Destroying an active script should not work, and the error is the
+    // sieveIsActive of RFC 9661 (jmap-client only knows the draft's name,
+    // so the response is read as JSON)
+    let account_id = account.id_string();
+    let response = account
+        .jmap_method_call(
+            "SieveScript/set",
+            json!({"accountId": account_id, "destroy": [&script_ids[0]]}),
+        )
+        .await;
+    assert_eq!(
+        response
+            .method_response()
+            .pointer(&format!("/notDestroyed/{}/type", script_ids[0]))
+            .and_then(|v| v.as_str()),
+        Some("sieveIsActive"),
+        "{response:?}"
+    );
+
+    // Activating another script reports the old one as inactive and the new
+    // one as active, moves the SieveScript state, and logs both as updated
+    // (the server has no SieveScript/changes, so the log is read directly)
+    let get_state = async || {
+        account
+            .jmap_method_call(
+                "SieveScript/get",
+                json!({"accountId": account_id, "ids": []}),
+            )
+            .await
+            .method_response()["state"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let sieve_changes = async |query: Query| {
+        server
+            .store()
+            .changes(
+                account.id().document_id(),
+                LogCollection::Sync(SyncCollection::SieveScript),
+                query,
+            )
+            .await
+            .unwrap()
+    };
+    let state = get_state().await;
+    let last_change_id = sieve_changes(Query::All).await.to_change_id;
+    let response = account
+        .jmap_method_call(
+            "SieveScript/set",
+            json!({"accountId": account_id, "onSuccessActivateScript": &script_ids[1]}),
+        )
+        .await;
+    assert_eq!(
+        response.updated(&script_ids[0]),
+        &json!({"isActive": false}),
+        "{response:?}"
+    );
+    assert_eq!(
+        response.updated(&script_ids[1]),
+        &json!({"isActive": true}),
+        "{response:?}"
+    );
+    assert_ne!(
+        response.method_response()["oldState"],
+        response.method_response()["newState"],
+        "{response:?}"
+    );
+    assert_ne!(get_state().await, state);
+    let changes = sieve_changes(Query::Since(last_change_id)).await;
+    let mut updated = changes
+        .changes
+        .iter()
+        .filter_map(|change| match change {
+            Change::UpdateItem(id) => Some(*id),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    updated.sort();
+    let mut expected = script_ids[..2]
+        .iter()
+        .map(|id| Id::from_str(id).unwrap().document_id() as u64)
+        .collect::<Vec<_>>();
+    expected.sort();
+    assert_eq!(updated, expected, "{changes:?}");
+
+    // When part of the call fails, nothing is activated and nothing is
+    // reported as active
+    let response = account
+        .jmap_method_call(
+            "SieveScript/set",
+            json!({
+                "accountId": account_id,
+                "update": {
+                    &script_ids[2]: {"name": "script_3"},
+                    &script_ids[3]: {"name": "vacation"}
+                },
+                "onSuccessActivateScript": &script_ids[2]
+            }),
+        )
+        .await;
+    response.not_updated(&script_ids[3]);
+    assert_eq!(
+        response.updated(&script_ids[2]),
+        &Value::Null,
+        "{response:?}"
+    );
+    assert_eq!(
         client
-            .sieve_script_destroy(script_ids.first().unwrap())
-            .await,
-        Err(Error::Set(SetError {
-            type_: SetErrorType::ScriptIsActive,
-            ..
-        }))
-    ));
+            .sieve_script_query(Filter::is_active(true).into(), [Comparator::name()].into())
+            .await
+            .unwrap()
+            .ids(),
+        vec![script_ids[1].to_string()]
+    );
+
+    // Deactivating reports the script as inactive
+    let response = account
+        .jmap_method_call(
+            "SieveScript/set",
+            json!({"accountId": account_id, "onSuccessDeactivateScript": true}),
+        )
+        .await;
+    assert_eq!(
+        response.updated(&script_ids[1]),
+        &json!({"isActive": false}),
+        "{response:?}"
+    );
+
+    // A script destroyed in the same call is not activated, and the active
+    // script stays active
+    client.sieve_script_activate(&script_ids[0]).await.unwrap();
+    let response = account
+        .jmap_method_call(
+            "SieveScript/set",
+            json!({
+                "accountId": account_id,
+                "destroy": [&script_ids[4]],
+                "onSuccessActivateScript": &script_ids[4]
+            }),
+        )
+        .await;
+    assert_eq!(
+        response.method_response()["destroyed"],
+        json!([&script_ids[4]]),
+        "{response:?}"
+    );
+    assert_eq!(
+        response
+            .method_response()
+            .pointer(&format!("/updated/{}", script_ids[4])),
+        None,
+        "{response:?}"
+    );
+    assert_eq!(
+        client
+            .sieve_script_query(Filter::is_active(true).into(), [Comparator::name()].into())
+            .await
+            .unwrap()
+            .ids(),
+        vec![script_ids[0].to_string()]
+    );
 
     // Deactivate all scripts
     client.sieve_script_deactivate().await.unwrap();
