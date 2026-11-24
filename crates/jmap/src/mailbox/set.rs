@@ -51,6 +51,11 @@ pub struct SetContext<'x> {
     response: SetResponse<mailbox::Mailbox>,
     mailbox_ids: RoaringBitmap,
     will_destroy: Vec<Id>,
+    // inbuxa: the names this request has created or renamed mailboxes to,
+    // not saved yet: parent id, lowercase name and document id
+    new_names: Vec<(u32, String, u32)>,
+    // inbuxa: the roles this request has given mailboxes, not saved yet
+    new_roles: Vec<SpecialUse>,
 }
 
 pub trait MailboxSet: Sync + Send {
@@ -123,6 +128,8 @@ impl MailboxSet for Server {
             response,
             mailbox_ids: RoaringBitmap::from_iter(cache.mailboxes.index.keys()),
             will_destroy,
+            new_names: Vec::new(),
+            new_roles: Vec::new(),
         };
         let mut change_id = None;
         let account_info = self.account(account_id).await?;
@@ -156,6 +163,8 @@ impl MailboxSet for Server {
                         .with_collection(Collection::Mailbox);
 
                     let parent_id = builder.changes().unwrap().parent_id;
+                    let new_name = builder.changes().unwrap().name.to_lowercase();
+                    let new_role = builder.changes().unwrap().role;
                     if parent_id > 0 {
                         batch
                             .with_document(parent_id - 1)
@@ -175,6 +184,8 @@ impl MailboxSet for Server {
                         .commit_point();
 
                     ctx.mailbox_ids.insert(document_id);
+                    ctx.new_names.push((parent_id, new_name, document_id));
+                    ctx.new_roles.push(new_role);
                     ctx.response.created(id, document_id);
                 }
                 Err(err) => {
@@ -280,6 +291,8 @@ impl MailboxSet for Server {
                             .with_collection(Collection::Mailbox);
 
                         let parent_id = builder.changes().unwrap().parent_id;
+                        let new_name = builder.changes().unwrap().name.to_lowercase();
+                        let new_role = builder.changes().unwrap().role;
                         if parent_id > 0 {
                             batch
                                 .with_document(parent_id - 1)
@@ -292,6 +305,8 @@ impl MailboxSet for Server {
                             .caused_by(trc::location!())?
                             .commit_point();
                         will_update.push(id);
+                        ctx.new_names.push((parent_id, new_name, document_id));
+                        ctx.new_roles.push(new_role);
                     }
                     Err(err) => {
                         ctx.response.not_updated.append(id, err);
@@ -601,8 +616,11 @@ impl MailboxSet for Server {
             .as_ref()
             .is_none_or(|(_, m)| m.inner.role != changes.role)
         {
+            // inbuxa: a role an earlier create or update in the same
+            // request gave a mailbox is taken too
             if !matches!(changes.role, SpecialUse::None)
-                && cached_mailboxes.mailbox_by_role(&changes.role).is_some()
+                && (cached_mailboxes.mailbox_by_role(&changes.role).is_some()
+                    || ctx.new_roles.contains(&changes.role))
             {
                 return Ok(Err(SetError::invalid_properties()
                     .with_property(MailboxProperty::Role)
@@ -631,13 +649,31 @@ impl MailboxSet for Server {
             let current_id = update.as_ref().map(|(document_id, _)| *document_id);
             if update.as_ref().is_none_or(|(_, m)| {
                 m.inner.name != changes.name || m.inner.parent_id != changes.parent_id
-            }) && let Some(existing) = cached_mailboxes.mailboxes.items.iter().find(|m| {
-                Some(m.document_id) != current_id
-                    && m.parent_id().map_or(0, |id| id + 1) == changes.parent_id
-                    && m.name.to_lowercase() == lower_name
-            }) {
+            }) && let Some(existing_id) = cached_mailboxes
+                .mailboxes
+                .items
+                .iter()
+                .find(|m| {
+                    Some(m.document_id) != current_id
+                        && m.parent_id().map_or(0, |id| id + 1) == changes.parent_id
+                        && m.name.to_lowercase() == lower_name
+                })
+                .map(|m| m.document_id)
+                // inbuxa: and against the names earlier creates and renames
+                // in the same request claimed
+                .or_else(|| {
+                    ctx.new_names
+                        .iter()
+                        .find(|(parent_id, name, document_id)| {
+                            Some(*document_id) != current_id
+                                && *parent_id == changes.parent_id
+                                && *name == lower_name
+                        })
+                        .map(|(_, _, document_id)| *document_id)
+                })
+            {
                 return Ok(Err(SetError::already_exists()
-                    .with_existing_id(Id::from(existing.document_id))
+                    .with_existing_id(Id::from(existing_id))
                     .with_description(format!(
                         "A mailbox with name '{}' already exists.",
                         changes.name

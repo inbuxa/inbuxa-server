@@ -6,7 +6,7 @@
  * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
-use crate::utils::server::TestServer;
+use crate::utils::{jmap::JmapUtils, server::TestServer};
 use jmap_client::{
     Error, Set,
     client::Client,
@@ -18,6 +18,7 @@ use jmap_client::{
 };
 use jmap_proto::types::state::State;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use store::ahash::AHashMap;
 use types::id::Id;
 
@@ -677,6 +678,96 @@ pub async fn test(test: &TestServer) {
             .collect::<Vec<_>>(),
         ["inbox", "sent", "spam"]
     );
+
+    // inbuxa: two creates of one name in the same Mailbox/set request leave
+    // one mailbox; the second is refused as a stored duplicate would be.
+    // The same name under another parent is still fine.
+    let response = account
+        .jmap_create(
+            "Mailbox",
+            [
+                json!({ "name": "Twin" }),
+                json!({ "name": "twin" }),
+                json!({ "name": "Twin", "parentId": id_map.get("inbox").unwrap() }),
+            ],
+            Vec::<(&str, &str)>::new(),
+        )
+        .await;
+    let twin_id = response.created(0).id().to_string();
+    response.created(2);
+    let duplicate = response.not_created(1);
+    assert_eq!(duplicate.typ(), "alreadyExists", "{duplicate:?}");
+    assert_eq!(duplicate.text_field("existingId"), twin_id);
+
+    // inbuxa: so do two renames to one name in the same request
+    let response = account
+        .jmap_create(
+            "Mailbox",
+            [json!({ "name": "Solo 1" }), json!({ "name": "Solo 2" })],
+            Vec::<(&str, &str)>::new(),
+        )
+        .await;
+    let solo_ids = [
+        response.created(0).id().to_string(),
+        response.created(1).id().to_string(),
+    ];
+    let response = account
+        .jmap_update(
+            "Mailbox",
+            solo_ids.iter().map(|id| (id, json!({ "name": "Pair" }))),
+            Vec::<(&str, &str)>::new(),
+        )
+        .await;
+    let result = response.method_response();
+    let updated = result["updated"].as_object().map_or(0, |u| u.len());
+    let not_updated = result["notUpdated"]
+        .as_object()
+        .map(|n| n.values().collect::<Vec<_>>())
+        .unwrap_or_default();
+    assert_eq!(updated, 1, "{result:?}");
+    assert_eq!(not_updated.len(), 1, "{result:?}");
+    assert_eq!(not_updated[0].typ(), "alreadyExists", "{result:?}");
+
+    // inbuxa: #606: a role claimed by an earlier create in the same request
+    // counts as taken, as a stored mailbox's role does
+    let response = account
+        .jmap_create(
+            "Mailbox",
+            [
+                json!({ "name": "Vault", "role": "archive" }),
+                json!({ "name": "Vault 2", "role": "archive" }),
+            ],
+            Vec::<(&str, &str)>::new(),
+        )
+        .await;
+    response.created(0);
+    let duplicate = response.not_created(1);
+    assert_eq!(duplicate.typ(), "invalidProperties", "{duplicate:?}");
+    assert_eq!(
+        duplicate.text_field("properties/0"),
+        "role",
+        "{duplicate:?}"
+    );
+
+    // inbuxa: #606: and so does one claimed by an earlier update
+    let response = account
+        .jmap_update(
+            "Mailbox",
+            solo_ids
+                .iter()
+                .map(|id| (id, json!({ "role": "important" }))),
+            Vec::<(&str, &str)>::new(),
+        )
+        .await;
+    let result = response.method_response();
+    let updated = result["updated"].as_object().map_or(0, |u| u.len());
+    let not_updated = result["notUpdated"]
+        .as_object()
+        .map(|n| n.values().collect::<Vec<_>>())
+        .unwrap_or_default();
+    assert_eq!(updated, 1, "{result:?}");
+    assert_eq!(not_updated.len(), 1, "{result:?}");
+    assert_eq!(not_updated[0].typ(), "invalidProperties", "{result:?}");
 
     test.destroy_all_mailboxes(account).await;
     test.assert_is_empty().await;
