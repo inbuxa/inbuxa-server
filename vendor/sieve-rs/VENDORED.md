@@ -68,6 +68,14 @@ Every changed file carries the AGPL 5(a) notice in its header.
   isn't a field name, or whose address holds a control (a `%0D%0A`), is
   refused. The `header_injection_tests` in `action_editheader.rs` cover it
   (run like `scan_limit_tests`).
+- `src/runtime/expression.rs`: a string or array that `+` builds holds at
+  most `max_variable_size` bytes (counted as `Variable::len` counts them),
+  cut at a character or before the item that doesn't fit
+  (`Variable::op_add_limited`). Upstream built every sum in full, and only
+  `let` truncated the end result, so one expression of thousands of terms
+  copied gigabytes in one instruction, which the cpu limit doesn't see. The
+  `concat_limit_tests` in `expression.rs` cover it (run like
+  `scan_limit_tests`).
 - `Cargo.toml`: the example target is dropped, with the top-level
   `examples/` and `tests/`, which the server never builds. (`src/` keeps its
   own `tests` modules: the crate declares them.)
