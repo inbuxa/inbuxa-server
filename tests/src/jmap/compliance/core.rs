@@ -106,6 +106,15 @@ pub async fn run(ctx: &CompCtx<'_>) {
     ctx.run("core/error-not-request-type", error_not_request_type(ctx))
         .await;
 
+    // --- createdIds ---
+    ctx.run(
+        "core/created-ids-empty-echoed",
+        created_ids_empty_echoed(ctx),
+    )
+    .await;
+    ctx.run("core/created-ids-absent", created_ids_absent(ctx))
+        .await;
+
     // --- method errors ---
     ctx.run("core/error-unknown-method", error_unknown_method(ctx))
         .await;
@@ -492,6 +501,45 @@ async fn error_not_request_type(ctx: &CompCtx<'_>) -> TestOutcome {
         )?;
     }
     Ok(())
+}
+
+// --- createdIds ---
+
+// inbuxa: createdIds is in the response whenever it was in the request,
+// even empty (RFC 8620 §3.3, §3.4).
+async fn created_ids_empty_echoed(ctx: &CompCtx<'_>) -> TestOutcome {
+    let body = json!({
+        "using": [CORE],
+        "methodCalls": [["Core/echo", { "hello": true }, "c0"]],
+        "createdIds": {}
+    });
+    let resp = ctx
+        .primary
+        .jmap_raw_post(body.to_string(), "application/json")
+        .await;
+    let resp = resp.json().unwrap_or_default();
+    check_eq(
+        resp.get("createdIds"),
+        Some(&json!({})),
+        "createdIds in the response",
+    )
+}
+
+async fn created_ids_absent(ctx: &CompCtx<'_>) -> TestOutcome {
+    let body = json!({
+        "using": [CORE],
+        "methodCalls": [["Core/echo", { "hello": true }, "c0"]]
+    });
+    let resp = ctx
+        .primary
+        .jmap_raw_post(body.to_string(), "application/json")
+        .await;
+    let resp = resp.json().unwrap_or_default();
+    check(
+        resp.get("methodResponses").is_some(),
+        format!("expected a Response, got {resp}"),
+    )?;
+    check_eq(resp.get("createdIds"), None, "createdIds in the response")
 }
 
 // --- method errors ---

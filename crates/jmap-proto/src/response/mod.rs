@@ -9,7 +9,6 @@
 pub mod serialize;
 pub mod status;
 
-use self::serialize::serialize_hex;
 use crate::{
     error::method::MethodErrorWrapper,
     method::{
@@ -248,18 +247,29 @@ pub enum ParseResponseMethod {
     CalendarEvent(ParseResponse<CalendarEvent>),
 }
 
-#[derive(Debug, serde::Serialize)]
+#[derive(Debug)]
 pub struct Response<'x> {
-    #[serde(rename = "methodResponses")]
     pub method_responses: Vec<Call<ResponseMethod<'x>>>,
-
-    #[serde(rename = "sessionState")]
-    #[serde(serialize_with = "serialize_hex")]
     pub session_state: u32,
-
-    #[serde(rename = "createdIds")]
-    #[serde(skip_serializing_if = "HashMap::is_empty")]
     pub created_ids: HashMap<String, AnyId>,
+    // inbuxa: the request had createdIds, so the response has them too,
+    // even empty (RFC 8620 §3.3, §3.4)
+    pub echo_created_ids: bool,
+}
+
+impl serde::Serialize for Response<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+
+        let mut response =
+            serializer.serialize_struct("Response", 2 + usize::from(self.echo_created_ids))?;
+        response.serialize_field("methodResponses", &self.method_responses)?;
+        response.serialize_field("sessionState", &format!("{:x}", self.session_state))?;
+        if self.echo_created_ids {
+            response.serialize_field("createdIds", &self.created_ids)?;
+        }
+        response.end()
+    }
 }
 
 impl<'x> Response<'x> {
@@ -268,6 +278,7 @@ impl<'x> Response<'x> {
             session_state,
             created_ids,
             method_responses: Vec::with_capacity(capacity),
+            echo_created_ids: false,
         }
     }
 
@@ -1209,5 +1220,55 @@ impl<'x> From<GetResponse<crate::object::inbuxa_passkey::Passkey>> for ResponseM
 impl<'x> From<SetResponse<crate::object::inbuxa_passkey::Passkey>> for ResponseMethod<'x> {
     fn from(value: SetResponse<crate::object::inbuxa_passkey::Passkey>) -> Self {
         ResponseMethod::Set(SetResponseMethod::Passkey(Box::new(value)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Response;
+    use crate::request::websocket::WebSocketResponse;
+    use std::collections::HashMap;
+    use types::id::Id;
+
+    // inbuxa: createdIds is echoed whenever the request had it, even empty,
+    // and left out when it didn't (RFC 8620 §3.3, §3.4).
+    #[test]
+    fn created_ids_follow_the_request() {
+        let response = |echo: bool, created: bool| {
+            let mut response = Response::new(0x1f, HashMap::new(), 0);
+            response.echo_created_ids = echo;
+            if created {
+                response.push_created_id("k1".to_string(), Id::new(42));
+            }
+            response
+        };
+        let created = format!(r#"{{"k1":"{}"}}"#, Id::new(42));
+
+        for (echo, created_now, expected) in [
+            (true, false, Some("{}".to_string())),
+            (true, true, Some(created.clone())),
+            (false, false, None),
+            (false, true, None),
+        ] {
+            let http: serde_json::Value =
+                serde_json::to_value(response(echo, created_now)).unwrap();
+            assert_eq!(http["sessionState"], "1f");
+            assert_eq!(
+                http.get("createdIds").map(|v| v.to_string()),
+                expected,
+                "HTTP, echo {echo}, created {created_now}"
+            );
+
+            let ws: serde_json::Value = serde_json::from_str(
+                &WebSocketResponse::from_response(response(echo, created_now), None).to_json(),
+            )
+            .unwrap();
+            assert_eq!(
+                ws.get("createdIds").map(|v| v.to_string()),
+                expected,
+                "WebSocket, echo {echo}, created {created_now}"
+            );
+            assert!(ws.get("created_ids").is_none());
+        }
     }
 }

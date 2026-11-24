@@ -38,9 +38,10 @@ pub struct WebSocketResponse<'x> {
     #[serde(serialize_with = "serialize_hex")]
     session_state: u32,
 
-    #[serde(rename(deserialize = "createdIds"))]
-    #[serde(skip_serializing_if = "HashMap::is_empty")]
-    created_ids: HashMap<String, AnyId>,
+    // inbuxa: whenever the request had createdIds, even empty
+    #[serde(rename = "createdIds")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    created_ids: Option<HashMap<String, AnyId>>,
 
     #[serde(rename = "requestId")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -274,7 +275,7 @@ impl<'x> WebSocketResponse<'x> {
             _type: WebSocketResponseType::Response,
             method_responses: response.method_responses,
             session_state: response.session_state,
-            created_ids: response.created_ids,
+            created_ids: response.echo_created_ids.then_some(response.created_ids),
             request_id,
         }
     }

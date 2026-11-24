@@ -424,9 +424,8 @@ impl RequestHandler for Server {
             }
         }
 
-        if !add_created_ids {
-            response.created_ids.clear();
-        }
+        // inbuxa: createdIds goes back whenever it came in, even empty
+        response.echo_created_ids = add_created_ids;
 
         response
     }
