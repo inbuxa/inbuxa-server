@@ -394,6 +394,22 @@ pub async fn test(test: &TestServer) {
         .unwrap()
         .text_contents()
         .unwrap();
+    // inbuxa: #564: the description's line breaks show, in both parts
+    assert!(
+        contents.contains("Bring a dish.<br>Or two<br>&amp; a &lt;fork&gt;."),
+        "invitation description must keep its line breaks: {contents}"
+    );
+    let text = message
+        .text_bodies()
+        .next()
+        .unwrap()
+        .text_contents()
+        .unwrap();
+    assert!(
+        text.replace("\r\n", "\n")
+            .contains("Bring a dish.\nOr two\n& a <fork>."),
+        "invitation text must keep the line breaks: {text}"
+    );
     let url = contents
         .split("href=\"")
         .filter_map(|s| {
@@ -1407,6 +1423,7 @@ DTEND:$END
 DTSTAMP:20090602T170000Z
 TRANSP:OPAQUE
 SUMMARY:Lunch
+DESCRIPTION:Bring a dish.\nOr two\N& a <fork>.
 ORGANIZER:mailto:jdoe@example.com
 ATTENDEE;CUTYPE=INDIVIDUAL:mailto:jane.smith@example.com
 ATTENDEE;CUTYPE=INDIVIDUAL:mailto:bill@example.com

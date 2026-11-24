@@ -157,10 +157,15 @@ impl ItipIngest for Server {
                 ItipError::SenderIsNotOrganizerNorAttendee,
             ));
         }
-        // inbuxa: also covers events the recipient doesn't have yet
-        itip_snapshots
-            .assert_organizer_sends(itip_method(&itip)?, sender)
-            .map_err(ItipIngestError::Message)?;
+        // inbuxa: also covers events the recipient doesn't have yet. #586: a
+        // delegation to the recipient goes on, to be applied to the copy it
+        // holds; without one it is refused the same way.
+        let method = itip_method(&itip)?;
+        let delegation = match itip_snapshots.assert_organizer_sends(method, sender) {
+            Ok(()) => None,
+            Err(err) if itip_snapshots.is_delegation_to_recipient(method, sender) => Some(err),
+            Err(err) => return Err(ItipIngestError::Message(err)),
+        };
 
         // Obtain changedBy
         let changed_by = if let Some(id) = self.account_id_from_email(sender, true).await? {
@@ -240,6 +245,8 @@ impl ItipIngest for Server {
             } else {
                 Err(ItipIngestError::Message(ItipError::EventNotFound))
             }
+        } else if let Some(err) = delegation {
+            Err(ItipIngestError::Message(err))
         } else {
             // Verify that auto-adding invitations is allowed
             if !self.core.groupware.itip_auto_add

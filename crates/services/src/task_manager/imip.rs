@@ -461,11 +461,17 @@ pub async fn build_itip_template(
                     CalendarTemplateVariable::EventDescription
                 };
 
+                // inbuxa: #564: a description's line breaks show in the email
+                let insert = if matches!(variable, CalendarTemplateVariable::EventDescription) {
+                    Variables::insert_text
+                } else {
+                    Variables::insert_single
+                };
                 if old_entry.is_none() {
-                    variables.insert_single(variable, value);
+                    insert(&mut variables, variable, value);
                     continue;
                 }
-                variables.insert_single(variable, value.clone());
+                insert(&mut variables, variable, value.clone());
             }
 
             if matches!(field, ICalendarProperty::Rrule)

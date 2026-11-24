@@ -1,0 +1,555 @@
+# RFC5546 - Delegating to an attendee who already holds the event
+
+# "A" invites "B" and "C", and sends "E" a copy for information (1)
+> put a@example.com delegate-holds@example.com
+BEGIN:VCALENDAR
+PRODID:-//Example/ExampleCalendarClient//EN
+VERSION:2.0
+BEGIN:VEVENT
+ORGANIZER:mailto:a@example.com
+ATTENDEE;ROLE=CHAIR;PARTSTAT=ACCEPTED;CN=A:mailto:a@example.com
+ATTENDEE;RSVP=TRUE;CUTYPE=INDIVIDUAL;CN=B:mailto:b@example.com
+ATTENDEE;RSVP=TRUE;CUTYPE=INDIVIDUAL;CN=C:mailto:c@example.com
+ATTENDEE;ROLE=NON-PARTICIPANT;RSVP=FALSE:mailto:e@example.com
+DTSTAMP:19970611T190000Z
+DTSTART:19970701T200000Z
+DTEND:19970701T210000Z
+SUMMARY:Conference
+UID:delegate-holds@example.com
+SEQUENCE:0
+STATUS:CONFIRMED
+END:VEVENT
+END:VCALENDAR
+
+# "A" invites "B" and "C", and sends "E" a copy for information (2)
+> send
+
+# "E" holds the organizer's copy
+> get e@example.com delegate-holds@example.com
+BEGIN:VCALENDAR
+PRODID:-//inbuxa//inbuxa Server//EN
+VERSION:2.0
+BEGIN:VEVENT
+STATUS:CONFIRMED
+SUMMARY:Conference
+DTEND:19970701T210000Z
+DTSTART:19970701T200000Z
+ATTENDEE;ROLE=CHAIR;PARTSTAT=ACCEPTED;CN=A:mailto:a@example.com
+ATTENDEE;ROLE=NON-PARTICIPANT;RSVP=FALSE:mailto:e@example.com
+ATTENDEE;RSVP=TRUE;CUTYPE=INDIVIDUAL;CN=B;PARTSTAT=NEEDS-ACTION:mailto:b@ex
+ ample.com
+ATTENDEE;RSVP=TRUE;CUTYPE=INDIVIDUAL;CN=C;PARTSTAT=NEEDS-ACTION:mailto:c@ex
+ ample.com
+ORGANIZER:mailto:a@example.com
+UID:delegate-holds@example.com
+DTSTAMP:0
+SEQUENCE:0
+END:VEVENT
+END:VCALENDAR
+
+# "C" delegates presence at the meeting to "E" (RFC 5546 section 4.2.5)
+> put c@example.com delegate-holds@example.com
+BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//inbuxa//inbuxa Server//EN
+BEGIN:VEVENT
+DTSTAMP:19970611T190000Z
+UID:delegate-holds@example.com
+ORGANIZER:mailto:a@example.com
+STATUS:CONFIRMED
+SEQUENCE:0
+ATTENDEE;ROLE=CHAIR;PARTSTAT=ACCEPTED;CN=A:mailto:a@example.com
+ATTENDEE;RSVP=TRUE;CUTYPE=INDIVIDUAL;CN=B;PARTSTAT=NEEDS-ACTION:mailto:b@example.com
+ATTENDEE;CUTYPE=INDIVIDUAL;CN=C;PARTSTAT=DELEGATED;DELEGATED-TO="mailto:e@example.com":mailto:c@example.com
+ATTENDEE;RSVP=TRUE;DELEGATED-FROM="mailto:c@example.com":mailto:e@example.com
+DTSTART:19970701T200000Z
+DTEND:19970701T210000Z
+SUMMARY:Conference
+END:VEVENT
+END:VCALENDAR
+
+> expect
+from: c@example.com
+to: a@example.com
+summary: rsvp DELEGATED
+summary.attendee: Participants([ItipParticipant { email: "a@example.com", name: None, is_organizer: true }, ItipParticipant { email: "b@example.com", name: Some("B"), is_organizer: false }, ItipParticipant { email: "c@example.com", name: Some("C"), is_organizer: false }, ItipParticipant { email: "e@example.com", name: None, is_organizer: false }])
+summary.dtstart: Time(ItipTime { start: 867787200, tz_id: 32768 })
+summary.summary: Text("Conference")
+BEGIN:VCALENDAR
+METHOD:REPLY
+PRODID:-//inbuxa//inbuxa Server//EN
+VERSION:2.0
+BEGIN:VEVENT
+SUMMARY:Conference
+DTEND:19970701T210000Z
+DTSTART:19970701T200000Z
+ATTENDEE;CUTYPE=INDIVIDUAL;CN=C;PARTSTAT=DELEGATED;DELEGATED-TO="mailto:e@e
+ xample.com":mailto:c@example.com
+ATTENDEE;RSVP=TRUE;DELEGATED-FROM="mailto:c@example.com":mailto:e@example.c
+ om
+ORGANIZER:mailto:a@example.com
+UID:delegate-holds@example.com
+DTSTAMP:0
+SEQUENCE:0
+REQUEST-STATUS:2.0;Success
+END:VEVENT
+END:VCALENDAR
+================================
+from: c@example.com
+to: e@example.com
+summary: invite
+summary.attendee: Participants([ItipParticipant { email: "a@example.com", name: None, is_organizer: true }, ItipParticipant { email: "b@example.com", name: Some("B"), is_organizer: false }, ItipParticipant { email: "c@example.com", name: Some("C"), is_organizer: false }, ItipParticipant { email: "e@example.com", name: None, is_organizer: false }])
+summary.dtstart: Time(ItipTime { start: 867787200, tz_id: 32768 })
+summary.summary: Text("Conference")
+BEGIN:VCALENDAR
+METHOD:REQUEST
+PRODID:-//inbuxa//inbuxa Server//EN
+VERSION:2.0
+BEGIN:VEVENT
+STATUS:CONFIRMED
+SUMMARY:Conference
+DTEND:19970701T210000Z
+DTSTART:19970701T200000Z
+ATTENDEE;CUTYPE=INDIVIDUAL;CN=C;PARTSTAT=DELEGATED;DELEGATED-TO="mailto:e@e
+ xample.com":mailto:c@example.com
+ATTENDEE;ROLE=CHAIR;PARTSTAT=ACCEPTED;CN=A:mailto:a@example.com
+ATTENDEE;RSVP=TRUE;CUTYPE=INDIVIDUAL;CN=B;PARTSTAT=NEEDS-ACTION:mailto:b@ex
+ ample.com
+ATTENDEE;RSVP=TRUE;DELEGATED-FROM="mailto:c@example.com";PARTSTAT=NEEDS-ACT
+ ION:mailto:e@example.com
+ORGANIZER:mailto:a@example.com
+UID:delegate-holds@example.com
+DTSTAMP:0
+SEQUENCE:0
+END:VEVENT
+END:VCALENDAR
+
+# The delegation reaches "E", who already holds the event
+> send
+
+# "E" now holds the delegation, and nothing else changed
+> get e@example.com delegate-holds@example.com
+BEGIN:VCALENDAR
+PRODID:-//inbuxa//inbuxa Server//EN
+VERSION:2.0
+BEGIN:VEVENT
+STATUS:CONFIRMED
+SUMMARY:Conference
+DTEND:19970701T210000Z
+DTSTART:19970701T200000Z
+ATTENDEE;ROLE=CHAIR;PARTSTAT=ACCEPTED;CN=A:mailto:a@example.com
+ATTENDEE;RSVP=TRUE;CUTYPE=INDIVIDUAL;CN=B;PARTSTAT=NEEDS-ACTION:mailto:b@ex
+ ample.com
+ATTENDEE;RSVP=TRUE;CUTYPE=INDIVIDUAL;CN=C;PARTSTAT=DELEGATED;DELEGATED-TO="mai
+ lto:e@example.com":mailto:c@example.com
+ATTENDEE;RSVP=TRUE;DELEGATED-FROM="mailto:c@example.com":mailto:e@example.c
+ om
+ORGANIZER:mailto:a@example.com
+UID:delegate-holds@example.com
+DTSTAMP:0
+SEQUENCE:0
+END:VEVENT
+END:VCALENDAR
+
+# "A" holds the reply
+> get a@example.com delegate-holds@example.com
+BEGIN:VCALENDAR
+PRODID:-//Example/ExampleCalendarClient//EN
+VERSION:2.0
+BEGIN:VEVENT
+STATUS:CONFIRMED
+SUMMARY:Conference
+DTEND:19970701T210000Z
+DTSTART:19970701T200000Z
+ATTENDEE;CUTYPE=INDIVIDUAL;CN=C;PARTSTAT=DELEGATED;DELEGATED-TO="mailto:e@e
+ xample.com";SCHEDULE-STATUS=2.0:mailto:c@example.com
+ATTENDEE;ROLE=CHAIR;PARTSTAT=ACCEPTED;CN=A:mailto:a@example.com
+ATTENDEE;RSVP=TRUE;CUTYPE=INDIVIDUAL;CN=B:mailto:b@example.com
+ATTENDEE;RSVP=TRUE;DELEGATED-FROM="mailto:c@example.com":mailto:e@example.c
+ om
+ORGANIZER:mailto:a@example.com
+UID:delegate-holds@example.com
+DTSTAMP:1
+SEQUENCE:0
+END:VEVENT
+END:VCALENDAR
+
+# The delegation sent again, unchanged, is taken again
+> itip c@example.com e@example.com
+BEGIN:VCALENDAR
+PRODID:-//Example/ExampleCalendarClient//EN
+METHOD:REQUEST
+VERSION:2.0
+BEGIN:VEVENT
+UID:delegate-holds@example.com
+SEQUENCE:0
+ORGANIZER:mailto:a@example.com
+ATTENDEE;ROLE=CHAIR;PARTSTAT=ACCEPTED:mailto:a@example.com
+ATTENDEE;CUTYPE=INDIVIDUAL;PARTSTAT=NEEDS-ACTION:mailto:b@example.com
+ATTENDEE;CUTYPE=INDIVIDUAL;PARTSTAT=DELEGATED;DELEGATED-TO="mailto:e@example.com":mailto:c@example.com
+ATTENDEE;RSVP=TRUE;DELEGATED-FROM="mailto:c@example.com";PARTSTAT=NEEDS-ACTION:mailto:e@example.com
+SUMMARY:Conference
+DTSTART:19970701T200000Z
+DTEND:19970701T210000Z
+DTSTAMP:19970612T120000Z
+STATUS:CONFIRMED
+END:VEVENT
+END:VCALENDAR
+
+> send
+
+# A delegation that sets the delegate's own PARTSTAT is taken, but "E" keeps its own
+> itip c@example.com e@example.com
+BEGIN:VCALENDAR
+PRODID:-//Example/ExampleCalendarClient//EN
+METHOD:REQUEST
+VERSION:2.0
+BEGIN:VEVENT
+UID:delegate-holds@example.com
+SEQUENCE:0
+ORGANIZER:mailto:a@example.com
+ATTENDEE;ROLE=CHAIR;PARTSTAT=ACCEPTED:mailto:a@example.com
+ATTENDEE;CUTYPE=INDIVIDUAL;PARTSTAT=NEEDS-ACTION:mailto:b@example.com
+ATTENDEE;CUTYPE=INDIVIDUAL;PARTSTAT=DELEGATED;DELEGATED-TO="mailto:e@example.com":mailto:c@example.com
+ATTENDEE;RSVP=TRUE;DELEGATED-FROM="mailto:c@example.com";PARTSTAT=ACCEPTED:mailto:e@example.com
+SUMMARY:Conference
+DTSTART:19970701T200000Z
+DTEND:19970701T210000Z
+DTSTAMP:19970612T120000Z
+STATUS:CONFIRMED
+END:VEVENT
+END:VCALENDAR
+
+> send
+
+# "E"'s copy still has no PARTSTAT of its own, which reads as NEEDS-ACTION
+> get e@example.com delegate-holds@example.com
+BEGIN:VCALENDAR
+PRODID:-//inbuxa//inbuxa Server//EN
+VERSION:2.0
+BEGIN:VEVENT
+STATUS:CONFIRMED
+SUMMARY:Conference
+DTEND:19970701T210000Z
+DTSTART:19970701T200000Z
+ATTENDEE;ROLE=CHAIR;PARTSTAT=ACCEPTED;CN=A:mailto:a@example.com
+ATTENDEE;RSVP=TRUE;CUTYPE=INDIVIDUAL;CN=B;PARTSTAT=NEEDS-ACTION:mailto:b@ex
+ ample.com
+ATTENDEE;RSVP=TRUE;CUTYPE=INDIVIDUAL;CN=C;PARTSTAT=DELEGATED;DELEGATED-TO="mai
+ lto:e@example.com":mailto:c@example.com
+ATTENDEE;RSVP=TRUE;DELEGATED-FROM="mailto:c@example.com":mailto:e@example.c
+ om
+ORGANIZER:mailto:a@example.com
+UID:delegate-holds@example.com
+DTSTAMP:0
+SEQUENCE:0
+END:VEVENT
+END:VCALENDAR
+
+# A delegation that also renames the event is refused
+> itip c@example.com e@example.com
+BEGIN:VCALENDAR
+PRODID:-//Example/ExampleCalendarClient//EN
+METHOD:REQUEST
+VERSION:2.0
+BEGIN:VEVENT
+UID:delegate-holds@example.com
+SEQUENCE:0
+ORGANIZER:mailto:a@example.com
+ATTENDEE;ROLE=CHAIR;PARTSTAT=ACCEPTED:mailto:a@example.com
+ATTENDEE;CUTYPE=INDIVIDUAL;PARTSTAT=NEEDS-ACTION:mailto:b@example.com
+ATTENDEE;CUTYPE=INDIVIDUAL;PARTSTAT=DELEGATED;DELEGATED-TO="mailto:e@example.com":mailto:c@example.com
+ATTENDEE;RSVP=TRUE;DELEGATED-FROM="mailto:c@example.com";PARTSTAT=NEEDS-ACTION:mailto:e@example.com
+SUMMARY:Conference (renamed)
+DTSTART:19970701T200000Z
+DTEND:19970701T210000Z
+DTSTAMP:19970612T120000Z
+STATUS:CONFIRMED
+END:VEVENT
+END:VCALENDAR
+
+> send
+SenderIsNotOrganizer("c@example.com")
+
+
+# A delegation that also moves the event is refused
+> itip c@example.com e@example.com
+BEGIN:VCALENDAR
+PRODID:-//Example/ExampleCalendarClient//EN
+METHOD:REQUEST
+VERSION:2.0
+BEGIN:VEVENT
+UID:delegate-holds@example.com
+SEQUENCE:0
+ORGANIZER:mailto:a@example.com
+ATTENDEE;ROLE=CHAIR;PARTSTAT=ACCEPTED:mailto:a@example.com
+ATTENDEE;CUTYPE=INDIVIDUAL;PARTSTAT=NEEDS-ACTION:mailto:b@example.com
+ATTENDEE;CUTYPE=INDIVIDUAL;PARTSTAT=DELEGATED;DELEGATED-TO="mailto:e@example.com":mailto:c@example.com
+ATTENDEE;RSVP=TRUE;DELEGATED-FROM="mailto:c@example.com";PARTSTAT=NEEDS-ACTION:mailto:e@example.com
+SUMMARY:Conference
+DTSTART:19970702T200000Z
+DTEND:19970702T210000Z
+DTSTAMP:19970612T120000Z
+STATUS:CONFIRMED
+END:VEVENT
+END:VCALENDAR
+
+> send
+SenderIsNotOrganizer("c@example.com")
+
+
+# A delegation that also changes another attendee is refused
+> itip c@example.com e@example.com
+BEGIN:VCALENDAR
+PRODID:-//Example/ExampleCalendarClient//EN
+METHOD:REQUEST
+VERSION:2.0
+BEGIN:VEVENT
+UID:delegate-holds@example.com
+SEQUENCE:0
+ORGANIZER:mailto:a@example.com
+ATTENDEE;ROLE=CHAIR;PARTSTAT=ACCEPTED:mailto:a@example.com
+ATTENDEE;CUTYPE=INDIVIDUAL;PARTSTAT=DECLINED:mailto:b@example.com
+ATTENDEE;CUTYPE=INDIVIDUAL;PARTSTAT=DELEGATED;DELEGATED-TO="mailto:e@example.com":mailto:c@example.com
+ATTENDEE;RSVP=TRUE;DELEGATED-FROM="mailto:c@example.com";PARTSTAT=NEEDS-ACTION:mailto:e@example.com
+SUMMARY:Conference
+DTSTART:19970701T200000Z
+DTEND:19970701T210000Z
+DTSTAMP:19970612T120000Z
+STATUS:CONFIRMED
+END:VEVENT
+END:VCALENDAR
+
+> send
+SenderIsNotOrganizer("c@example.com")
+
+
+# A delegation that also adds an attendee is refused
+> itip c@example.com e@example.com
+BEGIN:VCALENDAR
+PRODID:-//Example/ExampleCalendarClient//EN
+METHOD:REQUEST
+VERSION:2.0
+BEGIN:VEVENT
+UID:delegate-holds@example.com
+SEQUENCE:0
+ORGANIZER:mailto:a@example.com
+ATTENDEE;ROLE=CHAIR;PARTSTAT=ACCEPTED:mailto:a@example.com
+ATTENDEE;CUTYPE=INDIVIDUAL;PARTSTAT=NEEDS-ACTION:mailto:b@example.com
+ATTENDEE;CUTYPE=INDIVIDUAL;PARTSTAT=DELEGATED;DELEGATED-TO="mailto:e@example.com":mailto:c@example.com
+ATTENDEE;RSVP=TRUE;DELEGATED-FROM="mailto:c@example.com";PARTSTAT=NEEDS-ACTION:mailto:e@example.com
+ATTENDEE;RSVP=TRUE:mailto:x@example.com
+SUMMARY:Conference
+DTSTART:19970701T200000Z
+DTEND:19970701T210000Z
+DTSTAMP:19970612T120000Z
+STATUS:CONFIRMED
+END:VEVENT
+END:VCALENDAR
+
+> send
+SenderIsNotOrganizer("c@example.com")
+
+
+# A delegation that also removes an attendee is refused
+> itip c@example.com e@example.com
+BEGIN:VCALENDAR
+PRODID:-//Example/ExampleCalendarClient//EN
+METHOD:REQUEST
+VERSION:2.0
+BEGIN:VEVENT
+UID:delegate-holds@example.com
+SEQUENCE:0
+ORGANIZER:mailto:a@example.com
+ATTENDEE;ROLE=CHAIR;PARTSTAT=ACCEPTED:mailto:a@example.com
+COMMENT:B is left out
+ATTENDEE;CUTYPE=INDIVIDUAL;PARTSTAT=DELEGATED;DELEGATED-TO="mailto:e@example.com":mailto:c@example.com
+ATTENDEE;RSVP=TRUE;DELEGATED-FROM="mailto:c@example.com";PARTSTAT=NEEDS-ACTION:mailto:e@example.com
+SUMMARY:Conference
+DTSTART:19970701T200000Z
+DTEND:19970701T210000Z
+DTSTAMP:19970612T120000Z
+STATUS:CONFIRMED
+END:VEVENT
+END:VCALENDAR
+
+> send
+SenderIsNotOrganizer("c@example.com")
+
+
+# A delegation with a new sequence number is refused
+> itip c@example.com e@example.com
+BEGIN:VCALENDAR
+PRODID:-//Example/ExampleCalendarClient//EN
+METHOD:REQUEST
+VERSION:2.0
+BEGIN:VEVENT
+UID:delegate-holds@example.com
+SEQUENCE:1
+ORGANIZER:mailto:a@example.com
+ATTENDEE;ROLE=CHAIR;PARTSTAT=ACCEPTED:mailto:a@example.com
+ATTENDEE;CUTYPE=INDIVIDUAL;PARTSTAT=NEEDS-ACTION:mailto:b@example.com
+ATTENDEE;CUTYPE=INDIVIDUAL;PARTSTAT=DELEGATED;DELEGATED-TO="mailto:e@example.com":mailto:c@example.com
+ATTENDEE;RSVP=TRUE;DELEGATED-FROM="mailto:c@example.com";PARTSTAT=NEEDS-ACTION:mailto:e@example.com
+SUMMARY:Conference
+DTSTART:19970701T200000Z
+DTEND:19970701T210000Z
+DTSTAMP:19970612T120000Z
+STATUS:CONFIRMED
+END:VEVENT
+END:VCALENDAR
+
+> send
+SenderIsNotOrganizer("c@example.com")
+
+
+# A delegation sent to an attendee who isn't the delegate is refused
+> itip c@example.com b@example.com
+BEGIN:VCALENDAR
+PRODID:-//Example/ExampleCalendarClient//EN
+METHOD:REQUEST
+VERSION:2.0
+BEGIN:VEVENT
+UID:delegate-holds@example.com
+SEQUENCE:0
+ORGANIZER:mailto:a@example.com
+ATTENDEE;ROLE=CHAIR;PARTSTAT=ACCEPTED:mailto:a@example.com
+ATTENDEE;CUTYPE=INDIVIDUAL;PARTSTAT=NEEDS-ACTION:mailto:b@example.com
+ATTENDEE;CUTYPE=INDIVIDUAL;PARTSTAT=DELEGATED;DELEGATED-TO="mailto:e@example.com":mailto:c@example.com
+ATTENDEE;RSVP=TRUE;DELEGATED-FROM="mailto:c@example.com";PARTSTAT=NEEDS-ACTION:mailto:e@example.com
+SUMMARY:Conference
+DTSTART:19970701T200000Z
+DTEND:19970701T210000Z
+DTSTAMP:19970612T120000Z
+STATUS:CONFIRMED
+END:VEVENT
+END:VCALENDAR
+
+> send
+SenderIsNotOrganizer("c@example.com")
+
+
+# A request from an attendee who didn't delegate is refused
+> itip c@example.com e@example.com
+BEGIN:VCALENDAR
+PRODID:-//Example/ExampleCalendarClient//EN
+METHOD:REQUEST
+VERSION:2.0
+BEGIN:VEVENT
+UID:delegate-holds@example.com
+SEQUENCE:0
+ORGANIZER:mailto:a@example.com
+ATTENDEE;ROLE=CHAIR;PARTSTAT=ACCEPTED:mailto:a@example.com
+ATTENDEE;CUTYPE=INDIVIDUAL;PARTSTAT=NEEDS-ACTION:mailto:b@example.com
+ATTENDEE;CUTYPE=INDIVIDUAL;PARTSTAT=ACCEPTED:mailto:c@example.com
+ATTENDEE;RSVP=TRUE;PARTSTAT=NEEDS-ACTION:mailto:e@example.com
+SUMMARY:Conference
+DTSTART:19970701T200000Z
+DTEND:19970701T210000Z
+DTSTAMP:19970612T120000Z
+STATUS:CONFIRMED
+END:VEVENT
+END:VCALENDAR
+
+> send
+SenderIsNotOrganizer("c@example.com")
+
+
+# A delegation the delegate's entry doesn't confirm is refused
+> itip c@example.com e@example.com
+BEGIN:VCALENDAR
+PRODID:-//Example/ExampleCalendarClient//EN
+METHOD:REQUEST
+VERSION:2.0
+BEGIN:VEVENT
+UID:delegate-holds@example.com
+SEQUENCE:0
+ORGANIZER:mailto:a@example.com
+ATTENDEE;ROLE=CHAIR;PARTSTAT=ACCEPTED:mailto:a@example.com
+ATTENDEE;CUTYPE=INDIVIDUAL;PARTSTAT=NEEDS-ACTION:mailto:b@example.com
+ATTENDEE;CUTYPE=INDIVIDUAL;PARTSTAT=DELEGATED;DELEGATED-TO="mailto:e@example.com":mailto:c@example.com
+ATTENDEE;RSVP=TRUE;PARTSTAT=NEEDS-ACTION:mailto:e@example.com
+SUMMARY:Conference
+DTSTART:19970701T200000Z
+DTEND:19970701T210000Z
+DTSTAMP:19970612T120000Z
+STATUS:CONFIRMED
+END:VEVENT
+END:VCALENDAR
+
+> send
+SenderIsNotOrganizer("c@example.com")
+
+
+# A cancellation carrying the delegation is refused
+> itip c@example.com e@example.com
+BEGIN:VCALENDAR
+PRODID:-//Example/ExampleCalendarClient//EN
+METHOD:CANCEL
+VERSION:2.0
+BEGIN:VEVENT
+UID:delegate-holds@example.com
+SEQUENCE:0
+ORGANIZER:mailto:a@example.com
+ATTENDEE;ROLE=CHAIR;PARTSTAT=ACCEPTED:mailto:a@example.com
+ATTENDEE;CUTYPE=INDIVIDUAL;PARTSTAT=NEEDS-ACTION:mailto:b@example.com
+ATTENDEE;CUTYPE=INDIVIDUAL;PARTSTAT=DELEGATED;DELEGATED-TO="mailto:e@example.com":mailto:c@example.com
+ATTENDEE;RSVP=TRUE;DELEGATED-FROM="mailto:c@example.com";PARTSTAT=NEEDS-ACTION:mailto:e@example.com
+SUMMARY:Conference
+DTSTART:19970701T200000Z
+DTEND:19970701T210000Z
+DTSTAMP:19970612T120000Z
+STATUS:CANCELLED
+END:VEVENT
+END:VCALENDAR
+
+> send
+SenderIsNotOrganizer("c@example.com")
+
+# Nothing that was refused reached "E"'s copy
+> get e@example.com delegate-holds@example.com
+BEGIN:VCALENDAR
+PRODID:-//inbuxa//inbuxa Server//EN
+VERSION:2.0
+BEGIN:VEVENT
+STATUS:CONFIRMED
+SUMMARY:Conference
+DTEND:19970701T210000Z
+DTSTART:19970701T200000Z
+ATTENDEE;ROLE=CHAIR;PARTSTAT=ACCEPTED;CN=A:mailto:a@example.com
+ATTENDEE;RSVP=TRUE;CUTYPE=INDIVIDUAL;CN=B;PARTSTAT=NEEDS-ACTION:mailto:b@ex
+ ample.com
+ATTENDEE;RSVP=TRUE;CUTYPE=INDIVIDUAL;CN=C;PARTSTAT=DELEGATED;DELEGATED-TO="mai
+ lto:e@example.com":mailto:c@example.com
+ATTENDEE;RSVP=TRUE;DELEGATED-FROM="mailto:c@example.com":mailto:e@example.c
+ om
+ORGANIZER:mailto:a@example.com
+UID:delegate-holds@example.com
+DTSTAMP:0
+SEQUENCE:0
+END:VEVENT
+END:VCALENDAR
+
+# Nor "B"'s copy
+> get b@example.com delegate-holds@example.com
+BEGIN:VCALENDAR
+PRODID:-//inbuxa//inbuxa Server//EN
+VERSION:2.0
+BEGIN:VEVENT
+STATUS:CONFIRMED
+SUMMARY:Conference
+DTEND:19970701T210000Z
+DTSTART:19970701T200000Z
+ATTENDEE;ROLE=CHAIR;PARTSTAT=ACCEPTED;CN=A:mailto:a@example.com
+ATTENDEE;ROLE=NON-PARTICIPANT;RSVP=FALSE:mailto:e@example.com
+ATTENDEE;RSVP=TRUE;CUTYPE=INDIVIDUAL;CN=B;PARTSTAT=NEEDS-ACTION:mailto:b@ex
+ ample.com
+ATTENDEE;RSVP=TRUE;CUTYPE=INDIVIDUAL;CN=C;PARTSTAT=NEEDS-ACTION:mailto:c@ex
+ ample.com
+ORGANIZER:mailto:a@example.com
+UID:delegate-holds@example.com
+DTSTAMP:0
+SEQUENCE:0
+END:VEVENT
+END:VCALENDAR
+

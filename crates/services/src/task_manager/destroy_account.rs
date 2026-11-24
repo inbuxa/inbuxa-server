@@ -13,15 +13,18 @@ use groupware::file::FileNode;
 use registry::{
     schema::{
         prelude::{ObjectType, Property},
-        structs::{ArchivedItem, TaskDestroyAccount},
+        structs::{ArchivedItem, Task, TaskDestroyAccount},
     },
     types::EnumImpl,
 };
 use store::{
-    SerializeInfallible, ValueKey,
+    Deserialize, IterateParams, SerializeInfallible, U64_LEN, ValueKey,
     registry::RegistryQuery,
     search::SearchQuery,
-    write::{BatchBuilder, BlobLink, BlobOp, RegistryClass, SearchIndex, ValueClass},
+    write::{
+        BatchBuilder, BlobLink, BlobOp, RegistryClass, SearchIndex, TaskQueueClass, ValueClass,
+        key::DeserializeBigEndian,
+    },
 };
 use trc::AddContext;
 use types::{
@@ -179,6 +182,9 @@ async fn destroy_account(server: &Server, task: &TaskDestroyAccount) -> trc::Res
     // Unlink all accounts's blobs
     destroy_account_blobs(server, account_id).await?;
 
+    // inbuxa: #562: its calendar alarms would still fire, and fail, later
+    destroy_account_alarms(server, account_id).await?;
+
     // inbuxa: MT-20: what the account stored leaves its tenant's usage with
     // it. Read before the data goes and taken off after, so a retry after a
     // failed destroy (the counter still there) or a finished one (gone, so
@@ -216,6 +222,67 @@ async fn destroy_account(server: &Server, task: &TaskDestroyAccount) -> trc::Res
     }
 
     Ok(TaskResult::Success(vec![]))
+}
+
+/// inbuxa: #562: removes the account's queued calendar alarms. Each is
+/// keyed by its account and event (see `CalendarAlarm::build_write_ops`), so
+/// only that id range is read, and only alarm tasks of this account are taken:
+/// other tasks use generated ids that could fall in the same range.
+async fn destroy_account_alarms(server: &Server, account_id: u32) -> trc::Result<()> {
+    let mut alarms = Vec::new();
+    server
+        .store()
+        .iterate(
+            IterateParams::new(
+                ValueKey::from(ValueClass::TaskQueue(TaskQueueClass::Task {
+                    id: Id::from_parts(account_id, 0).id(),
+                })),
+                ValueKey::from(ValueClass::TaskQueue(TaskQueueClass::Task {
+                    id: Id::from_parts(account_id, u32::MAX).id(),
+                })),
+            )
+            .ascending(),
+            |key, value| {
+                // a row that can't be read is left for the task manager
+                let Ok(task) = Task::deserialize(value) else {
+                    return Ok(true);
+                };
+                let task_account_id = match &task {
+                    Task::CalendarAlarmEmail(task) => task.account_id,
+                    Task::CalendarAlarmNotification(task) => task.account_id,
+                    _ => return Ok(true),
+                };
+                if task_account_id.document_id() == account_id {
+                    alarms.push((key.deserialize_be_u64(U64_LEN)?, task.due_timestamp()));
+                }
+                Ok(true)
+            },
+        )
+        .await
+        .caused_by(trc::location!())?;
+
+    let mut batch = BatchBuilder::new();
+    for (id, due) in alarms {
+        if batch.is_large_batch() {
+            server
+                .store()
+                .write(std::mem::take(&mut batch).build_all())
+                .await
+                .caused_by(trc::location!())?;
+        }
+        batch
+            .clear(ValueClass::TaskQueue(TaskQueueClass::Task { id }))
+            .clear(ValueClass::TaskQueue(TaskQueueClass::Due { id, due }));
+    }
+    if !batch.is_empty() {
+        server
+            .store()
+            .write(batch.build_all())
+            .await
+            .caused_by(trc::location!())?;
+    }
+
+    Ok(())
 }
 
 pub async fn destroy_account_blobs(server: &Server, account_id: u32) -> trc::Result<()> {

@@ -33,7 +33,7 @@ use mail_parser::decoders::html::html_to_text;
 use registry::{
     schema::{
         enums::Permission,
-        structs::{TaskCalendarAlarmEmail, TaskCalendarAlarmNotification},
+        structs::{Account, TaskCalendarAlarmEmail, TaskCalendarAlarmNotification},
     },
     types::EnumImpl,
 };
@@ -109,11 +109,28 @@ async fn send_email_alarm(
     // Obtain access token
     let account_id = task.account_id.document_id();
     let document_id = task.document_id.document_id();
-    let access_token = server
-        .access_token(account_id)
-        .await
-        .caused_by(trc::location!())?
-        .build();
+    let access_token = match server.access_token(account_id).await {
+        Ok(access_token) => access_token.build(),
+        // inbuxa: #562: an account that no longer exists won't come back, so
+        // its alarm isn't retried
+        Err(err)
+            if server
+                .registry()
+                .object::<Account>(account_id.into())
+                .await?
+                .is_none() =>
+        {
+            trc::event!(
+                Calendar(trc::CalendarEvent::AlarmSkipped),
+                Reason = "Account no longer exists",
+                AccountId = account_id,
+                DocumentId = document_id,
+                CausedBy = err,
+            );
+            return Ok(TaskResult::Success(vec![]));
+        }
+        Err(err) => return Err(err.caused_by(trc::location!())),
+    };
 
     if !access_token.has_permission(Permission::CalendarAlarmsSend) {
         trc::event!(
@@ -623,7 +640,8 @@ async fn build_template(
     }
     variables.insert_single(CalendarTemplateVariable::LogoCid, logo_cid.as_str());
     if let Some(description) = description {
-        variables.insert_single(CalendarTemplateVariable::EventDescription, description);
+        // inbuxa: #564: its line breaks show in the email
+        variables.insert_text(CalendarTemplateVariable::EventDescription, description);
     }
     variables.insert_block(
         CalendarTemplateVariable::EventDetails,
