@@ -23,6 +23,8 @@ pub trait JmapAuthorization {
     fn assert_is_member(&self, account_id: Id) -> trc::Result<&Self>;
     /// inbuxa: AL-8: the account's own, or a delegate allowed to send as it.
     fn assert_can_send(&self, account_id: Id) -> trc::Result<&Self>;
+    /// inbuxa: #643: a member, or a full member of a shared mailbox.
+    fn assert_manages_sieve(&self, account_id: Id) -> trc::Result<&Self>;
     fn assert_has_jmap_permission(
         &self,
         request: &RequestMethod,
@@ -38,6 +40,14 @@ impl JmapAuthorization for AccessToken {
             .delegation(account_id.document_id())
             .is_some_and(|delegation| delegation.send_as)
         {
+            Ok(self)
+        } else {
+            self.assert_is_member(account_id)
+        }
+    }
+
+    fn assert_manages_sieve(&self, account_id: Id) -> trc::Result<&Self> {
+        if self.manages_sieve(account_id.document_id()) {
             Ok(self)
         } else {
             self.assert_is_member(account_id)

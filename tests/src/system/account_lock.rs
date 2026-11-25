@@ -500,6 +500,7 @@ pub async fn test(test: &mut TestServer) {
     );
 
     shared_mailbox(test, admin, &mut smtp_rx, &mut lmtp).await;
+    shared_mailbox_filters(admin, &mut smtp_rx, &mut lmtp).await;
 }
 
 /// AL-12: a lock reaches only an account whose every permission the caller
@@ -881,6 +882,480 @@ async fn shared_mailbox(
         support_id.as_str(),
         "MA-S: {response}"
     );
+}
+
+/// #643 (MA-S): a shared mailbox's full members manage its filters, which
+/// may only sort unless an administrator saves them; read and organize
+/// members can't, the session says so, and every change is recorded.
+async fn shared_mailbox_filters(
+    admin: &Account,
+    smtp_rx: &mut tokio::sync::mpsc::Receiver<crate::jmap::mail::submission::MockMessage>,
+    lmtp: &mut SmtpConnection,
+) {
+    println!("Running shared mailbox filter tests...");
+    let helpdesk = admin
+        .create_user_account(
+            "frontdesk@example.com",
+            "frontdesk-secret-6613",
+            "Help desk",
+            &[],
+            vec![],
+        )
+        .await;
+    let mut members = Vec::new();
+    for (name, access) in [
+        ("filer@example.com", "full"),
+        ("sorter@example.com", "organize"),
+        ("reader@example.com", "read"),
+    ] {
+        let member = admin
+            .create_user_account(name, "member-secret-2290", "Member", &[], vec![])
+            .await;
+        members.push((member, access));
+    }
+    let helpdesk_id = helpdesk.id_string().to_string();
+    // A folder to sort into, made while it could still sign in
+    let billing_id = helpdesk
+        .jmap_client()
+        .await
+        .mailbox_create("Billing", None::<String>, jmap_client::mailbox::Role::None)
+        .await
+        .unwrap()
+        .take_id();
+    let response = admin
+        .lock_set(
+            json!({"create": {"h": {"accountId": helpdesk_id, "kind": "sharedMailbox",
+            "delegates": members.iter().map(|(member, access)|
+                json!({"accountId": member.id_string(), "access": access})).collect::<Vec<_>>()}}}),
+        )
+        .await;
+    assert_eq!(
+        response["created"]["h"]["id"],
+        helpdesk_id.as_str(),
+        "#643: {response}"
+    );
+    let (filer, _) = &members[0];
+
+    // Session honesty: filters are offered to the full member only
+    for (member, access) in &members {
+        let session = member.jmap_session_object().await.0;
+        let offered = session["accounts"][helpdesk_id.as_str()]["accountCapabilities"]
+            .get(SIEVE)
+            .is_some();
+        assert_eq!(
+            offered,
+            *access == "full",
+            "#643: {access} member's session: {session}"
+        );
+    }
+
+    // Read and organize members get Forbidden, as before
+    for (member, access) in &members[1..] {
+        for (method, arguments) in [
+            (
+                "SieveScript/get",
+                json!({"accountId": helpdesk_id, "ids": null}),
+            ),
+            ("SieveScript/query", json!({"accountId": helpdesk_id})),
+            (
+                "SieveScript/set",
+                json!({"accountId": helpdesk_id, "destroy": ["a"]}),
+            ),
+        ] {
+            let response = sieve_call(member, method, arguments).await;
+            assert_eq!(
+                (response[0].as_str(), response[1]["type"].as_str()),
+                (Some("error"), Some("forbidden")),
+                "#643: {access} member, {method}: {response}"
+            );
+        }
+        let response = member
+            .http_post_raw(
+                &format!("{}/jmap/upload/{}/", member.base_url(), helpdesk_id),
+                "application/sieve",
+                b"keep;".to_vec(),
+            )
+            .await;
+        assert_ne!(response.status, 200, "#643: {access} member uploaded");
+    }
+
+    // The full member saves and activates a sorting script
+    let sorting = "require [\"fileinto\", \"imap4flags\"];\r\n\
+        if header :contains \"subject\" \"Invoice\" {\r\n  \
+        fileinto :flags \"\\\\Flagged\" \"Billing\";\r\n  stop;\r\n}\r\n";
+    let blob_id = sieve_upload(filer, &helpdesk_id, sorting).await;
+    let response = sieve_call(
+        filer,
+        "SieveScript/validate",
+        json!({"accountId": helpdesk_id, "blobId": blob_id}),
+    )
+    .await;
+    assert_eq!(response[0], "SieveScript/validate", "#643: {response}");
+    assert!(response[1]["error"].is_null(), "#643: {response}");
+    let response = sieve_call(
+        filer,
+        "SieveScript/set",
+        json!({"accountId": helpdesk_id,
+            "create": {"s": {"name": "Sort", "blobId": blob_id}},
+            "onSuccessActivateScript": "#s"}),
+    )
+    .await;
+    assert_eq!(
+        response[1]["created"]["s"]["isActive"], true,
+        "#643: the full member's sorting script: {response}"
+    );
+    let sort_id = response[1]["created"]["s"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let sort_blob = response[1]["created"]["s"]["blobId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // It reads the script back, and its text
+    let response = sieve_call(
+        filer,
+        "SieveScript/get",
+        json!({"accountId": helpdesk_id, "ids": null}),
+    )
+    .await;
+    assert_eq!(
+        response[1]["list"][0]["id"],
+        sort_id.as_str(),
+        "#643: {response}"
+    );
+    let download = filer
+        .http_get_raw(
+            &format!(
+                "{}/jmap/download/{}/{}/sort.sieve",
+                filer.base_url(),
+                helpdesk_id,
+                sort_blob
+            ),
+            None,
+        )
+        .await;
+    assert_eq!(
+        download.body,
+        sorting.as_bytes(),
+        "#643: download {}",
+        download.status
+    );
+
+    // Mail to the shared address is sorted by it
+    lmtp.ingest(
+        "carol@remote.org",
+        &["frontdesk@example.com"],
+        "From: carol@remote.org\r\nTo: frontdesk@example.com\r\nSubject: Invoice 3141\r\n\r\nPlease pay.\r\n",
+    )
+    .await;
+    let response = sieve_call(
+        filer,
+        "Email/query",
+        json!({"accountId": helpdesk_id, "filter": {"inMailbox": billing_id}}),
+    )
+    .await;
+    assert_eq!(
+        response[1]["ids"].as_array().map(Vec::len),
+        Some(1),
+        "#643: the invoice wasn't filed: {response}"
+    );
+
+    // Sort only: forwarding and automatic replies are refused, whatever
+    // the require line says, and the active script stays as it was
+    for script in [
+        "redirect \"elsewhere@remote.org\";",
+        "require \"copy\";\r\nredirect :copy \"elsewhere@remote.org\";",
+        "require \"vacation\";\r\nvacation \"We're closed.\";",
+        "require \"enotify\";\r\nnotify \"mailto:elsewhere@remote.org\";",
+        "require \"reject\";\r\nreject \"Not here.\";",
+        "require [\"fileinto\", \"ereject\"];\r\nif false { ereject \"No.\"; }\r\nfileinto \"Billing\";",
+    ] {
+        let blob_id = sieve_upload(filer, &helpdesk_id, script).await;
+        let response = sieve_call(
+            filer,
+            "SieveScript/set",
+            json!({"accountId": helpdesk_id,
+                "create": {"f": {"name": "Forward", "blobId": blob_id}},
+                "update": {sort_id.as_str(): {"blobId": blob_id}},
+                "onSuccessActivateScript": "#f"}),
+        )
+        .await;
+        for error in [
+            &response[1]["notCreated"]["f"],
+            &response[1]["notUpdated"][sort_id.as_str()],
+        ] {
+            assert_eq!(error["type"], "forbidden", "#643: {script}: {response}");
+            assert_eq!(
+                error["description"],
+                "Forwarding and automatic replies on a shared mailbox can only be saved by an administrator.",
+                "#643: {script}: {response}"
+            );
+        }
+    }
+    let response = sieve_call(
+        filer,
+        "SieveScript/get",
+        json!({"accountId": helpdesk_id, "ids": null}),
+    )
+    .await;
+    let list = response[1]["list"].as_array().unwrap();
+    assert_eq!(list.len(), 1, "#643: {response}");
+    assert_eq!(list[0]["isActive"], true, "#643: {response}");
+    assert_eq!(list[0]["blobId"], sort_blob.as_str(), "#643: {response}");
+    expect_nothing(smtp_rx).await;
+
+    // An administrator adds a forward to the active script. Its member may
+    // then edit the other rules and remove the forward, but not change it
+    let require = "require [\"fileinto\", \"imap4flags\", \"copy\"];\r\n";
+    let invoices = "if header :contains \"subject\" \"Invoice\" {\r\n  \
+        fileinto :flags \"\\\\Flagged\" \"Billing\";\r\n  stop;\r\n}\r\n";
+    let receipts = "if header :contains \"subject\" \"Receipt\" { fileinto \"Billing\"; }\r\n";
+    let forward = |to: &str| format!("redirect :copy \"{to}\";\r\n");
+    let response = sieve_save(
+        admin,
+        &helpdesk_id,
+        &sort_id,
+        format!("{require}{}{invoices}", forward("old-desk@remote.org")),
+    )
+    .await;
+    assert!(
+        response[1]["updated"].get(sort_id.as_str()).is_some(),
+        "#643: the administrator's forward: {response}"
+    );
+    let response = sieve_save(
+        filer,
+        &helpdesk_id,
+        &sort_id,
+        format!(
+            "{require}{}{receipts}{invoices}",
+            forward("old-desk@remote.org")
+        ),
+    )
+    .await;
+    let kept_blob = response[1]["updated"][sort_id.as_str()]["blobId"]
+        .as_str()
+        .unwrap_or_else(|| panic!("#643: another rule, the forward kept: {response}"))
+        .to_string();
+    let response = sieve_save(
+        filer,
+        &helpdesk_id,
+        &sort_id,
+        format!(
+            "{require}{}{receipts}{invoices}",
+            forward("new-desk@remote.org")
+        ),
+    )
+    .await;
+    assert_eq!(
+        response[1]["notUpdated"][sort_id.as_str()]["description"],
+        "Forwarding and automatic replies on a shared mailbox can only be saved by an administrator.",
+        "#643: the forward's address changed: {response}"
+    );
+    let response = sieve_call(
+        filer,
+        "SieveScript/get",
+        json!({"accountId": helpdesk_id, "ids": [sort_id]}),
+    )
+    .await;
+    assert_eq!(
+        response[1]["list"][0]["blobId"],
+        kept_blob.as_str(),
+        "#643: {response}"
+    );
+    let response = sieve_save(
+        filer,
+        &helpdesk_id,
+        &sort_id,
+        format!("{require}{receipts}{invoices}"),
+    )
+    .await;
+    assert!(
+        response[1]["updated"].get(sort_id.as_str()).is_some(),
+        "#643: the forward removed: {response}"
+    );
+
+    // A member doesn't turn on a script that forwards; an administrator
+    // does, and the member may turn it off and delete it
+    let blob_id = sieve_upload(admin, &helpdesk_id, "redirect \"elsewhere@remote.org\";").await;
+    let response = sieve_call(
+        admin,
+        "SieveScript/set",
+        json!({"accountId": helpdesk_id,
+            "create": {"a": {"name": "Forward to the old desk", "blobId": blob_id}}}),
+    )
+    .await;
+    let forward_id = response[1]["created"]["a"]["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("#643: the administrator's script: {response}"))
+        .to_string();
+    for arguments in [
+        json!({"accountId": helpdesk_id, "onSuccessActivateScript": forward_id}),
+        json!({"accountId": helpdesk_id, "update": {forward_id.as_str(): {"isActive": true}}}),
+    ] {
+        let response = sieve_call(filer, "SieveScript/set", arguments).await;
+        let error = &response[1]["notUpdated"][forward_id.as_str()];
+        assert_eq!(error["type"], "forbidden", "#643: {response}");
+        assert_eq!(
+            error["description"],
+            "Filters that forward or answer mail on a shared mailbox can only be turned on by an administrator.",
+            "#643: {response}"
+        );
+    }
+    let response = sieve_call(
+        filer,
+        "SieveScript/get",
+        json!({"accountId": helpdesk_id, "ids": [sort_id, forward_id]}),
+    )
+    .await;
+    assert_eq!(
+        response[1]["list"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| (s["id"].as_str().unwrap().to_string(), s["isActive"] == true))
+            .collect::<Vec<_>>(),
+        [(sort_id.clone(), true), (forward_id.clone(), false)],
+        "#643: {response}"
+    );
+    let response = sieve_call(
+        admin,
+        "SieveScript/set",
+        json!({"accountId": helpdesk_id, "onSuccessActivateScript": forward_id}),
+    )
+    .await;
+    assert_eq!(
+        response[1]["updated"][forward_id.as_str()]["isActive"],
+        true,
+        "#643: {response}"
+    );
+    let response = sieve_call(
+        filer,
+        "SieveScript/set",
+        json!({"accountId": helpdesk_id, "onSuccessDeactivateScript": true}),
+    )
+    .await;
+    assert_eq!(
+        response[1]["updated"][forward_id.as_str()]["isActive"],
+        false,
+        "#643: {response}"
+    );
+    let response = sieve_call(
+        filer,
+        "SieveScript/set",
+        json!({"accountId": helpdesk_id, "destroy": [forward_id]}),
+    )
+    .await;
+    assert_eq!(
+        response[1]["destroyed"][0],
+        forward_id.as_str(),
+        "#643: {response}"
+    );
+
+    // Every change is in the audit log, with who made it and where
+    let records = sieve_records(admin, filer, &helpdesk_id).await;
+    let seen = |action: &str, details: Option<&str>, status: &str| {
+        records.iter().any(|r| {
+            r["action"] == action
+                && details.is_none_or(|d| r["details"] == d)
+                && r["outcome"]["status"] == status
+                && r["target"]["accountId"] == helpdesk_id.as_str()
+                && r["actor"]["accountId"] == filer.id_string()
+        })
+    };
+    for (action, details, status) in [
+        ("create", None, "success"),
+        ("update", Some("Activated"), "success"),
+        ("update", Some("Deactivated"), "success"),
+        ("destroy", None, "success"),
+        // The refused forwarding scripts and the activations asked for
+        ("create", None, "refused"),
+        ("update", None, "refused"),
+        ("update", Some("Activated"), "refused"),
+    ] {
+        assert!(
+            seen(action, details, status),
+            "#643: no {action} {details:?} {status} record: {records:?}"
+        );
+    }
+    assert!(
+        sieve_records(admin, admin, &helpdesk_id)
+            .await
+            .iter()
+            .any(|r| r["action"] == "create" && r["outcome"]["status"] == "success"),
+        "#643: the administrator's script wasn't recorded"
+    );
+
+    let response = admin.lock_set(json!({"destroy": [helpdesk_id]})).await;
+    assert_eq!(
+        response["destroyed"][0],
+        helpdesk_id.as_str(),
+        "#643: {response}"
+    );
+}
+
+const SIEVE: &str = "urn:ietf:params:jmap:sieve";
+
+async fn sieve_call(account: &Account, method: &str, arguments: Value) -> Value {
+    let using = [USING, &[SIEVE]].concat();
+    let response = account
+        .jmap_request(&using, json!([[method, arguments, "0"]]))
+        .await
+        .0;
+    response
+        .pointer("/methodResponses/0")
+        .cloned()
+        .unwrap_or_else(|| panic!("{method}: {response}"))
+}
+
+/// Replaces a script's text.
+async fn sieve_save(account: &Account, account_id: &str, script_id: &str, script: String) -> Value {
+    let blob_id = sieve_upload(account, account_id, &script).await;
+    sieve_call(
+        account,
+        "SieveScript/set",
+        json!({"accountId": account_id, "update": {script_id: {"blobId": blob_id}}}),
+    )
+    .await
+}
+
+async fn sieve_upload(account: &Account, account_id: &str, script: &str) -> String {
+    let response = account
+        .http_post_raw(
+            &format!("{}/jmap/upload/{account_id}/", account.base_url()),
+            "application/sieve",
+            script.as_bytes().to_vec(),
+        )
+        .await;
+    assert_eq!(
+        response.status,
+        200,
+        "#643: upload: {}",
+        String::from_utf8_lossy(&response.body)
+    );
+    serde_json::from_slice::<Value>(&response.body).unwrap()["blobId"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+/// The audit records of `actor`'s changes to `account_id`'s scripts.
+async fn sieve_records(admin: &Account, actor: &Account, account_id: &str) -> Vec<Value> {
+    let (_, query) = admin
+        .call(
+            "inbuxa:AuditEvent/query",
+            json!({"accountId": admin.id_string(), "filter": {"actorId": actor.id_string(),
+                "accountId": account_id, "targetKind": "SieveScript"}}),
+        )
+        .await;
+    let (_, records) = admin
+        .call(
+            "inbuxa:AuditEvent/get",
+            json!({"accountId": admin.id_string(), "ids": query["ids"]}),
+        )
+        .await;
+    records["list"].as_array().cloned().unwrap_or_default()
 }
 
 /// Runs these tests alone: `cargo test -p tests account_lock_tests -- --ignored`.

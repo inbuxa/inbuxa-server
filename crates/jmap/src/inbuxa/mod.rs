@@ -41,6 +41,7 @@ pub mod relay_message; // inbuxa: a relay's queues
 pub mod scheduled_reports; // inbuxa: scheduled reports and the weekly digest
 pub mod security_acceptance;
 pub mod seed; // inbuxa: K-S8: a new store's setup from a file (--seed)
+pub mod shared_filters; // inbuxa: #643: a shared mailbox's filters
 pub mod sharing_policy;
 pub mod store_check; // inbuxa: checking the store's blobs
 pub mod store_snapshot; // inbuxa: a snapshot of the store

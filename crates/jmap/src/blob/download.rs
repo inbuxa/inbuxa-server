@@ -156,11 +156,20 @@ impl BlobDownload for Server {
                                         EVENT_VIEW_PRIVATE | EVENT_VIEW_HIDE_ATTENDEES,
                                     )
                                     .contains(*document_id),
+                                // inbuxa: #643: a shared mailbox's full
+                                // members read its filters
+                                Collection::SieveScript => {
+                                    access_token.is_full_shared_mailbox_delegate(*account_id)
+                                }
                                 _ => false,
                             }
                         }
                     }
-                    BlobClass::Reserved { account_id, .. } => access_token.is_member(*account_id),
+                    // inbuxa: #643: and what a shared mailbox's full
+                    // members upload to it
+                    BlobClass::Reserved { account_id, .. } => {
+                        access_token.manages_sieve(*account_id)
+                    }
                 }))
     }
 }

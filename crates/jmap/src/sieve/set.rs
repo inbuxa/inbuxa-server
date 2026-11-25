@@ -47,7 +47,19 @@ pub struct SetContext<'x> {
     access_token: &'x AccessToken,
     account_cache: &'x AccountCache,
     response: SetResponse<Sieve>,
+    /// inbuxa: #643: saved by a shared mailbox's member who isn't an
+    /// administrator, who may only sort
+    sort_only: bool,
 }
+
+/// inbuxa: #643: why a shared mailbox's member can't add or change an
+/// action that sends or answers mail.
+pub const SORT_ONLY: &str =
+    "Forwarding and automatic replies on a shared mailbox can only be saved by an administrator.";
+
+/// inbuxa: #643: why a shared mailbox's member can't turn on a script that
+/// sends or answers mail.
+pub const ACTIVATE_ADMIN_ONLY: &str = "Filters that forward or answer mail on a shared mailbox can only be turned on by an administrator.";
 
 pub trait SieveScriptSet: Sync + Send {
     fn sieve_script_set(
@@ -83,6 +95,7 @@ impl SieveScriptSet for Server {
             account_id,
             access_token,
             account_cache: &account,
+            sort_only: !access_token.is_member(account_id),
             response: SetResponse::from_request(&request, self.core.jmap.set_max_objects)?
                 .with_state(
                     self.assert_state(
@@ -102,6 +115,11 @@ impl SieveScriptSet for Server {
         {
             request.arguments.on_success_activate_script = None;
         }
+
+        // inbuxa: #643: a member may keep a script that sends mail active,
+        // and may not turn one on
+        let active_script_id = self.sieve_script_get_active_id(account_id).await?;
+        let mut compiled_sends = Vec::new();
 
         // Process creates
         let mut batch = BatchBuilder::new();
@@ -244,6 +262,29 @@ impl SieveScriptSet for Server {
                     .await?
                 {
                     Ok(mut result) => {
+                        // inbuxa: #643: isActive on a script that sends mail
+                        if ctx.sort_only
+                            && result.set_item == Some(true)
+                            && active_script_id != Some(document_id)
+                            && match result.sends_mail {
+                                Some(sends_mail) => sends_mail,
+                                None => !stored_sending_actions(self, account_id, document_id)
+                                    .await?
+                                    .is_empty(),
+                            }
+                        {
+                            ctx.response.not_updated.append(
+                                id,
+                                SetError::forbidden()
+                                    .with_property(SieveProperty::IsActive)
+                                    .with_description(ACTIVATE_ADMIN_ONLY),
+                            );
+                            continue 'update;
+                        }
+                        if let Some(sends_mail) = result.sends_mail {
+                            compiled_sends.push((document_id, sends_mail));
+                        }
+
                         // Prepare write batch
                         batch
                             .with_account_id(account_id)
@@ -321,7 +362,6 @@ impl SieveScriptSet for Server {
         }
 
         // Process deletions
-        let active_script_id = self.sieve_script_get_active_id(account_id).await?;
         for id in will_destroy {
             let document_id = id.document_id();
             if sieve_ids.contains(document_id) {
@@ -361,6 +401,30 @@ impl SieveScriptSet for Server {
                 }
             } else if !on_success_deactivate_script && is_active {
                 on_success_deactivate_script = true;
+            }
+        }
+
+        // inbuxa: #643: a member doesn't turn on a script that sends mail;
+        // an administrator does
+        if ctx.sort_only
+            && let Some(MaybeIdReference::Id(id)) = &request.arguments.on_success_activate_script
+        {
+            let id = *id;
+            let document_id = id.document_id();
+            if active_script_id != Some(document_id)
+                && sieve_ids.contains(document_id)
+                && match compiled_sends.iter().find(|(d, _)| *d == document_id) {
+                    Some((_, sends_mail)) => *sends_mail,
+                    None => !stored_sending_actions(self, account_id, document_id)
+                        .await?
+                        .is_empty(),
+                }
+            {
+                ctx.response.not_updated.append(
+                    id,
+                    SetError::forbidden().with_description(ACTIVATE_ADMIN_ONLY),
+                );
+                request.arguments.on_success_activate_script = None;
             }
         }
 
@@ -555,6 +619,7 @@ impl SieveScriptSet for Server {
             }
         }
 
+        let mut sends_mail = None;
         let blob_update = if let Some(blob_id) = blob_id {
             if update.as_ref().is_none_or( |(document_id, _)| {
                 !matches!(blob_id.class, BlobClass::Linked { account_id, collection, document_id: d } if account_id == ctx.account_id && collection == u8::from(Collection::SieveScript) && *document_id == d)
@@ -582,6 +647,32 @@ impl SieveScriptSet for Server {
                     // Compile script
                     match self.core.sieve.untrusted_compiler.compile(&bytes) {
                         Ok(script) => {
+                            // inbuxa: #643: a member may keep or remove the
+                            // actions that send mail an administrator saved
+                            // in this script, never add or change one. Read
+                            // from what the script does, not what it requires
+                            sends_mail = Some(script.sends_mail());
+                            if ctx.sort_only
+                                && sends_mail == Some(true)
+                                && !is_sub_multiset(
+                                    &script.sending_actions(),
+                                    &match &update {
+                                        Some((document_id, _)) => {
+                                            stored_sending_actions(
+                                                self,
+                                                ctx.account_id,
+                                                *document_id,
+                                            )
+                                            .await?
+                                        }
+                                        None => Vec::new(),
+                                    },
+                                )
+                            {
+                                return Ok(Err(SetError::forbidden()
+                                    .with_property(SieveProperty::BlobId)
+                                    .with_description(SORT_ONLY)));
+                            }
                             changes.size = bytes.len() as u32;
                             bytes.extend(Archiver::new(script).untrusted().serialize().caused_by(trc::location!())?);
                             bytes.into()
@@ -620,6 +711,7 @@ impl SieveScriptSet for Server {
                 .with_current_opt(update.map(|(_, current)| current)),
             blob_update,
             set_item,
+            sends_mail,
         }))
     }
 }
@@ -628,4 +720,91 @@ pub struct SetItemResponse<'x> {
     builder: ObjectIndexBuilder<&'x ArchivedSieveScript, SieveScript>,
     blob_update: Option<Vec<u8>>,
     set_item: Option<bool>,
+    /// inbuxa: #643: whether a new script sends mail, when one was compiled
+    sends_mail: Option<bool>,
+}
+
+/// inbuxa: #643: the actions that send mail in a stored script, compiled
+/// from its text. A script that no longer compiles has none, so nothing it
+/// held counts as kept.
+async fn stored_sending_actions(
+    server: &Server,
+    account_id: u32,
+    document_id: u32,
+) -> trc::Result<Vec<String>> {
+    let Some(archive) = server
+        .store()
+        .get_value::<Archive<AlignedBytes>>(ValueKey::archive(
+            account_id,
+            Collection::SieveScript,
+            document_id,
+        ))
+        .await
+        .caused_by(trc::location!())?
+    else {
+        return Ok(Vec::new());
+    };
+    let script = archive
+        .unarchive::<SieveScript>()
+        .caused_by(trc::location!())?;
+    let size = u32::from(script.size) as usize;
+    Ok(server
+        .blob_store()
+        .get_blob(script.blob_hash.0.as_ref(), 0..usize::MAX)
+        .await
+        .caused_by(trc::location!())?
+        .and_then(|bytes| {
+            server
+                .core
+                .sieve
+                .untrusted_compiler
+                .compile(bytes.get(..size)?)
+                .ok()
+        })
+        .map(|script| script.sending_actions())
+        .unwrap_or_default())
+}
+
+/// inbuxa: #643: every item of `new` is in `old`, as often or less; both
+/// sorted.
+fn is_sub_multiset(new: &[String], old: &[String]) -> bool {
+    let mut old = old.iter();
+    'new: for item in new {
+        for candidate in old.by_ref() {
+            match candidate.cmp(item) {
+                std::cmp::Ordering::Less => continue,
+                std::cmp::Ordering::Equal => continue 'new,
+                std::cmp::Ordering::Greater => return false,
+            }
+        }
+        return false;
+    }
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn sending_actions_may_be_kept_or_removed() {
+        let list = |items: &[&str]| items.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let old = list(&["redirect a", "redirect a", "vacation"]);
+        for kept in [
+            &[][..],
+            &["redirect a"],
+            &["redirect a", "redirect a"],
+            &["redirect a", "vacation"],
+            &["redirect a", "redirect a", "vacation"],
+        ] {
+            assert!(super::is_sub_multiset(&list(kept), &old), "{kept:?}");
+        }
+        for changed in [
+            &["redirect b"][..],
+            &["redirect a", "redirect a", "redirect a"],
+            &["notify", "redirect a"],
+            &["redirect a", "redirect a", "vacation", "vacation"],
+            &["zzz"],
+        ] {
+            assert!(!super::is_sub_multiset(&list(changed), &old), "{changed:?}");
+        }
+    }
 }

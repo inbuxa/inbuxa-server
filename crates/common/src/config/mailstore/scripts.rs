@@ -301,6 +301,66 @@ mod tests {
         }
     }
 
+    // inbuxa: #643: what a shared mailbox's member may save is read from
+    // the compiled instructions, not from what the script requires
+    #[test]
+    fn sieve_sends_mail_reads_the_instructions() {
+        let sends = |script: &str| {
+            sieve::Compiler::new()
+                .compile(script.as_bytes())
+                .unwrap_or_else(|err| panic!("{script}: {err}"))
+                .sends_mail()
+        };
+        for script in [
+            "redirect \"someone@example.com\";",
+            "require \"copy\";\nredirect :copy \"someone@example.com\";",
+            "require \"vacation\";\nvacation \"Away.\";",
+            "require \"enotify\";\nnotify \"mailto:someone@example.com\";",
+            "require \"reject\";\nreject \"Not here.\";",
+            "require \"ereject\";\nereject \"Not here.\";",
+            // Behind a test, and in a branch that may never run
+            "require [\"fileinto\", \"vacation\"];\nif header :contains \"subject\" \"x\" {\n  fileinto \"X\";\n} else {\n  vacation \"Away.\";\n}",
+        ] {
+            assert!(sends(script), "{script}");
+        }
+        for script in [
+            "keep;",
+            "discard;",
+            "require \"fileinto\";\nif header :contains \"subject\" \"invoice\" { fileinto \"Billing\"; stop; }",
+            "require [\"imap4flags\", \"fileinto\"];\naddflag \"\\\\Seen\";\nfileinto :flags \"\\\\Flagged\" \"Done\";",
+            // Required, never used
+            "require [\"vacation\", \"enotify\", \"reject\", \"copy\"];\nkeep;",
+        ] {
+            assert!(!sends(script), "{script}");
+        }
+
+        // The same actions compare equal across other edits; a changed
+        // argument doesn't
+        let actions = |script: &str| {
+            sieve::Compiler::new()
+                .compile(script.as_bytes())
+                .unwrap_or_else(|err| panic!("{script}: {err}"))
+                .sending_actions()
+        };
+        let forward = "require [\"fileinto\", \"copy\", \"vacation\"];\nredirect :copy \"a@example.com\";\nvacation :days 3 \"Away.\";\n";
+        let base = actions(forward);
+        assert_eq!(base.len(), 3, "{base:?}");
+        assert_eq!(
+            actions(&format!(
+                "{forward}if header :contains \"subject\" \"x\" {{ fileinto \"X\"; }}\n"
+            )),
+            base
+        );
+        for changed in [
+            forward.replace("a@example.com", "b@example.com"),
+            forward.replace(":copy ", ""),
+            forward.replace(":days 3", ":days 4"),
+            forward.replace("Away.", "Gone."),
+        ] {
+            assert_ne!(actions(&changed), base, "{changed}");
+        }
+    }
+
     // inbuxa: a :regex key compiles to at most 1 MiB; it could take ten
     #[test]
     fn sieve_regexes_are_size_limited() {

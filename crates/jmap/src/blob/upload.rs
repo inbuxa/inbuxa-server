@@ -208,8 +208,9 @@ impl BlobUpload for Server {
         // inbuxa: an upload is stored under, and charged to, the account in the
         // path, so only that account's owner, a member or an impersonator may
         // use it (the same rule as Blob/upload). Checked before anything is
-        // counted.
-        if !access_token.is_member(account_id.document_id()) {
+        // counted. #643: a shared mailbox's full members upload its filters
+        // there too.
+        if !access_token.manages_sieve(account_id.document_id()) {
             return Err(trc::SecurityEvent::Unauthorized
                 .into_err()
                 .ctx(trc::Key::AccountId, access_token.account_id())

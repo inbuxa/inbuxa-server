@@ -39,10 +39,7 @@ use crate::{
     share_notification::{
         get::ShareNotificationGet, query::ShareNotificationQuery, set::ShareNotificationSet,
     },
-    sieve::{
-        get::SieveScriptGet, query::SieveScriptQuery, set::SieveScriptSet,
-        validate::SieveScriptValidate,
-    },
+    sieve::{get::SieveScriptGet, query::SieveScriptQuery, validate::SieveScriptValidate},
     submission::{get::EmailSubmissionGet, query::EmailSubmissionQuery, set::EmailSubmissionSet},
     thread::get::ThreadGet,
     vacation::{get::VacationResponseGet, set::VacationResponseSet},
@@ -484,7 +481,8 @@ impl RequestHandler for Server {
                 }
                 GetRequestMethod::Sieve(mut req) => {
                     resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
-                    access_token.assert_is_member(req.account_id)?;
+                    // inbuxa: #643: a shared mailbox's full members too
+                    access_token.assert_manages_sieve(req.account_id)?;
 
                     self.sieve_script_get(*req).await?.into()
                 }
@@ -823,7 +821,8 @@ impl RequestHandler for Server {
                 }
                 QueryRequestMethod::Sieve(mut req) => {
                     resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
-                    access_token.assert_is_member(req.account_id)?;
+                    // inbuxa: #643: a shared mailbox's full members too
+                    access_token.assert_manages_sieve(req.account_id)?;
 
                     self.sieve_script_query(*req).await?.into()
                 }
@@ -949,9 +948,12 @@ impl RequestHandler for Server {
                 }
                 SetRequestMethod::Sieve(mut req) => {
                     resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
-                    access_token.assert_is_member(req.account_id)?;
+                    // inbuxa: #643: a shared mailbox's full members too,
+                    // sorting only, and every change to its scripts is
+                    // recorded (AU-3)
+                    access_token.assert_manages_sieve(req.account_id)?;
 
-                    self.sieve_script_set(*req, access_token, session)
+                    crate::inbuxa::shared_filters::set(self, access_token, session, *req)
                         .await?
                         .into()
                 }
@@ -1738,7 +1740,8 @@ impl RequestHandler for Server {
             }
             RequestMethod::ValidateScript(mut req) => {
                 resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
-                access_token.assert_is_member(req.account_id)?;
+                // inbuxa: #643: a shared mailbox's full members too
+                access_token.assert_manages_sieve(req.account_id)?;
 
                 self.sieve_script_validate(*req, access_token).await?.into()
             }
