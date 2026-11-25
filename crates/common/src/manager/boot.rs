@@ -280,6 +280,15 @@ impl BootManager {
         } else {
             super::listener_ports::recovery_mode_addr(None, None).unwrap()
         };
+        // inbuxa: #560: and so does a recovery-mode URL that isn't one
+        if registry.is_recovery_mode() {
+            super::listener_ports::recovery_mode_url(
+                types::branding::env_var("RECOVERY_MODE_URL")
+                    .ok()
+                    .as_deref(),
+            )
+            .unwrap_or_else(|err| failed(&err));
+        }
         let mut bootstrap = Bootstrap::new(registry).await;
 
         // inbuxa: K-S8: a seed is only for a new store, which the defaults

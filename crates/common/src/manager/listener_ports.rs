@@ -268,9 +268,93 @@ pub fn recovery_mode_addr(
     }
 }
 
+/// inbuxa: #560: the address recovery and bootstrap mode are reached at
+/// (`https://mail.example.org:8080`). The configured public URL names the
+/// HTTPS listener, which doesn't run in those modes, so without this every
+/// URL they build is relative: the device verification URI, the OAuth and
+/// OpenID metadata, the token issuer and the JMAP session.
+pub const RECOVERY_URL_ENV_VAR: &str = "INBUXA_RECOVERY_MODE_URL";
+
+/// The base URL from [`RECOVERY_URL_ENV_VAR`], as `scheme://host[:port]`,
+/// or `None` when it isn't set. Only a scheme (http or https), a host and a
+/// port are taken: a path, query or user name is refused rather than
+/// dropped, as is anything that isn't a URL. It is never taken from a
+/// request's Host header, so a client can't choose the token issuer.
+pub fn recovery_mode_url(value: Option<&str>) -> Result<Option<String>, String> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    let invalid = |why: &str| {
+        format!(
+            "{RECOVERY_URL_ENV_VAR}: '{value}' {why} (for example \
+             https://mail.example.org:8080)"
+        )
+    };
+    let uri = value
+        .parse::<hyper::Uri>()
+        .map_err(|_| invalid("is not a URL"))?;
+    let scheme = uri
+        .scheme_str()
+        .filter(|scheme| matches!(*scheme, "http" | "https"))
+        .ok_or_else(|| invalid("needs to start with http:// or https://"))?;
+    let authority = uri
+        .authority()
+        .filter(|authority| !authority.host().is_empty())
+        .ok_or_else(|| invalid("has no host"))?;
+    if authority.as_str().contains('@') {
+        return Err(invalid("can't hold a user name"));
+    }
+    if !matches!(uri.path(), "" | "/") || uri.query().is_some() || value.contains('#') {
+        return Err(invalid("can only be a scheme, host and port, with no path"));
+    }
+    Ok(Some(format!(
+        "{scheme}://{}",
+        authority.as_str().to_ascii_lowercase()
+    )))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recovery_mode_url_read() {
+        for (value, expected) in [
+            (None, Ok(None)),
+            (Some(""), Ok(None)),
+            (Some("  "), Ok(None)),
+            (
+                Some("https://Mail.Example.org:8080"),
+                Ok(Some("https://mail.example.org:8080")),
+            ),
+            (
+                Some(" http://192.0.2.10:8080/ "),
+                Ok(Some("http://192.0.2.10:8080")),
+            ),
+            (Some("http://[::1]:8080"), Ok(Some("http://[::1]:8080"))),
+            (
+                Some("https://mail.example.org"),
+                Ok(Some("https://mail.example.org")),
+            ),
+            (Some("mail.example.org:8080"), Err("http:// or https://")),
+            (Some("ftp://mail.example.org"), Err("http:// or https://")),
+            (Some("https://mail.example.org/admin"), Err("no path")),
+            (Some("https://mail.example.org/?a=b"), Err("no path")),
+            (Some("https://mail.example.org/#x"), Err("no path")),
+            (Some("https://user@mail.example.org"), Err("user name")),
+            (Some("not a url"), Err("")),
+        ] {
+            let result = recovery_mode_url(value);
+            match expected {
+                Ok(expected) => assert_eq!(result, Ok(expected.map(str::to_string)), "{value:?}"),
+                Err(fragment) => {
+                    let err = result.expect_err(&format!("{value:?} should be refused"));
+                    assert!(err.contains(fragment), "{value:?}: {err}");
+                    assert!(err.starts_with(RECOVERY_URL_ENV_VAR), "{err}");
+                }
+            }
+        }
+    }
 
     #[test]
     fn recovery_mode_addr_read() {
