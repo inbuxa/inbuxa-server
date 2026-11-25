@@ -43,3 +43,18 @@ ENV INBUXA_RELAY_CONTAINER=1
 EXPOSE 25 443
 ENTRYPOINT ["/usr/local/bin/inbuxa-relay"]
 CMD ["run", "--state", "/var/lib/inbuxa-relay"]
+
+# Last in the image, after everything that does work: a value that changes
+# every build (the version, the commit) then never costs a cached layer.
+# What the image says it is, for registries and anyone inspecting it.
+ARG INBUXA_VERSION=dev
+ARG INBUXA_REVISION=""
+LABEL org.opencontainers.image.title="inbuxa Relay" \
+      org.opencontainers.image.description="A small relay on a public machine that takes mail in for an inbuxa server and sends its mail on, so the server never opens a mail port to the internet." \
+      org.opencontainers.image.url="https://inbuxa.org/" \
+      org.opencontainers.image.documentation="https://docs.inbuxa.org/run/relay/" \
+      org.opencontainers.image.source="https://git.coffeylabs.org/inbuxa/inbuxa-server" \
+      org.opencontainers.image.licenses="AGPL-3.0-only" \
+      org.opencontainers.image.vendor="Coffey Labs LLC" \
+      org.opencontainers.image.version="$INBUXA_VERSION" \
+      org.opencontainers.image.revision="$INBUXA_REVISION"

@@ -91,3 +91,18 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
     CMD curl -fsSk -H "X-Forwarded-For: 127.0.0.1" "$INBUXA_HEALTHCHECK_URL" || curl -fsS -H "X-Forwarded-For: 127.0.0.1" http://127.0.0.1:8080/healthz/live || exit 1
 ENTRYPOINT ["/usr/local/bin/inbuxa"]
 CMD ["--config", "/etc/inbuxa/config.json"]
+
+# Last in the image, after everything that does work: a value that changes
+# every build (the version, the commit) then never costs a cached layer.
+# What the image says it is, for registries and anyone inspecting it.
+ARG INBUXA_VERSION=dev
+ARG INBUXA_REVISION=""
+LABEL org.opencontainers.image.title="inbuxa server" \
+      org.opencontainers.image.description="The inbuxa mail server: JMAP, IMAP, SMTP and DAV, the store, the filters and the administration API, in one Rust binary." \
+      org.opencontainers.image.url="https://inbuxa.org/" \
+      org.opencontainers.image.documentation="https://docs.inbuxa.org/" \
+      org.opencontainers.image.source="https://git.coffeylabs.org/inbuxa/inbuxa-server" \
+      org.opencontainers.image.licenses="AGPL-3.0-only" \
+      org.opencontainers.image.vendor="Coffey Labs LLC" \
+      org.opencontainers.image.version="$INBUXA_VERSION" \
+      org.opencontainers.image.revision="$INBUXA_REVISION"
