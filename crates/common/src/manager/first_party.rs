@@ -45,8 +45,9 @@ use store::{
         bootstrap::Bootstrap,
         write::{RegistryWrite, RegistryWriteResult},
     },
-    write::AnyKey,
+    write::{AnyClass, AnyKey, BatchBuilder, ValueClass},
 };
+use trc::AddContext;
 
 /// The client id the upstream web interface uses when its application names none.
 pub const WEB_INTERFACE_CLIENT_ID: &str = "inbuxa-webui";
@@ -309,22 +310,29 @@ pub async fn ensure_first_party_clients(bp: &mut Bootstrap) -> trc::Result<()> {
     Ok(())
 }
 
+/// Set once a start has looked for upstream's web interface, so an operator
+/// who switches it back on keeps it on.
+pub const IMPORTED_WEB_INTERFACE_CHECKED_KEY: &[u8] = b"Fw";
+
 /// A store brought over from Stalwart still lists upstream's web interface,
 /// which would be downloaded and served at `/admin` (docs/spec/import-0.16.md).
-/// The first time inbuxa opens a store, before it has inbuxa's store version,
-/// that application is switched off, and the record is kept so an operator can
-/// switch it back on. The version is written later in the same start, so an
-/// application switched back on stays on.
+/// It can't work here: it asks for upstream's registry capability by its old
+/// name. The first start that opens a store, normal or in recovery mode,
+/// switches that application off and keeps the record, so an operator can
+/// switch it back on, and then notes that it looked, so it stays on.
+///
+/// #638: this used to key off the store version mark, but recovery mode
+/// skipped the switch-off and still wrote the mark, so a store that went
+/// through recovery mode first served upstream's interface from then on.
 pub async fn disable_imported_web_interface(bp: &mut Bootstrap) -> trc::Result<()> {
-    let marked = bp
+    let checked = bp
         .data_store
-        .get_value::<u32>(AnyKey {
+        .key_exists(AnyKey {
             subspace: SUBSPACE_INBUXA,
-            key: crate::INBUXA_STORE_VERSION_KEY.to_vec(),
+            key: IMPORTED_WEB_INTERFACE_CHECKED_KEY.to_vec(),
         })
-        .await?
-        .is_some();
-    if marked {
+        .await?;
+    if checked {
         return Ok(());
     }
 
@@ -357,6 +365,19 @@ pub async fn disable_imported_web_interface(bp: &mut Bootstrap) -> trc::Result<(
             Url = updated.resource_url,
         );
     }
+
+    let mut batch = BatchBuilder::new();
+    batch.set(
+        ValueClass::Any(AnyClass {
+            subspace: SUBSPACE_INBUXA,
+            key: IMPORTED_WEB_INTERFACE_CHECKED_KEY.to_vec(),
+        }),
+        vec![1u8],
+    );
+    bp.data_store
+        .write(batch.build_all())
+        .await
+        .caused_by(trc::location!())?;
 
     Ok(())
 }

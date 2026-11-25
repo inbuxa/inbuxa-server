@@ -88,6 +88,11 @@ async fn insert_safe_defaults(bp: &mut Bootstrap) -> trc::Result<()> {
     }
 
     if is_recovery_mode {
+        // inbuxa: #638: a store brought over from Stalwart is often opened in
+        // recovery mode first, to move its paths; upstream's web interface is
+        // switched off there too, before the applications load
+        super::first_party::disable_imported_web_interface(bp).await?;
+
         // inbuxa: a server that has never started normally is still a new
         // install after recovery mode, even once a role is made there (#265)
         if bp.registry.count_object(ObjectType::Role).await? == 0 {
