@@ -15,6 +15,35 @@ https://github.com/inbuxa/inbuxa-server/security/advisories.
 Every version PR adds that version's entry here. CI refuses a version this
 file has no entry for (`tools/release/version.py --changelog`).
 
+## [27.1-rc.48] - 2026-11-25
+
+27.1-rc.47 with filters for shared mailboxes, two fixes, and dependency
+updates.
+
+### Added
+- Shared mailboxes: a shared mailbox's Full members can manage its filters
+  (SieveScript/get, query, set and validate on the shared mailbox), sorting
+  only. Forwarding and automatic replies (redirect, vacation, notify,
+  reject) are added, changed and turned on by an administrator; a member
+  may keep or remove them. Every change to a shared mailbox's filters is in
+  the audit log, and the session offers filters only on accounts where they
+  can be managed. Before this, a shared mailbox had no filters of its own.
+  (#643, #646)
+
+### Fixed
+- Email/get: `header:List-Id:asText` (and asText on any header parsed as
+  something other than text) answered null even when the message had the
+  header. It now returns the header's text. (#642, #644)
+- Recovery mode: a server imported from Stalwart served its old web
+  interface in recovery mode. Recovery mode now switches that interface
+  off. Thanks to Moritz. (#638, #639)
+
+### Changed
+- Dependencies: url 2.5.9, libz-sys 1.1.33 and zstd 0.13.5, for dependency
+  advisories. (#641)
+- Images: the server and relay images carry OCI labels (title,
+  description, license, source, version, revision). (#637)
+
 ## [27.1-rc.47] - 2026-11-25
 
 27.1-rc.46 with security fixes (two high, four medium, two low, and two
