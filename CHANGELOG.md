@@ -11,6 +11,74 @@ https://github.com/inbuxa/inbuxa-server/security/advisories.
 Every version PR adds that version's entry here. CI refuses a version this
 file has no entry for (`tools/release/changelog-check.py`).
 
+## [2026.11.25] - 2026-11-25
+
+2026.11.24.2 with security fixes (two high, four medium, two low, and two
+smaller hardening fixes). 2026.9.20 to 2026.11.24.2 are affected, and so is
+27.1 up to and including 27.1-rc.46. The same fixes are in 27.1-rc.47.
+
+### Security
+High
+- OAuth: a tenant administrator could register a client and use the real
+  sign-in page to get full-access tokens for accounts in other tenants or
+  for the server administrator. A client a tenant owns now signs in,
+  approves devices for and refreshes tokens for that tenant's accounts
+  only, and the server's own client ids can't be taken by a tenant.
+  (GHSA-3xqc-x8f6-2242, #632)
+- OAuth: an app password or API key could sign in on the OAuth and device
+  pages without the second factor and get a token for the whole account.
+  Those pages now take only the account's password or a passkey.
+  (GHSA-v596-p29h-9jfq, #632)
+
+Medium
+- Multi-tenancy: a tenant administrator could see every recipient of a
+  queued message with one recipient on its domains, Bcc included, and
+  download, cancel or delete it. A tenant now has the whole message only
+  when its own person sent it or every recipient is its own; otherwise it
+  sees and manages its own recipients only. (GHSA-v6rf-rr22-4mfr, #632)
+- Multi-tenancy: a tenant's domain could name the server's host or another
+  tenant's domain in its certificate. A tenant domain's certificate names
+  must now be the domain or names under the tenant's proven domains.
+  (GHSA-5wcm-3mfx-xpfx, #632)
+- IMAP and ManageSieve: a request of many tiny tokens held up to 34 times
+  the request size limit in memory. Every token now counts its memory.
+  (GHSA-9rvj-p5hr-wxh4, #632)
+- Settings: config.json, which holds the data store password, was written
+  readable by everyone on most installs. It is now written 0600 and
+  replaced in one step. (GHSA-g9xf-p2pw-hpvp, #632)
+
+Low
+- Roles: removing a permission from a default role didn't reach signed-in
+  accounts until their session cache expired. It now does at once, on
+  every node. (GHSA-m3qr-2hvr-5v7m, #632)
+- Milter: a header that wasn't valid UTF-8 reached the milter empty. It is
+  now sent as the bytes it arrived as. (GHSA-r8wh-mrj5-rjch, #632)
+- IMAP: CREATE and RENAME now refuse a mailbox name over the maximum
+  length even when it has no "/". JMAP now accepts a name of exactly the
+  maximum length. (#632)
+- Accounts: destroying an account now also removes its spam training
+  samples and the message bodies they held. (#632)
+
+### Upgrading
+- Tenant domains: certificate names must be the domain or names under a
+  domain or alias the tenant has proven. A new tenant domain gets its
+  certificate once it is verified: save its certificate settings again
+  after verifying. A tenant domain already saved with another name in its
+  certificate list must have that name removed before any other change to
+  it saves.
+- OAuth: if a tenant registered a client under one of the server's own
+  client ids, the server leaves it alone and logs an error at start-up,
+  and that front end stays unregistered until you delete the tenant's
+  client.
+- OAuth sign-in with an app password now fails like a wrong password; the
+  reason is in the server log.
+- Queue: a tenant that didn't send a message, and doesn't hold every
+  recipient, can no longer change its priority or envelope id, and sees
+  0.0.0.0 as the address it came from.
+- Cluster: upgrade every node together. During a rolling upgrade an older
+  node drops the new cache message, and signed-in accounts on it can keep
+  a removed default-role permission until their session cache expires.
+
 ## [2026.11.24.2] - 2026-11-24
 
 2026.11.24.1 with a build fix. 2026.11.24.1's binaries and images could
