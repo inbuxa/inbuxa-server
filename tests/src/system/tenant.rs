@@ -289,6 +289,10 @@ pub async fn test(test: &mut TestServer) {
         .not_updated(&t_domain.to_string());
     assert_eq!(admin.tenant_of(t_user.id()).await, Some(t_id), "test 5");
 
+    // A tenant's domain names only the tenant's own names in its
+    // certificates: not the server's host name or another tenant's domain
+    tenant_certificate_names(test, &admin, &t_admin, t_id, t_domain).await;
+
     // Acceptance test 4: mail between tenants is delivered (MT-4)
     let mut lmtp = SmtpConnection::connect().await;
     lmtp.ingest(
@@ -999,8 +1003,8 @@ pub async fn test(test: &mut TestServer) {
             .is_empty(),
         "MT-5"
     );
-    // The recipient's tenant administrator downloads the queued message by
-    // the blob id the queue gives it; another tenant's can't
+    // Mail from outside to D's people only: everything in it is D's, so D's
+    // administrator downloads it too, and no other tenant does
     let blob_id = d_admin
         .registry_get_many(ObjectType::QueuedMessage, queued.clone())
         .await
@@ -1008,22 +1012,20 @@ pub async fn test(test: &mut TestServer) {
         .as_str()
         .unwrap()
         .to_string();
-    for (account, expected) in [(&d_admin, 200), (&t_admin, 404)] {
-        let response = account
-            .http_get_raw(
-                &format!(
-                    "{}/jmap/download/{}/{blob_id}/queued.eml",
-                    account.base_url(),
-                    account.id_string()
-                ),
-                None,
-            )
-            .await;
-        assert_eq!(response.status, expected, "queued message download");
+    for (account, expected) in [(admin, 200), (&d_admin, 200), (&t_admin, 404)] {
+        assert_eq!(
+            download_queued(account, &blob_id).await,
+            expected,
+            "queued message download"
+        );
     }
     admin
         .registry_destroy(ObjectType::QueuedMessage, queued)
         .await;
+
+    // One of T's people sends to both tenants: U's administrator sees and
+    // cancels only U's recipient, and only T's has the whole message
+    tenant_queue_reach(&admin, &t_admin, &t_user, &u_admin).await;
 
     // inbuxa-admin#257: an account's disk quota can't exceed its tenant's,
     // whoever sets it, and neither can its accounts' quotas together
@@ -1419,6 +1421,329 @@ pub async fn test(test: &mut TestServer) {
     let _ = u_domain;
 }
 
+/// A tenant's domain orders certificates only for names that are the
+/// tenant's own: the domain, or a name under one of the tenant's domains.
+/// Anything else is refused when the domain is saved.
+async fn tenant_certificate_names(
+    test: &TestServer,
+    admin: &Account,
+    t_admin: &Account,
+    t_id: Id,
+    t_domain: Id,
+) {
+    use registry::schema::{
+        enums::AcmeChallengeType,
+        structs::{AcmeProvider, CertificateManagementProperties},
+    };
+    use registry::types::id::ObjectId;
+    use store::registry::write::{RegistryWrite, RegistryWriteResult};
+
+    // The tenant's ACME provider, stored as it is: saving one through the
+    // API asks its directory for an account, and this test has no network
+    let registry = test.server.registry();
+    let provider = match registry
+        .write(RegistryWrite::insert(
+            &AcmeProvider {
+                directory: "https://acme.t.example.org/dir".to_string(),
+                contact: Map::new(vec!["mailto:ops@t.example.org".to_string()]),
+                account_key: "not-a-key".to_string(),
+                account_uri: "https://acme.t.example.org/acct/1".to_string(),
+                challenge_type: AcmeChallengeType::Http01,
+                member_tenant_id: Some(t_id),
+                ..Default::default()
+            }
+            .into(),
+        ))
+        .await
+        .unwrap()
+    {
+        RegistryWriteResult::Success(id) => id,
+        other => panic!("ACME provider not stored: {other:?}"),
+    };
+    let automatic = |names: &[&str]| {
+        CertificateManagement::Automatic(CertificateManagementProperties {
+            acme_provider_id: provider,
+            subject_alternative_names: Map::new(names.iter().map(|n| n.to_string()).collect()),
+        })
+    };
+
+    // Refused: the server's own host name, another tenant's domain, and a
+    // name that only ends like the tenant's domain
+    let server_name = test.server.core.network.server_name.to_string();
+    for name in [
+        server_name.as_str(),
+        "u.example.org",
+        "mail.u.example.org",
+        "*.u.example.org",
+        "evilt.example.org",
+    ] {
+        t_admin
+            .registry_update_object_expect_err(
+                ObjectType::Domain,
+                t_domain,
+                json!({ Property::CertificateManagement: automatic(&["mail.t.example.org", name]) }),
+            )
+            .await
+            .assert_type(SetErrorType::InvalidProperties)
+            .assert_description_contains(name);
+        // ... whoever saves the tenant's domain
+        admin
+            .registry_update_object_expect_err(
+                ObjectType::Domain,
+                t_domain,
+                json!({ Property::CertificateManagement: automatic(&[name]) }),
+            )
+            .await
+            .assert_type(SetErrorType::InvalidProperties)
+            .assert_description_contains(name);
+    }
+
+    // Allowed: the domain itself and names under it, here stored as they
+    // are so that saving them orders nothing; a later save keeps them
+    let old = registry
+        .get(ObjectId::new(ObjectType::Domain, t_domain))
+        .await
+        .unwrap()
+        .unwrap();
+    let mut domain = Domain::from(old.clone());
+    domain.certificate_management = automatic(&[
+        "t.example.org",
+        "mail.t.example.org",
+        "*.t.example.org",
+        "webmail",
+    ]);
+    assert!(matches!(
+        registry
+            .write(RegistryWrite::update(t_domain, &domain.into(), &old))
+            .await
+            .unwrap(),
+        RegistryWriteResult::Success(_)
+    ));
+    t_admin
+        .registry_update(
+            ObjectType::Domain,
+            [(t_domain, json!({ Property::Description: "T's own names" }))],
+        )
+        .await
+        .updated_id(t_domain);
+
+    t_admin
+        .registry_update(
+            ObjectType::Domain,
+            [(
+                t_domain,
+                json!({ Property::CertificateManagement: CertificateManagement::Manual }),
+            )],
+        )
+        .await
+        .updated_id(t_domain);
+    admin
+        .registry_destroy(ObjectType::AcmeProvider, [provider])
+        .await
+        .assert_destroyed(&[provider]);
+}
+
+/// The status code of a queued message's download.
+async fn download_queued(account: &Account, blob_id: &str) -> u16 {
+    account
+        .http_get_raw(
+            &format!(
+                "{}/jmap/download/{}/{blob_id}/queued.eml",
+                account.base_url(),
+                account.id_string()
+            ),
+            None,
+        )
+        .await
+        .status
+}
+
+/// A message one of T's people sends to both tenants (MT-5). T's
+/// administrator has all of it. U's sees only U's recipient: it finds the
+/// message, cancels delivery to that recipient and no other, and can't
+/// download the content, change the message as a whole or delete it.
+async fn tenant_queue_reach(
+    admin: &Account,
+    t_admin: &Account,
+    t_user: &Account,
+    u_admin: &Account,
+) {
+    let created = |response: &Value, method: &str| {
+        response
+            .pointer("/methodResponses/0/1/created")
+            .and_then(|c| c.as_object())
+            .and_then(|c| c.values().next())
+            .and_then(|c| c["id"].as_str())
+            .unwrap_or_else(|| panic!("{method}: {response}"))
+            .to_string()
+    };
+    let account_id = t_user.id_string();
+    let response = t_user
+        .jmap_method_call(
+            "Identity/set",
+            json!({"accountId": account_id,
+                "create": {"i": {"name": "T user", "email": "tuser@t.example.org"}}}),
+        )
+        .await;
+    let identity = created(&response.0, "Identity/set");
+    let response = t_user
+        .jmap_method_call(
+            "Mailbox/set",
+            json!({"accountId": account_id, "create": {"m": {"name": "Queue reach"}}}),
+        )
+        .await;
+    let mailbox = created(&response.0, "Mailbox/set");
+    let response = t_user
+        .jmap_method_call(
+            "Email/set",
+            json!({"accountId": account_id, "create": {"e": {
+                "mailboxIds": {mailbox.as_str(): true},
+                "from": [{"email": "tuser@t.example.org"}],
+                "to": [{"email": "uuser@u.example.org"}],
+                "subject": "Held for a day",
+                "bodyValues": {"b": {"value": "Across tenants, with a blind copy."}},
+                "textBody": [{"partId": "b", "type": "text/plain"}]
+            }}}),
+        )
+        .await;
+    let email = created(&response.0, "Email/set");
+    // Held for a day, so it waits in the queue; T's administrator is the
+    // blind copy
+    let response = t_user
+        .jmap_method_call(
+            "EmailSubmission/set",
+            json!({"accountId": account_id, "create": {"s": {
+                "emailId": email,
+                "identityId": identity,
+                "envelope": {
+                    "mailFrom": {"email": "tuser@t.example.org", "parameters": {"HOLDFOR": "86400"}},
+                    "rcptTo": [{"email": "uuser@u.example.org"}, {"email": "tadmin@t.example.org"}]
+                }
+            }}}),
+        )
+        .await;
+    created(&response.0, "EmailSubmission/set");
+
+    let mut queued = None;
+    for _ in 0..40 {
+        queued = t_admin
+            .registry_get_many(ObjectType::QueuedMessage, Vec::<Id>::new())
+            .await
+            .list()
+            .iter()
+            .find(|m| m["returnPath"] == "tuser@t.example.org")
+            .cloned();
+        if queued.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+    let queued = queued.expect("T's administrator sees its own person's message");
+    let id = Id::from_str(queued["id"].as_str().unwrap()).unwrap();
+    let recipients = |message: &Value| {
+        let mut names = message["recipients"]
+            .as_object()
+            .unwrap_or_else(|| panic!("{message}"))
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        names.sort();
+        names
+    };
+    assert_eq!(
+        recipients(&queued),
+        ["tadmin@t.example.org", "uuser@u.example.org"],
+        "the sender's tenant sees every recipient"
+    );
+
+    // U sees the message, and only its own recipient of it
+    let u_view = u_admin
+        .registry_get_many(ObjectType::QueuedMessage, [id])
+        .await;
+    assert_eq!(u_view.list().len(), 1, "U sees mail to its people");
+    assert_eq!(
+        recipients(&u_view.list()[0]),
+        ["uuser@u.example.org"],
+        "U sees only its own recipient"
+    );
+    // ... and not where T's person connected from, which T sees
+    assert_ne!(
+        queued["receivedFromIp"], "0.0.0.0",
+        "the sender's tenant sees the client address: {queued}"
+    );
+    assert_eq!(
+        u_view.list()[0]["receivedFromIp"],
+        "0.0.0.0",
+        "U doesn't see T's person's client address"
+    );
+    for (account, to, found) in [
+        (u_admin, "uuser@u.example.org", true),
+        (u_admin, "tadmin@t.example.org", false),
+        (t_admin, "tadmin@t.example.org", true),
+    ] {
+        assert_eq!(
+            account
+                .registry_query_ids(
+                    ObjectType::QueuedMessage,
+                    [(Property::To.as_str(), to)],
+                    Vec::<&str>::new(),
+                )
+                .await
+                .contains(&id),
+            found,
+            "query by a recipient {to}"
+        );
+    }
+
+    // Only T downloads the content
+    let blob_id = queued["blobId"].as_str().unwrap().to_string();
+    for (account, expected) in [(t_admin, 200), (u_admin, 404)] {
+        assert_eq!(
+            download_queued(account, &blob_id).await,
+            expected,
+            "queued message download"
+        );
+    }
+
+    // U can't delete it or change it as a whole
+    u_admin
+        .registry_destroy(ObjectType::QueuedMessage, [id])
+        .await
+        .not_destroyed(&id.to_string());
+    u_admin
+        .registry_update(ObjectType::QueuedMessage, [(id, json!({"priority": 50}))])
+        .await
+        .not_updated(&id.to_string());
+
+    // U cancels delivery to all it sees: its own recipient, no other
+    u_admin
+        .registry_update(ObjectType::QueuedMessage, [(id, json!({"recipients": {}}))])
+        .await
+        .updated_id(id);
+    let message = admin
+        .registry_get_many(ObjectType::QueuedMessage, [id])
+        .await
+        .list()
+        .first()
+        .cloned()
+        .expect("the message is still queued for T's recipient");
+    assert_eq!(
+        message["recipients"]["uuser@u.example.org"]["status"]["@type"], "PermanentFailure",
+        "{message}"
+    );
+    assert_eq!(
+        message["recipients"]["tadmin@t.example.org"]["status"]["@type"], "Scheduled",
+        "{message}"
+    );
+    assert_eq!(message["priority"], queued["priority"], "{message}");
+
+    // T deletes it
+    t_admin
+        .registry_destroy(ObjectType::QueuedMessage, [id])
+        .await
+        .assert_destroyed(&[id]);
+}
+
 /// A tenant's own ACME and DNS providers only reach public HTTPS addresses,
 /// and names that go into a provider's URL can't move its host (security
 /// batch 11, F2 and F3). The server's own providers keep any destination.
@@ -1730,7 +2055,7 @@ impl TestServer {
 }
 
 impl Account {
-    async fn create_tenant(&self, name: &str) -> Id {
+    pub(super) async fn create_tenant(&self, name: &str) -> Id {
         self.registry_create_object(Tenant {
             name: name.to_string(),
             ..Default::default()
@@ -1738,7 +2063,7 @@ impl Account {
         .await
     }
 
-    async fn create_tenant_domain(&self, name: &str, tenant_id: Option<Id>) -> Id {
+    pub(super) async fn create_tenant_domain(&self, name: &str, tenant_id: Option<Id>) -> Id {
         self.registry_create_object(Domain {
             name: name.to_string(),
             is_enabled: true,
@@ -1769,7 +2094,7 @@ impl Account {
         .await
     }
 
-    async fn make_tenant_admin(&self, account_id: Id) {
+    pub(super) async fn make_tenant_admin(&self, account_id: Id) {
         self.registry_update_object(
             ObjectType::Account,
             account_id,

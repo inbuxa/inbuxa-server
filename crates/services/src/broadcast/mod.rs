@@ -119,6 +119,7 @@ impl BroadcastBatch<Vec<BroadcastEvent>> {
                                 continue;
                             }
                             CacheInvalidation::DomainNegative => (11u8, 0),
+                            CacheInvalidation::AllAccessTokens => (12u8, 0),
                         };
 
                         serialized.push(marker);
@@ -273,6 +274,7 @@ where
                                 }
                             }
                             11 => CacheInvalidation::DomainNegative,
+                            12 => CacheInvalidation::AllAccessTokens,
                             _ => return Err(()),
                         });
                     }

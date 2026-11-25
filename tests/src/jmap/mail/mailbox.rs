@@ -679,6 +679,22 @@ pub async fn test(test: &TestServer) {
         ["inbox", "sent", "spam"]
     );
 
+    // inbuxa: a name exactly as long as the limit (255 bytes by default) is
+    // taken; one byte more is refused
+    let response = account
+        .jmap_create(
+            "Mailbox",
+            [
+                json!({ "name": "m".repeat(255) }),
+                json!({ "name": "m".repeat(256) }),
+            ],
+            Vec::<(&str, &str)>::new(),
+        )
+        .await;
+    response.created(0);
+    let too_long = response.not_created(1);
+    assert_eq!(too_long.typ(), "invalidProperties", "{too_long:?}");
+
     // inbuxa: two creates of one name in the same Mailbox/set request leave
     // one mailbox; the second is refused as a stored duplicate would be.
     // The same name under another parent is still fine.
