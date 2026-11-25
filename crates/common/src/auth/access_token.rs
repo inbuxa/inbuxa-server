@@ -1193,6 +1193,21 @@ impl AccessTokenInner {
         self.locked
     }
 
+    /// inbuxa: how many HTTP requests the account has in flight, so a test
+    /// can wait for its requests to hold the slots before it probes the limit
+    pub fn in_flight_http_requests(&self) -> u64 {
+        self.concurrent_http_requests
+            .as_ref()
+            .map_or(0, |limiter| limiter.num_concurrent())
+    }
+
+    /// inbuxa: how many uploads the account has in flight, as above
+    pub fn in_flight_uploads(&self) -> u64 {
+        self.concurrent_uploads
+            .as_ref()
+            .map_or(0, |limiter| limiter.num_concurrent())
+    }
+
     /// inbuxa: SCIM-27: the account's own effective permission, from its
     /// roles, its own settings and its tenant, before a credential narrows it
     pub fn account_has_permission(&self, permission: Permission) -> bool {
