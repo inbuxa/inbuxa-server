@@ -80,12 +80,16 @@ Each of these is done in place on first start, and each is listed in
   restores passwords on JMAP for an operator who needs it while clients move
   to OAuth.
 - **The 0.16 web interface.** Its application record carries over and points
-  at upstream's `webui` release on GitHub. inbuxa switches it off the first
-  time it opens the store (`first_party.rs`,
-  `disable_imported_web_interface`, test `imported_web_interface`), keeps the
-  record, and logs that it did. An operator who still wants that interface at
-  `/admin` switches the application back on, and it stays on. Applications of
-  the operator's own aren't touched.
+  at upstream's `webui` release on GitHub. It can't work against inbuxa: it
+  asks for upstream's registry capability by its old name, and every call is
+  refused. inbuxa switches it off the first time it opens the store, in
+  recovery mode too (`first_party.rs`, `disable_imported_web_interface`, test
+  `imported_web_interface`), keeps the record, logs that it did, and notes
+  that it looked (`_` key `Fw`). An operator who switches the application
+  back on keeps it on. Applications of the operator's own aren't touched.
+  Before #638 the check keyed off the store version mark, which a
+  recovery-mode start wrote without switching anything off; such a store has
+  the interface switched off on its first start after the fix.
 
 ## Not covered
 

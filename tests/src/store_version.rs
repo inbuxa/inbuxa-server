@@ -7,7 +7,8 @@
 //! inbuxa: the store version mark. A store without it gets it on start, a
 //! marked store is left alone, and a store marked by a newer release is
 //! refused before anything is written to it. A store opened for the first
-//! time has upstream's web interface switched off (docs/spec/import-0.16.md).
+//! time, normally or in recovery mode, has upstream's web interface switched
+//! off (docs/spec/import-0.16.md).
 //! A store at an older layout version is brought up to this one, by one node
 //! at a time (docs/spec/features/store-layout.md). Step 2 -> 3 moves the
 //! audit log, journal, holds and undelete notes out of `_`.
@@ -15,7 +16,7 @@
 use crate::utils::server::TestServerBuilder;
 use common::{
     INBUXA_STORE_VERSION, INBUXA_STORE_VERSION_KEY, Server,
-    manager::first_party::disable_imported_web_interface,
+    manager::first_party::{IMPORTED_WEB_INTERFACE_CHECKED_KEY, disable_imported_web_interface},
 };
 use futures::FutureExt;
 use inbuxa_features::audit::{Action, Actor, AuditLog, Outcome, Record, Target, log};
@@ -452,8 +453,8 @@ async fn imported_web_interface() {
         ]
     );
 
-    // Once the store has its version, an operator who switches it back on
-    // keeps it on.
+    // Once a start has looked, an operator who switches it back on keeps it
+    // on.
     migration::try_migrate(server).await.unwrap();
     let upstream = server
         .registry()
@@ -484,7 +485,37 @@ async fn imported_web_interface() {
         applications(server)
             .await
             .contains(&(UPSTREAM_WEBUI.to_string(), true)),
-        "a marked store's web interface is left as the operator set it"
+        "a checked store's web interface is left as the operator set it"
+    );
+
+    // #638: a store that recovery mode opened before the switch-off ran
+    // there has the version mark but was never checked. It still has
+    // upstream's interface switched off on its next start.
+    assert!(read_mark(server).await.is_some());
+    let mut batch = BatchBuilder::new();
+    batch.clear(ValueClass::Any(AnyClass {
+        subspace: SUBSPACE_INBUXA,
+        key: IMPORTED_WEB_INTERFACE_CHECKED_KEY.to_vec(),
+    }));
+    server.store().write(batch.build_all()).await.unwrap();
+    let mut bp = Bootstrap::new(server.registry().clone()).await;
+    disable_imported_web_interface(&mut bp).await.unwrap();
+    assert!(
+        applications(server)
+            .await
+            .contains(&(UPSTREAM_WEBUI.to_string(), false)),
+        "a marked but unchecked store has upstream's web interface switched off"
+    );
+    assert!(
+        server
+            .store()
+            .key_exists(AnyKey {
+                subspace: SUBSPACE_INBUXA,
+                key: IMPORTED_WEB_INTERFACE_CHECKED_KEY.to_vec(),
+            })
+            .await
+            .unwrap(),
+        "the check is noted"
     );
 }
 
