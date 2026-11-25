@@ -13,7 +13,7 @@ use groupware::file::FileNode;
 use registry::{
     schema::{
         prelude::{ObjectType, Property},
-        structs::{ArchivedItem, TaskDestroyAccount},
+        structs::{ArchivedItem, SpamTrainingSample, TaskDestroyAccount},
     },
     types::EnumImpl,
 };
@@ -156,6 +156,56 @@ async fn destroy_account(server: &Server, task: &TaskDestroyAccount) -> trc::Res
                     item_id,
                 }));
         }
+    }
+    if !batch.is_empty() {
+        server.store().write(batch.build_all()).await?;
+    }
+
+    // inbuxa: its spam training samples go too, with the links that kept
+    // their messages; otherwise both stayed until the sample's hold ended
+    // (holdSamplesFor, 90 days by default), and the notes that would have
+    // ended a hold early went with undelete's records above
+    let mut batch = BatchBuilder::new();
+    let object_id = ObjectType::SpamTrainingSample.to_id();
+    let ids = server
+        .registry()
+        .query::<Vec<Id>>(
+            RegistryQuery::new(ObjectType::SpamTrainingSample).with_account(account_id),
+        )
+        .await?;
+    for id in ids {
+        let item_id = id.id();
+        if batch.is_large_batch() {
+            server
+                .store()
+                .write(std::mem::take(&mut batch).build_all())
+                .await?;
+        }
+        if let Some(sample) = server
+            .store()
+            .get_value::<SpamTrainingSample>(ValueKey::from(ValueClass::Registry(
+                RegistryClass::Item { object_id, item_id },
+            )))
+            .await?
+        {
+            batch.with_account_id(account_id).clear(BlobOp::Link {
+                hash: sample.blob_id.hash,
+                to: BlobLink::Temporary {
+                    until: sample.expires_at.timestamp() as u64,
+                },
+            });
+        }
+        batch
+            .clear(ValueClass::Registry(RegistryClass::Index {
+                index_id: Property::AccountId.to_id(),
+                object_id,
+                item_id,
+                key: (account_id as u64).serialize(),
+            }))
+            .clear(ValueClass::Registry(RegistryClass::Item {
+                object_id,
+                item_id,
+            }));
     }
     if !batch.is_empty() {
         server.store().write(batch.build_all()).await?;

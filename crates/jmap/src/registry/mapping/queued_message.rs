@@ -18,6 +18,7 @@ use common::{
     config::smtp::queue::{ArchivedQueueExpiry, QueueName},
     ipc::QueueEvent,
 };
+use inbuxa_features::tenancy::queue::{QueueReach, is_own_recipient};
 use jmap_proto::{error::set::SetError, object::registry::RegistryComparator, types::state::State};
 use jmap_tools::{JsonPointer, JsonPointerItem, Key};
 use registry::{
@@ -84,17 +85,19 @@ pub(crate) async fn queued_message_set(
             continue;
         };
         let archived_message = archive.to_unarchived::<Message>()?;
-        // inbuxa: MT-5
-        if !tenant_domains
-            .as_ref()
-            .is_none_or(|domains| tenant_sees_archived(domains, archived_message.inner))
-        {
+        // inbuxa: MT-5: a tenant changes only what it is shown
+        let reach = reach_of(tenant_domains.as_ref(), archived_message.inner);
+        if reach == QueueReach::Nothing {
             set.response.not_updated.append(id, SetError::not_found());
             continue;
         }
+        let shown = |address: &str| shows(reach, tenant_domains.as_ref(), address);
 
         // Process patches
         let mut message = map_message(archived_message.inner);
+        if reach != QueueReach::Whole {
+            message = only_recipients(message, shown);
+        }
         message.next_retry = None;
         for (key, value) in value.into_expanded_object() {
             let ptr = match key {
@@ -116,6 +119,20 @@ pub(crate) async fn queued_message_set(
         let mut modified_rcpts = AHashSet::new();
         let mut queued_message = archived_message.deserialize()?;
         let prev_events = queued_message.next_events();
+        // inbuxa: MT-5: the message as a whole is the sender's
+        if reach != QueueReach::Whole
+            && (queued_message.env_id.as_deref() != message.env_id.as_deref()
+                || queued_message.priority as i64 != message.priority)
+        {
+            set.response.not_updated.append(
+                id,
+                SetError::forbidden().with_description(
+                    "Only the sending tenant can change the message as a whole. \
+                     Change delivery to this tenant's own recipients instead.",
+                ),
+            );
+            continue;
+        }
         if queued_message.env_id.as_deref() != message.env_id.as_deref() {
             queued_message.env_id = message.env_id.as_deref().map(|v| v.into());
             has_changes = true;
@@ -125,10 +142,11 @@ pub(crate) async fn queued_message_set(
             has_changes = true;
         }
         for (idx, rcpt) in queued_message.recipients.iter_mut().enumerate() {
-            if !message
-                .recipients
-                .iter()
-                .any(|(address, _)| address.as_str() == rcpt.address.as_ref())
+            if shown(rcpt.address.as_ref())
+                && !message
+                    .recipients
+                    .iter()
+                    .any(|(address, _)| address.as_str() == rcpt.address.as_ref())
             {
                 rcpt.status = Status::PermanentFailure(ErrorDetails {
                     entity: "localhost".into(),
@@ -144,6 +162,7 @@ pub(crate) async fn queued_message_set(
                 .iter_mut()
                 .enumerate()
                 .find(|(_, r)| r.address.as_ref() == address.as_str())
+                .filter(|_| shown(&address))
             else {
                 set.response.not_updated.append(
                     id,
@@ -261,21 +280,34 @@ pub(crate) async fn queued_message_set(
             continue;
         };
 
-        // inbuxa: MT-5
-        if tenant_domains
+        // inbuxa: MT-5: only the sending tenant deletes the whole message
+        match tenant_domains
             .as_ref()
-            .is_none_or(|domains| tenant_sees(domains, &message.message))
-        {
-            if message.remove(set.server, None).await {
-                set.response.destroyed.push(id);
-            } else {
+            .map_or(QueueReach::Whole, |domains| {
+                tenant_reach(domains, &message.message)
+            }) {
+            QueueReach::Whole => {
+                if message.remove(set.server, None).await {
+                    set.response.destroyed.push(id);
+                } else {
+                    set.response.not_destroyed.append(
+                        id,
+                        SetError::forbidden().with_description("Queue delete operation failed"),
+                    );
+                }
+            }
+            QueueReach::OwnRecipients => {
                 set.response.not_destroyed.append(
                     id,
-                    SetError::forbidden().with_description("Queue delete operation failed"),
+                    SetError::forbidden().with_description(
+                        "Only the sending tenant can delete this message. \
+                         Cancel delivery to this tenant's own recipients instead.",
+                    ),
                 );
             }
-        } else {
-            set.response.not_destroyed.append(id, SetError::not_found());
+            QueueReach::Nothing => {
+                set.response.not_destroyed.append(id, SetError::not_found());
+            }
         }
     }
 
@@ -311,14 +343,30 @@ pub(crate) async fn queued_message_get(
             continue;
         };
         let message_in = message_archive.unarchive::<Message>()?;
-        // inbuxa: MT-5
-        if tenant_domains
-            .as_ref()
-            .is_none_or(|domains| tenant_sees_archived(domains, message_in))
-        {
-            get.insert(id, map_message(message_in).into_value());
-        } else if client_ids {
-            get.not_found(id);
+        // inbuxa: MT-5: a tenant sees what it reaches of the message
+        let reach = reach_of(tenant_domains.as_ref(), message_in);
+        match reach {
+            QueueReach::Whole => {
+                let message = hide_client_ip(
+                    map_message(message_in),
+                    reach,
+                    tenant_domains.as_ref(),
+                    message_in,
+                );
+                get.insert(id, message.into_value());
+            }
+            QueueReach::OwnRecipients => {
+                let message = only_recipients(map_message(message_in), |address| {
+                    shows(reach, tenant_domains.as_ref(), address)
+                });
+                let message = hide_client_ip(message, reach, tenant_domains.as_ref(), message_in);
+                get.insert(id, message.into_value());
+            }
+            QueueReach::Nothing => {
+                if client_ids {
+                    get.not_found(id);
+                }
+            }
         }
     }
 
@@ -435,34 +483,36 @@ pub(crate) async fn queued_message_query(
                         .unarchive::<queue::Message>()
                         .add_context(|ctx| ctx.ctx(trc::Key::Key, key))?;
 
-                    if let Some(due) = message.next_delivery_event(queue_name)
-                        // inbuxa: MT-5
-                        && tenant_domains
-                            .as_ref()
-                            .is_none_or(|domains| tenant_sees_archived(domains, message))
+                    // inbuxa: MT-5: a tenant finds a message only by what
+                    // it is shown of it
+                    let reach = reach_of(tenant_domains.as_ref(), message);
+                    let shown = |address: &str| shows(reach, tenant_domains.as_ref(), address);
+                    if reach != QueueReach::Nothing
+                        && let Some(due) = next_delivery_shown(message, queue_name, shown)
                         && (due_from..=due_to).contains(&due)
-                        && queue_name
-                            .as_ref()
-                            .is_none_or(|q| message.recipients.iter().any(|r| &r.queue == q))
+                        && queue_name.as_ref().is_none_or(|q| {
+                            message
+                                .recipients
+                                .iter()
+                                .any(|r| &r.queue == q && shown(r.address()))
+                        })
                         && (!has_filters
                             || (filter_text
                                 .as_ref()
                                 .map(|text| {
                                     message.return_path.contains(text)
-                                        || message
-                                            .recipients
-                                            .iter()
-                                            .any(|r| r.address().contains(text))
+                                        || message.recipients.iter().any(|r| {
+                                            shown(r.address()) && r.address().contains(text)
+                                        })
                                 })
                                 .unwrap_or_else(|| {
                                     filter_from
                                         .as_ref()
                                         .is_none_or(|from| message.return_path.contains(from))
                                         && filter_to.as_ref().is_none_or(|to| {
-                                            message
-                                                .recipients
-                                                .iter()
-                                                .any(|r| r.address().contains(to))
+                                            message.recipients.iter().any(|r| {
+                                                shown(r.address()) && r.address().contains(to)
+                                            })
                                         })
                                 })))
                     {
@@ -581,13 +631,14 @@ pub(crate) async fn queued_message_query(
     }
 }
 
-// inbuxa: MT-5: a tenant sees mail to its domains, and its own people's sent mail
+// inbuxa: MT-5: a tenant has the whole of its own people's sent mail, and
+// only its own recipients of other mail to its domains
 async fn tenant_domains(server: &Server, tenant_id: u32) -> trc::Result<AHashSet<String>> {
     inbuxa_features::tenancy::queue::tenant_domains(server.registry(), tenant_id).await
 }
 
-fn tenant_sees(domains: &AHashSet<String>, message: &Message) -> bool {
-    inbuxa_features::tenancy::queue::sees(
+fn tenant_reach(domains: &AHashSet<String>, message: &Message) -> QueueReach {
+    inbuxa_features::tenancy::queue::reach(
         domains,
         message.recipients.iter().map(|rcpt| rcpt.address()),
         &message.return_path,
@@ -595,13 +646,104 @@ fn tenant_sees(domains: &AHashSet<String>, message: &Message) -> bool {
     )
 }
 
-pub(crate) fn tenant_sees_archived(domains: &AHashSet<String>, message: &ArchivedMessage) -> bool {
-    inbuxa_features::tenancy::queue::sees(
+pub(crate) fn tenant_reach_archived(
+    domains: &AHashSet<String>,
+    message: &ArchivedMessage,
+) -> QueueReach {
+    inbuxa_features::tenancy::queue::reach(
         domains,
         message.recipients.iter().map(|rcpt| rcpt.address()),
         &message.return_path,
         message.flags.to_native() & FROM_AUTHENTICATED != 0,
     )
+}
+
+/// How much of a message the caller reaches: all of it outside a tenant.
+fn reach_of(domains: Option<&AHashSet<String>>, message: &ArchivedMessage) -> QueueReach {
+    domains.map_or(QueueReach::Whole, |domains| {
+        tenant_reach_archived(domains, message)
+    })
+}
+
+/// inbuxa: MT-5: where the sender connected from, shown to a tenant only
+/// with the whole message and never for another tenant's signed-in sender
+/// (as the unspecified address).
+fn hide_client_ip(
+    mut message: QueuedMessage,
+    reach: QueueReach,
+    domains: Option<&AHashSet<String>>,
+    message_in: &ArchivedMessage,
+) -> QueuedMessage {
+    if let Some(domains) = domains
+        && !inbuxa_features::tenancy::queue::shows_client_ip(
+            reach,
+            domains,
+            &message_in.return_path,
+            message_in.flags.to_native() & FROM_AUTHENTICATED != 0,
+        )
+    {
+        message.received_from_ip = IpAddr(std::net::Ipv4Addr::UNSPECIFIED.into());
+    }
+    message
+}
+
+/// Whether the caller is shown this recipient of a message it reaches.
+fn shows(reach: QueueReach, domains: Option<&AHashSet<String>>, address: &str) -> bool {
+    match reach {
+        QueueReach::Whole => true,
+        QueueReach::OwnRecipients => {
+            domains.is_some_and(|domains| is_own_recipient(domains, address))
+        }
+        QueueReach::Nothing => false,
+    }
+}
+
+/// The message as a tenant that reaches only some recipients sees it: those
+/// recipients, and its next retry and notice as theirs alone.
+fn only_recipients(mut message: QueuedMessage, shown: impl Fn(&str) -> bool) -> QueuedMessage {
+    let mut recipients = VecMap::with_capacity(message.recipients.len());
+    for (address, rcpt) in message.recipients.drain() {
+        if shown(&address) {
+            recipients.append(address, rcpt);
+        }
+    }
+    message.recipients = recipients;
+    let pending = || {
+        message.recipients.values().filter(|rcpt| {
+            matches!(
+                rcpt.status,
+                RecipientStatus::Scheduled | RecipientStatus::TemporaryFailure(_)
+            )
+        })
+    };
+    let next_retry = pending()
+        .map(|rcpt| rcpt.retry_due.timestamp())
+        .min()
+        .unwrap_or_else(|| now().cast_signed());
+    let next_notify = pending().map(|rcpt| rcpt.notify_due.timestamp()).min();
+    message.next_retry = UTCDateTime::from_timestamp(next_retry).into();
+    message.next_notify = next_notify.map(UTCDateTime::from_timestamp);
+    message
+}
+
+/// When delivery to the shown, pending recipients (of one queue) is next due.
+fn next_delivery_shown(
+    message: &ArchivedMessage,
+    queue: Option<QueueName>,
+    shown: impl Fn(&str) -> bool,
+) -> Option<u64> {
+    message
+        .recipients
+        .iter()
+        .filter(|rcpt| {
+            matches!(
+                rcpt.status,
+                ArchivedStatus::Scheduled | ArchivedStatus::TemporaryFailure(_)
+            ) && queue.is_none_or(|q| rcpt.queue == q)
+                && shown(rcpt.address())
+        })
+        .map(|rcpt| rcpt.retry.due.to_native())
+        .min()
 }
 
 pub(crate) fn map_message(message_in: &ArchivedMessage) -> QueuedMessage {

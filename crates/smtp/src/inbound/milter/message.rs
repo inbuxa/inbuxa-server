@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use super::{Action, Error, Macros, Modification};
@@ -261,13 +263,10 @@ impl<T: SessionStream> Session<T> {
             client.data().await?.assert_continue()?;
 
             // Headers
+            // inbuxa: sent as they arrived; one that isn't valid UTF-8 used
+            // to reach the milter as an empty value
             client
-                .headers(message.raw_parsed_headers().iter().map(|(k, v)| {
-                    (
-                        std::str::from_utf8(k).unwrap_or_default(),
-                        std::str::from_utf8(v).unwrap_or_default(),
-                    )
-                }))
+                .headers(message.raw_parsed_headers().iter().map(|(k, v)| (*k, *v)))
                 .await?
                 .assert_continue()?;
 

@@ -16,7 +16,7 @@ use crate::auth::oauth::{
 use common::{
     KV_OAUTH, KV_OAUTH_DEVICE, Server,
     auth::{
-        AuthRequest,
+        AccessToken, AuthRequest,
         authentication::UsernameParts,
         oauth::{
             CLIENT_ID_MAX_LEN, DEVICE_CODE_LEN, SUPPORTED_SCOPES, USER_CODE_ALPHABET,
@@ -308,7 +308,7 @@ impl OAuthApiHandler for Server {
                 };
 
                 // Authenticate
-                match self
+                let authenticated = self
                     .authenticate(&AuthRequest {
                         credentials: Credentials::Basic {
                             username: account_name,
@@ -318,8 +318,9 @@ impl OAuthApiHandler for Server {
                         session_id: session.session_id,
                         remote_ip: session.remote_ip,
                     })
-                    .await
-                {
+                    .await;
+                let authenticated = refuse_app_credential(authenticated);
+                match authenticated {
                     Ok(access_token) => {
                         // Registry-backed clients are validated once the account is known
                         if stateless_client.is_none()
@@ -412,7 +413,7 @@ impl OAuthApiHandler for Server {
                         .caused_by(trc::location!())?;
                     if oauth.status == OAuthStatus::Pending {
                         // Authenticate
-                        match self
+                        let authenticated = self
                             .authenticate(&AuthRequest {
                                 credentials: Credentials::Basic {
                                     username: account_name,
@@ -422,8 +423,30 @@ impl OAuthApiHandler for Server {
                                 session_id: session.session_id,
                                 remote_ip: session.remote_ip,
                             })
-                            .await
-                        {
+                            .await;
+                        let authenticated = refuse_app_credential(authenticated);
+                        // inbuxa: a tenant's client is approved only by that
+                        // tenant's accounts
+                        let authenticated = match authenticated {
+                            Ok(access_token) => {
+                                if self
+                                    .client_serves_tenant(
+                                        oauth.client_id.as_str(),
+                                        access_token.tenant_id(),
+                                    )
+                                    .await?
+                                {
+                                    Ok(access_token)
+                                } else {
+                                    Err(trc::SecurityEvent::Unauthorized
+                                        .into_err()
+                                        .account_id(access_token.account_id())
+                                        .details("This client belongs to another tenant."))
+                                }
+                            }
+                            Err(err) => Err(err),
+                        };
+                        match authenticated {
                             Ok(access_token) => {
                                 let new_oauth_code = OAuthCode {
                                     status: OAuthStatus::Authorized,
@@ -642,6 +665,23 @@ impl OAuthApiHandler for Server {
         })
         .into_http_response()
         .with_cors_unrestricted())
+    }
+}
+
+/// inbuxa: an app password or an API key is made for one app, with that
+/// app's permissions. The sign-in and device pages hand the OAuth client the
+/// whole account, and a code doesn't keep the credential's narrower
+/// permissions, so only the account's own password (with its second factor)
+/// or a passkey signs in there.
+fn refuse_app_credential(authenticated: trc::Result<AccessToken>) -> trc::Result<AccessToken> {
+    match authenticated {
+        Ok(access_token) if access_token.is_app_credential() => {
+            Err(trc::SecurityEvent::Unauthorized
+                .into_err()
+                .account_id(access_token.account_id())
+                .details("App passwords and API keys can't sign in to an OAuth client; use the account's password."))
+        }
+        authenticated => authenticated,
     }
 }
 

@@ -76,6 +76,11 @@ pub struct Receiver<T: CommandParser> {
 
 const ARG_MAX_LEN: usize = 8000;
 
+/// inbuxa: what a token holds in memory besides its argument's bytes. Every
+/// token is charged this toward the request size, so the limit bounds the
+/// memory a request holds, not only the bytes the client sent.
+const TOKEN_COST: usize = std::mem::size_of::<Token>();
+
 /// inbuxa: the largest request accepted before sign-in. Nothing sent before
 /// sign-in (a login, a SASL response, a bearer token) comes near it, so the
 /// configured request size only applies once the client is signed in.
@@ -122,41 +127,43 @@ impl<T: CommandParser> Receiver<T> {
         err
     }
 
-    fn push_argument(&mut self, in_quote: bool) -> Result<(), Error> {
-        if !self.buf.is_empty() {
-            self.current_request_size += self.buf.len();
-            if self.current_request_size > self.max_request_size {
-                return Err(self.error_reset(format_compact!(
-                    "Request exceeds maximum limit of {} bytes.",
-                    self.max_request_size
-                )));
-            }
-            self.request.tokens.push(Token::Argument(self.buf.take()));
-        } else if in_quote {
-            // inbuxa: an empty quoted string counts its two quotes, or a
-            // line of "" would buffer tokens without ever reaching the limit
-            self.current_request_size += 2;
-            if self.current_request_size > self.max_request_size {
-                return Err(self.error_reset(format_compact!(
-                    "Request exceeds maximum limit of {} bytes.",
-                    self.max_request_size
-                )));
-            }
-            self.request.tokens.push(Token::Nil);
-        }
-        Ok(())
-    }
-
-    fn push_token(&mut self, token: Token) -> Result<(), Error> {
-        self.current_request_size += 1;
+    // inbuxa: adds what the next token holds in memory to the request size
+    fn charge(&mut self, cost: usize) -> Result<(), Error> {
+        self.current_request_size = self.current_request_size.saturating_add(cost);
         if self.current_request_size > self.max_request_size {
             return Err(self.error_reset(format_compact!(
                 "Request exceeds maximum limit of {} bytes.",
                 self.max_request_size
             )));
         }
+        Ok(())
+    }
+
+    fn push_argument(&mut self, in_quote: bool) -> Result<(), Error> {
+        if !self.buf.is_empty() {
+            // inbuxa: the argument costs its buffer as allocated, not just
+            // its length, plus the token, so a run of one-byte arguments
+            // can't hold many times the limit in memory
+            self.charge(TOKEN_COST + self.buf.capacity())?;
+            self.request.tokens.push(Token::Argument(self.buf.take()));
+        } else if in_quote {
+            // inbuxa: an empty quoted string costs its token too, or a line
+            // of "" would buffer tokens without ever reaching the limit
+            self.charge(TOKEN_COST)?;
+            self.request.tokens.push(Token::Nil);
+        }
+        Ok(())
+    }
+
+    fn push_token(&mut self, token: Token) -> Result<(), Error> {
+        self.charge(TOKEN_COST)?;
         self.request.tokens.push(token);
         Ok(())
+    }
+
+    // inbuxa: what a literal of `size` bytes will be charged once read
+    fn literal_cost(&self, size: u32) -> usize {
+        TOKEN_COST + (size as usize).max(self.buf.capacity())
     }
 
     pub fn parse(&mut self, bytes: &mut std::slice::Iter<'_, u8>) -> Result<Request<T>, Error> {
@@ -332,7 +339,9 @@ impl<T: CommandParser> Receiver<T> {
                                 let size = self.buf.as_str().parse::<u32>().map_err(|_| {
                                     self.error_reset("Literal size is not a valid number.")
                                 })?;
-                                let oversize = self.current_request_size + size as usize
+                                let oversize = self
+                                    .current_request_size
+                                    .saturating_add(self.literal_cost(size))
                                     > self.max_request_size;
                                 if oversize && !non_sync {
                                     return Err(self.error_reset(format_compact!(
@@ -377,7 +386,10 @@ impl<T: CommandParser> Receiver<T> {
                 State::LiteralSeek { size, non_sync } => {
                     if ch == b'\n' {
                         if non_sync
-                            && self.current_request_size + size as usize > self.max_request_size
+                            && self
+                                .current_request_size
+                                .saturating_add(self.literal_cost(size))
+                                > self.max_request_size
                         {
                             self.state = State::LiteralDiscard { remaining: size };
                         } else if size > 0 {
@@ -468,6 +480,11 @@ impl ArgumentBuffer {
     #[inline(always)]
     pub fn len(&self) -> usize {
         self.buf.len()
+    }
+
+    #[inline(always)]
+    pub fn capacity(&self) -> usize {
+        self.buf.capacity()
     }
 
     #[inline(always)]
@@ -1178,7 +1195,8 @@ mod tests {
                 "a1 APPEND inbox (\\Draft) {40+}\r\nAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\r\nb2 NOOP\r\n",
             ],
         ] {
-            let mut receiver = Receiver::<Command>::with_max_request_size(30);
+            // inbuxa: room for the tokens before the literal, not the literal
+            let mut receiver = Receiver::<Command>::with_max_request_size(150);
             let mut requests = Vec::new();
             let mut errors = 0;
             for frame in &frames {
@@ -1231,5 +1249,46 @@ mod tests {
                 receiver.request.tokens.len()
             );
         }
+    }
+
+    // inbuxa: every token is charged what it holds in memory, so a signed-in
+    // request made of tiny or empty tokens hits the limit after a bounded
+    // number of them instead of buffering one token per byte or two
+    #[test]
+    fn receiver_charges_tokens_their_memory() {
+        const LIMIT: usize = 1024 * 1024;
+        for (prefix, unit) in [
+            ("a SEARCH ", "("),
+            ("a SEARCH ", ")"),
+            ("a SEARCH ", "a "),
+            ("a SEARCH ", "\"\" "),
+            ("a FETCH 1 ", "["),
+        ] {
+            let mut receiver = Receiver::<Command>::with_max_request_size(LIMIT);
+            assert!(matches!(
+                receiver.parse(&mut prefix.as_bytes().iter()),
+                Err(Error::NeedsMoreData)
+            ));
+            let units = 400_000;
+            let line = unit.repeat(units);
+            let mut bytes = line.as_bytes().iter();
+            let result = receiver.parse(&mut bytes);
+            let consumed = (line.len() - bytes.len()) / unit.len();
+            assert!(
+                matches!(result, Err(Error::Error { .. })),
+                "{units} tokens of {unit:?} were buffered without an error"
+            );
+            assert!(
+                consumed <= LIMIT / std::mem::size_of::<Token>() + 1,
+                "{consumed} tokens of {unit:?} were taken before the limit"
+            );
+        }
+
+        // a literal as large as the limit allows still parses
+        let mut receiver = Receiver::<Command>::with_max_request_size(LIMIT);
+        let literal = "A".repeat(LIMIT - 1024);
+        let frame = format!("a1 APPEND inbox {{{}+}}\r\n{literal}\r\n", literal.len());
+        let request = receiver.parse(&mut frame.as_bytes().iter()).unwrap();
+        assert_eq!(request.tokens.len(), 2);
     }
 }

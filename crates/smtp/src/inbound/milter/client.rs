@@ -234,14 +234,16 @@ impl<T: AsyncRead + AsyncWrite + Unpin> MilterClient<T> {
     pub async fn headers<I, H, V>(&mut self, headers: I) -> super::Result<Action>
     where
         I: Iterator<Item = (H, V)>,
-        H: AsRef<str>,
-        V: AsRef<str>,
+        H: AsRef<[u8]>,
+        V: AsRef<[u8]>,
     {
         if !self.has_option(SMFIP_NOHDRS) {
             for (name, value) in headers {
+                // inbuxa: bytes, so a header that isn't valid UTF-8 is sent
+                // as it is
                 self.write(Command::Header {
-                    name: name.as_ref().trim().as_bytes(),
-                    value: value.as_ref().trim().as_bytes(),
+                    name: name.as_ref().trim_ascii(),
+                    value: value.as_ref().trim_ascii(),
                 })
                 .await?;
                 if !self.has_option(SMFIP_NR_HDR) {

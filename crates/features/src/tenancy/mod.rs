@@ -12,6 +12,7 @@
 //! as `MT-n`, after the spec.
 
 pub mod ceiling;
+pub mod certificates;
 pub mod domain_move;
 pub mod links;
 pub mod logo;
