@@ -163,11 +163,14 @@ jobs:
             ~/.cargo/git/db
             target/debug
           key: cargo-${{ steps.rust.outputs.version }}-${{ hashFiles('Cargo.lock') }}
-      # The release profile and features, on main and release/* only. It is what
-      # the image is built with, and it fails in ways the dev profile does not:
-      # v2026.9.24 was tagged on a commit whose CI was green and whose release
-      # build could not compile the scim crate at all.
-      - if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/')
+      # The release profile and features, on a version branch only
+      # (release/version-*, which every tag is cut from). It is what the image
+      # is built with, and it fails in ways the dev profile does not: v2026.9.24
+      # was tagged on a commit whose CI was green and whose release build could
+      # not compile the scim crate at all. Once is enough per release: the same
+      # tree builds again when it is tagged, so main and release/2026 merges
+      # don't repeat it.
+      - if: startsWith(github.ref, 'refs/heads/release/version-')
         run: cargo build -p inbuxa --locked --release --no-default-features --features "sqlite postgres mysql rocks s3 redis azure nats"
 
   # --------------------------------------------------------------- tags ------
