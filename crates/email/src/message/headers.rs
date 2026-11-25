@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::message::metadata::{ArchivedMessageMetadataPart, ArchivedMetadataHeaderValue};
@@ -83,7 +85,15 @@ impl HeaderToValue for Vec<Header<'_>> {
         for header in self.iter().rev() {
             if header.name.as_str().eq_ignore_ascii_case(header_name) {
                 let raw_header;
-                let header_value = if is_raw || matches!(header.value, HeaderValue::Empty) {
+                // inbuxa: a parsed value that isn't text (List-Id parses as an
+                // address) has no text form, so asText reads the raw header
+                let header_value = if is_raw
+                    || matches!(header.value, HeaderValue::Empty)
+                    || (matches!(form, HeaderForm::Text)
+                        && !matches!(
+                            header.value,
+                            HeaderValue::Text(_) | HeaderValue::TextList(_)
+                        )) {
                     raw_header =
                         raw_message.get(header.offset_start as usize..header.offset_end as usize);
 
@@ -338,29 +348,37 @@ impl HeaderToValue for ArchivedMessageMetadataPart {
         for header in self.headers.iter().rev() {
             if header.name.as_str().eq_ignore_ascii_case(header_name) {
                 let raw_header;
-                let header_value =
-                    if is_raw || matches!(header.value, ArchivedMetadataHeaderValue::Empty) {
-                        raw_header = raw_message.get(header.value_range());
+                // inbuxa: as above, a parsed value that isn't text is read
+                // again from the raw header for asText
+                let header_value = if is_raw
+                    || matches!(header.value, ArchivedMetadataHeaderValue::Empty)
+                    || (matches!(form, HeaderForm::Text)
+                        && !matches!(
+                            header.value,
+                            ArchivedMetadataHeaderValue::Text(_)
+                                | ArchivedMetadataHeaderValue::TextList(_)
+                        )) {
+                    raw_header = raw_message.get(header.value_range());
 
-                        if let Some(bytes) = &raw_header {
-                            let bytes = bytes.as_ref();
-                            match form {
-                                HeaderForm::Raw => {
-                                    HeaderValue::Text(String::from_utf8_lossy(bytes.trim_end()))
-                                }
-                                HeaderForm::Text => MessageStream::new(bytes).parse_unstructured(),
-                                HeaderForm::Addresses
-                                | HeaderForm::GroupedAddresses
-                                | HeaderForm::URLs => MessageStream::new(bytes).parse_address(),
-                                HeaderForm::MessageIds => MessageStream::new(bytes).parse_id(),
-                                HeaderForm::Date => MessageStream::new(bytes).parse_date(),
+                    if let Some(bytes) = &raw_header {
+                        let bytes = bytes.as_ref();
+                        match form {
+                            HeaderForm::Raw => {
+                                HeaderValue::Text(String::from_utf8_lossy(bytes.trim_end()))
                             }
-                        } else {
-                            HeaderValue::Empty
+                            HeaderForm::Text => MessageStream::new(bytes).parse_unstructured(),
+                            HeaderForm::Addresses
+                            | HeaderForm::GroupedAddresses
+                            | HeaderForm::URLs => MessageStream::new(bytes).parse_address(),
+                            HeaderForm::MessageIds => MessageStream::new(bytes).parse_id(),
+                            HeaderForm::Date => MessageStream::new(bytes).parse_date(),
                         }
                     } else {
-                        HeaderValue::from(&header.value)
-                    };
+                        HeaderValue::Empty
+                    }
+                } else {
+                    HeaderValue::from(&header.value)
+                };
                 headers.push(header_value.into_form(&form));
                 if !all {
                     break;
@@ -539,4 +557,72 @@ fn from_mail_addrlist(addrlist: Vec<Addr<'_>>) -> Value<'static, EmailProperty, 
             .map(from_mail_addr)
             .collect::<Vec<Value<'static, EmailProperty, EmailValue>>>(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::HeaderToValue;
+    use crate::message::metadata::{ArchivedMessageMetadataContents, build_metadata_contents};
+    use jmap_proto::object::email::{EmailProperty, HeaderForm, HeaderProperty};
+    use mail_parser::MessageParser;
+    use utils::chained_bytes::ChainedBytes;
+
+    // inbuxa: List-Id parses as an address, and asText used to answer null
+    // for it (#642)
+    const RAW: &[u8] = b"From: a@example.org\r\n\
+List-Id: JSON Meta Access Protocol <jmap.example.org>\r\n\
+List-Help: <mailto:list-request@example.org?subject=help>\r\n\
+Subject: =?utf-8?q?caf=C3=A9?=\r\n\
+\r\n\
+body\r\n";
+
+    fn header(name: &str, form: HeaderForm) -> EmailProperty {
+        EmailProperty::Header(HeaderProperty {
+            form,
+            header: name.to_string(),
+            all: false,
+        })
+    }
+
+    const LIST_ID: &str = "JSON Meta Access Protocol <jmap.example.org>";
+
+    #[test]
+    fn structured_headers_as_text_from_the_parsed_message() {
+        let message = MessageParser::new().parse(RAW).unwrap();
+        let headers = &message.root_part().headers;
+        let raw = ChainedBytes::new(RAW);
+
+        let list_id = headers.header_to_value(&header("List-Id", HeaderForm::Text), &raw);
+        assert_eq!(list_id.as_str().as_deref(), Some(LIST_ID));
+        let subject = headers.header_to_value(&header("Subject", HeaderForm::Text), &raw);
+        assert_eq!(subject.as_str().as_deref(), Some("café"));
+        // asText on another structured header with a URL value
+        let help = headers.header_to_value(&header("List-Help", HeaderForm::Text), &raw);
+        assert_eq!(
+            help.as_str().as_deref(),
+            Some("<mailto:list-request@example.org?subject=help>")
+        );
+    }
+
+    #[test]
+    fn structured_headers_as_text_from_stored_metadata() {
+        let message = MessageParser::new().parse(RAW).unwrap();
+        let contents = build_metadata_contents(message);
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&contents[0]).unwrap();
+        let contents =
+            rkyv::access::<ArchivedMessageMetadataContents, rkyv::rancor::Error>(&bytes).unwrap();
+        let root = &contents.parts[0];
+        let raw = ChainedBytes::new(RAW);
+
+        let list_id = root.header_to_value(&header("List-Id", HeaderForm::Text), &raw);
+        assert_eq!(list_id.as_str().as_deref(), Some(LIST_ID));
+        let subject = root.header_to_value(&header("Subject", HeaderForm::Text), &raw);
+        assert_eq!(subject.as_str().as_deref(), Some("café"));
+        // The raw form is unchanged
+        let raw_list_id = root.header_to_value(&header("List-Id", HeaderForm::Raw), &raw);
+        assert_eq!(
+            raw_list_id.as_str().as_deref().map(str::trim),
+            Some(LIST_ID)
+        );
+    }
 }
