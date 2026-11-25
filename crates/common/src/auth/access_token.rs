@@ -1100,6 +1100,23 @@ impl AccessToken {
             .is_some_and(|d| d.access != inbuxa_features::lock::Access::Read)
     }
 
+    /// inbuxa: #643: a member of the shared mailbox `account_id` at the
+    /// full level, who manages its filters (sorting only, unless they are
+    /// also an administrator).
+    pub fn is_full_shared_mailbox_delegate(&self, account_id: u32) -> bool {
+        self.delegation(account_id).is_some_and(|d| {
+            d.kind == inbuxa_features::lock::Kind::SharedMailbox
+                && d.access == inbuxa_features::lock::Access::Full
+        })
+    }
+
+    /// inbuxa: #643: may read and change the Sieve scripts of `account_id`:
+    /// its owner, a group member, an `Impersonate` holder, or a full member
+    /// of a shared mailbox.
+    pub fn manages_sieve(&self, account_id: u32) -> bool {
+        self.is_member(account_id) || self.is_full_shared_mailbox_delegate(account_id)
+    }
+
     pub fn delegation(&self, account_id: u32) -> Option<&super::Delegation> {
         let now = now();
         self.inner

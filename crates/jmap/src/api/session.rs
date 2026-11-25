@@ -158,6 +158,14 @@ impl SessionHandler for Server {
                 account_capabilities: VecMap::with_capacity(account_capabilities.len()),
             };
             for capability in access_token.account_capabilities() {
+                // inbuxa: #643: filters only where they can be managed: a
+                // member's or an administrator's, or a shared mailbox's
+                // full members'
+                if capability == Capability::Sieve
+                    && !access_token.manages_sieve(account_id.document_id())
+                {
+                    continue;
+                }
                 account.account_capabilities.append(
                     capability,
                     account_capabilities

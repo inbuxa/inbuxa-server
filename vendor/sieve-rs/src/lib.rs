@@ -40,6 +40,46 @@ pub struct Sieve {
     num_match_vars: u32,
 }
 
+impl Sieve {
+    /// inbuxa: whether the compiled script holds an action that sends or
+    /// answers mail: `redirect` (with or without `:copy`), `vacation`,
+    /// `notify` (enotify) or `reject`/`ereject`. Read from the instructions,
+    /// not the `require` line, so a capability required and never used
+    /// doesn't count and one used without being required (with the
+    /// capability check off) does.
+    pub fn sends_mail(&self) -> bool {
+        self.instructions.iter().any(is_sending)
+    }
+
+    /// inbuxa: each of those actions with its arguments (the address, the
+    /// reply and its `:days`, `:addresses` and `:handle`, the method, the
+    /// reason), as text that is equal only for the same action written the
+    /// same way. Sorted, so two scripts' lists compare as multisets.
+    pub fn sending_actions(&self) -> Vec<String> {
+        let mut actions = self
+            .instructions
+            .iter()
+            .filter(|instruction| is_sending(instruction))
+            .map(|instruction| format!("{instruction:?}"))
+            .collect::<Vec<_>>();
+        actions.sort_unstable();
+        actions
+    }
+}
+
+/// inbuxa: an action that sends or answers mail, or the test that holds a
+/// vacation reply's period, addresses and handle.
+fn is_sending(instruction: &Instruction) -> bool {
+    matches!(
+        instruction,
+        Instruction::Redirect(_)
+            | Instruction::Vacation(_)
+            | Instruction::Notify(_)
+            | Instruction::Reject(_)
+            | Instruction::Test(compiler::grammar::test::Test::Vacation(_))
+    )
+}
+
 #[derive(Clone)]
 pub struct Compiler {
     // Settings

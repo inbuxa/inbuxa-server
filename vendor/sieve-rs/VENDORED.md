@@ -131,6 +131,13 @@ Every changed file carries the AGPL 5(a) notice in its header.
   redirects to an account that sends the mail back. The
   `enclose_hop_tests` in `action_mime.rs` cover it (run like
   `scan_limit_tests`).
+- `src/lib.rs`: `Sieve::sends_mail()` says whether a compiled script holds
+  `redirect`, `vacation`, `notify` or `reject`/`ereject`, read from its
+  instructions, and `Sieve::sending_actions()` lists each of them with its
+  arguments, sorted. The server uses them to keep a shared mailbox's member
+  who isn't an administrator from adding or changing those actions (#643).
+  The `sieve_sends_mail_reads_the_instructions` test in `crates/common`
+  covers both.
 - `Cargo.toml`: the example target is dropped, with the top-level
   `examples/` and `tests/`, which the server never builds. (`src/` keeps its
   own `tests` modules: the crate declares them.)
