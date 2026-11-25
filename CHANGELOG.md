@@ -36,7 +36,9 @@ updates.
   header. It now returns the header's text. (#642, #644)
 - Recovery mode: a server imported from Stalwart served its old web
   interface in recovery mode. Recovery mode now switches that interface
-  off. Thanks to Moritz. (#638, #639)
+  off. A server that already went through recovery mode kept serving it
+  afterwards too; it is switched off on the first start of this release,
+  with nothing to redo. Thanks to Moritz. (#638, #639)
 
 ### Changed
 - Dependencies: url 2.5.9, libz-sys 1.1.33 and zstd 0.13.5, for dependency
