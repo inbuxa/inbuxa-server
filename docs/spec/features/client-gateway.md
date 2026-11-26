@@ -1,9 +1,14 @@
 # Feature spec: client access through inbuxa-relay
 
-Status: design note, 2026-11-19, revised 2026-11-21 to cover both modes
-and 2026-11-24 for sign-in choices through a terminating relay (t/340 post
-11). Questions 1 to 13 answered 2026-11-21 (all as recommended); 14 is
-open. Still a suggestion: not approved, not planned, not scheduled.
+Status: design note, 2026-11-19, revised 2026-11-21 to cover both modes,
+2026-11-24 for sign-in choices through a terminating relay (t/340 post
+11), and 2026-11-25 after a review of the note (t/340 post 13): quarantine
+and rejoin are separate permissions, client tokens never trigger a
+quarantine, the ClientHello is reassembled, worker isolation is tested,
+strict CAA on every port is an option, and outside blocklists feed the
+blocked-address list. Questions 1 to 13 answered 2026-11-21 (all as
+recommended, 6 refined 2026-11-25 for the split keys); 14 and 15 are open.
+Still a suggestion: not approved, not planned, not scheduled.
 inbuxa-server #484 (milestone 27.7), discussed on the forum (t/340). It
 builds on
 `features/relay.md` and doesn't change any of that spec's rules.
@@ -22,6 +27,8 @@ inbuxa's own design. No upstream file or snippet was used. Sources:
 | RFC 7009 (token revocation), as built in #427 | Why sessions in terminating mode are bound to a relay instead of revoked one by one |
 | This repository: listener `proxyTrustedNetworks`, `BlockedIps` (`crates/common/src/network/security.rs`), CAA records (`crates/common/src/network/dns/records.rs`), OAuth revocation (`crates/common/src/auth/oauth/revoke.rs`) | What the downstream already has |
 | Forum t/340, posts 6 and 8 | The case for terminating mode, stateless relays, and detection and response |
+| Forum t/340, post 13 | Separate quarantine and rejoin permissions, client tokens kept out of the quarantine triggers, fragmented ClientHello tests, strict CAA on every port, worker isolation tests, outside blocklists |
+| RFC 8446 §5.1 (record layer: a handshake message may span records) | Why the ClientHello is reassembled before `server_name` is read |
 
 ## The question
 
@@ -160,7 +167,11 @@ Terminating:
   parsed in its own sandboxed worker process, with no access to other
   connections, the link credentials, or the certificate key. The worker
   hands rebuilt requests to the relay's main process over a pipe. Breaking
-  a worker gives an attacker their own connection and nothing else.
+  a worker gives an attacker their own connection and nothing else. "No
+  access" is checked, not assumed: a worker inherits no file descriptor
+  but its client socket and its pipe (everything else is close-on-exec),
+  and runs with limits on memory, open files, CPU time and processes, so
+  one connection that hits a limit ends that worker and nothing else.
 - **CG-12. Can be cut off at once.** The downstream can quarantine a relay
   in one step, from inbuxa-admin or with an API key that holds only that
   permission (see "Detection and response").
@@ -190,8 +201,11 @@ Terminating:
    anything, the relay checks the source address against the blocked list
    the downstream pushed, and the per-address connection rate and count.
    Failing either closes the connection.
-2. On 443 the relay reads the ClientHello (one TLS record, at most 16 KB,
-   within 5 s) and takes `server_name`. A name not in the relay's list of
+2. On 443 the relay reads the ClientHello (at most 16 KB in all, within
+   5 s), reassembling it when it arrives split over several TLS records or
+   TCP segments, which RFC 8446 §5.1 allows, and takes `server_name`. A
+   ClientHello that isn't complete in that size and time closes the
+   connection. A name not in the relay's list of
    client names closes the connection. On 993, 465 and 995 there is one
    target per port, and the name isn't checked.
 3. The relay takes an idle **stream** from its pool. A stream is an mTLS
@@ -243,7 +257,7 @@ clients will try it first and lose a few seconds.
    section or body over the limits, and a JMAP body that isn't valid JSON
    or is nested deeper than the server accepts. Compressed request bodies
    are refused.
-3. The worker writes the request out again: method, normalised path,
+3. The worker writes the request out again: method, normalized path,
    headers from an allow list with values re-encoded, JSON bodies
    re-serialized. The relay sends it on a stream with a header saying it
    was terminated, the client's address, and the relay's id and generation.
@@ -326,10 +340,14 @@ inbuxa-admin or through the API with a key holding only
 
 - An administrator.
 - The downstream itself, on things a healthy relay never does: a
-  terminating stream that isn't in canonical form, a token for another
-  relay or generation, a request on a port that is off, a link message
-  outside the protocol.
-- A monitor watching the relay's host. The scoped API key is meant for
+  terminating stream that isn't in canonical form, a request on a port
+  that is off, a link message outside the protocol. Only what the relay
+  itself produces counts. Anything a client controls never triggers a
+  quarantine, or a client could take the relay down at will: a token for
+  another relay or an older generation is what every phone holds after a
+  rebuild, so it's refused (CG-8) and counted, and a burst of them raises a
+  `RelayEvent` for the admin, nothing more.
+- A monitor watching the relay's host. The quarantine key is meant for
   this. The Cairn OBS agent is the first one to wire up: on a relay host it
   can watch for processes that shouldn't run, files changed on a read-only
   root, outbound connections other than the link and port 25 delivery, and
@@ -340,12 +358,29 @@ inbuxa-admin or through the API with a key holding only
 **Coming back clean.** Since the relay keeps nothing (CG-10), recovery is a
 rebuild from the signed image and a new join. Whatever runs the relay does
 the rebuild: Kubernetes, a systemd unit with a fresh image, a VPS restored
-from a snapshot. The scoped key can also ask for a join token, so an
-orchestrator can rebuild and rejoin with no one at a keyboard. A relay can
-also be rebuilt on a schedule, so a compromise nobody noticed still has a
-shelf life. CA rate limits cap how often the same names can be issued
-(Let's Encrypt allows 5 a week for an identical set), so a scheduled
-rebuild defaults to weekly where it's turned on.
+from a snapshot. A second scoped key, holding only `sysRelayRejoin`, can
+ask for a join token (the `rejoin: true` update on `inbuxa:Relay` from
+`features/relay.md`, which otherwise needs `sysRelayUpdate`), so an
+orchestrator can rebuild and rejoin with no one at a keyboard. The two
+permissions are never on one key: the quarantine key sits on a monitoring
+system, and if that system is taken it must not be able to cut a relay off
+and then join one of its own in its place. The rejoin key belongs to
+whatever rebuilds the relay, and every join token it asks for is logged and
+shown in inbuxa-admin. A relay can also be rebuilt on a schedule, so a
+compromise nobody noticed still has a shelf life. CA rate limits cap how
+often the same names can be issued (Let's Encrypt allows 5 a week for an
+identical set), so a scheduled rebuild defaults to weekly where it's turned
+on.
+
+**Outside blocklists.** Tools such as CrowdSec judge client addresses, not
+the relay. Their decisions belong in the blocked-address list this design
+has the downstream push to the relay (`blockedAddresses`, checked in step 1
+of "How a connection goes"), not in a quarantine. That list is the
+server's `BlockedIps`, so an outside tool adds to it the way the server's
+own bans after failed sign-ins do: a `BlockedIp` entry with an expiry,
+made through the API with a key holding only `sysBlockedIpCreate`.
+Quarantine stays for credible evidence that the relay itself is
+compromised.
 
 **Further out.** Several relays already serve one downstream (RL-25). With
 the Kubernetes recipe, terminating relays could run as short-lived pods,
@@ -401,7 +436,7 @@ quarantine.
 
 The server already publishes, for domains whose certificates it manages, a
 CAA record naming its CA and its ACME account (`accounturi`, RFC 8657). A CA
-that honours it issues only to that account, so the relay can't get one.
+that honors it issues only to that account, so the relay can't get one.
 Client access in either mode therefore needs:
 
 - the domain's certificates and DNS both managed by the server, as the
@@ -419,6 +454,13 @@ until it expires or is revoked at quarantine, and can't get another.
 A domain whose DNS isn't managed by the server can still use pass-through on
 993 and 465, with a warning in inbuxa-admin that an unrestricted CAA leaves
 the names open to a certificate from whoever runs the relay's address.
+
+**Strict CAA.** An admin can make the CAA check a hard stop on every client
+port, not just 443. Then 993, 465 and 995 also refuse to turn on until
+public DNS shows a CAA record naming the server's ACME account. That works
+for a domain whose DNS is managed elsewhere too: inbuxa-admin shows the
+record to add by hand, and the downstream checks it the same way. Off by
+default, so the existing warning-only behavior is unchanged (question 15).
 
 ## DNS
 
@@ -479,8 +521,8 @@ binaries (`inbuxa-relay-gateway`) from the same tag (RL-31), and the
 default relay keeps RL-3's budgets. It adds hyper's HTTP/2 server, the
 request rebuilder, the worker sandbox (seccomp and a process per
 connection), and certificate requests over the link. In the server: the
-canonical-form check, relay-bound tokens, quarantine, and the scoped
-permission. Rough size: another 3,000 to 4,000 lines. A worker per
+canonical-form check, relay-bound tokens, quarantine, and the two scoped
+permissions. Rough size: another 3,000 to 4,000 lines. A worker per
 connection costs a process each; at 500 connections that's measured before
 it's promised.
 
@@ -531,8 +573,15 @@ surprise.
   compromised relay from asking for one. That's part of why passkeys stay
   the default, and why the normal sign-in is something the admin turns on.
 - **The quarantine key.** Whoever holds it can take client access down, but
-  can't read or change anything else. That's the right trade for a key that
-  sits on a monitoring system.
+  can't read or change anything else, and can't bring a relay back: joining
+  needs the separate rejoin key. That's the right trade for a key that sits
+  on a monitoring system.
+- **The rejoin key.** Whoever holds it can ask for join tokens, so it's as
+  sensitive as the machine that rebuilds relays, and kept there. Each token
+  it asks for is logged and shown in inbuxa-admin.
+- **Clients trying to trip a quarantine.** Nothing a client sends counts as
+  evidence against the relay (see "What can trigger it"), so a client can't
+  turn a quarantine into a denial of service.
 
 ## A first step without code
 
@@ -557,8 +606,9 @@ Pass-through:
 - **CG-T2.** On 443, a ClientHello for a name not on the list is closed
   without a reply. One for an allowed name reaches the target and completes
   TLS with the downstream's certificate.
-- **CG-T3.** An address the server blocks after failed sign-ins is refused
-  at the relay within one push.
+- **CG-T3.** An address the server blocks after failed sign-ins, and one an
+  outside tool adds as a `BlockedIp` through the API, are each refused at
+  the relay within one push.
 - **CG-T4.** A connection asking for the webmail name with `Host:` set to
   the console's name gets 421 from the server's HTTPS listener.
 - **CG-T5.** 443 refuses to turn on, in either mode, while the domain has no
@@ -572,6 +622,17 @@ Pass-through:
   node closes the stream, and connects nowhere.
 - **CG-T9.** Ports 143, 110 and 587 can't be turned on for client access
   (refused by the server and by the relay).
+- **CG-T21.** A ClientHello split over two or more TLS records, one sent a
+  byte per TCP segment, and one with a post-quantum key share large enough
+  to need more than one segment are each routed exactly like the same
+  ClientHello sent whole. One that isn't complete within 16 KB or 5 s is
+  closed. The ClientHello reader is a fuzzing target, with these cases in
+  its seed corpus.
+- **CG-T22.** With strict CAA on, 993 and 465 (and 995 with legacy
+  protocols on) refuse to turn on while public
+  DNS has no CAA record naming the server's account, including for a domain
+  whose DNS is managed elsewhere, and turn on once the record is there.
+  With it off, they turn on with the warning.
 
 Terminating:
 
@@ -587,9 +648,19 @@ Terminating:
 - **CG-T14.** A token bound to relay R generation G is refused through
   relay R2, through R after a new generation, and on the server directly. A
   token issued inside the network is refused through R.
-- **CG-T15.** A quarantine through the scoped API key drops the link and
+- **CG-T15.** A quarantine through the quarantine key drops the link and
   every stream within 5 s, refuses the old tokens, requests revocation of
-  the certificate, and the relay can't link again until it rejoins.
+  the certificate, and the relay can't link again until it rejoins. The
+  same key is refused when it asks for a join token; only a key holding
+  `sysRelayRejoin` gets one, and the request shows in inbuxa-admin.
+- **CG-T23.** Clients sending tokens from an older generation, from
+  another relay, and from inside the network, a thousand a minute, are
+  each refused, and the relay is not quarantined; a `RelayEvent` reports
+  the burst.
+- **CG-T24.** A worker's open file descriptors are its client socket, its
+  pipe and nothing else. A worker that allocates past its memory limit,
+  opens files past its limit, spins past its CPU limit or tries to fork
+  ends alone, and the other connections on the relay carry on.
 - **CG-T16.** The relay's state directory and logs never hold the
   certificate key, a token, or request content, after a session that used
   all three.
@@ -628,7 +699,10 @@ suggestion open for discussion on the forum (t/340).
    keeps RL-3?** Recommended: yes.
 6. **A quarantine permission for outside monitors, with Cairn OBS as the
    first integration?** Recommended: yes, and kept generic so any monitor
-   can call it.
+   can call it. Refined 2026-11-25 (t/340 post 13): `sysRelayQuarantine`
+   only quarantines. Asking for a join token is a separate permission,
+   `sysRelayRejoin`, held by whatever rebuilds the relay and never on the
+   same key, so a taken monitor can't cut a relay off and join its own.
 7. **Scheduled rebuilds.** Recommended: off by default, weekly when on,
    because of CA rate limits.
 8. **A worker per connection (CG-11)?** Recommended: yes as the design,
@@ -646,7 +720,7 @@ suggestion open for discussion on the forum (t/340).
 13. **Milestone.** Recommended: stays in 27.7, unscheduled until 12
     has an answer.
 
-Open (added 2026-11-24, from t/340):
+Open (added 2026-11-24 and 2026-11-25, from t/340):
 
 14. **Sign-in choices through a terminating relay.** Recommended: passkeys
     on by default; the server's normal sign-in on a pass-through sign-in
@@ -655,3 +729,9 @@ Open (added 2026-11-24, from t/340):
     default (CG-14); users can narrow but not widen. This refines answer 4:
     still no password through a terminating name, but passkeys are no
     longer the only way in.
+15. **Strict CAA on every client port.** Recommended: an option, off by
+    default. When it's on, 993, 465 and 995 refuse to turn on, like 443
+    (answer 10), until public DNS has a CAA record naming the server's ACME
+    account, including for a domain whose DNS is managed elsewhere, where
+    inbuxa-admin shows the record to add by hand (CG-T22). When it's off,
+    those ports keep the warning they have now.
