@@ -15,6 +15,22 @@ https://github.com/inbuxa/inbuxa-server/security/advisories.
 Every version PR adds that version's entry here. CI refuses a version this
 file has no entry for (`tools/release/version.py --changelog`).
 
+## [27.1-rc.49] - 2026-11-26
+
+27.1-rc.48 with one OAuth fix.
+
+### Security
+- OAuth: with `requireClientRegistration` off, a registered client's
+  redirect URI wasn't checked against its registration, so the code for a
+  public registered client, such as the web interface's, could be sent to
+  any https address. A registered client's redirect is now always checked;
+  the setting only lets through clients nobody registered. The setting is
+  on by default. The same fix is in 2026.11.26. (#651)
+
+### Before you upgrade
+- 27.1-rc.48 to 27.1-rc.49 rolls like any update, with no store layout
+  step.
+
 ## [27.1-rc.48] - 2026-11-25
 
 27.1-rc.47 with filters for shared mailboxes, two fixes, and dependency
