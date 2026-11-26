@@ -11,6 +11,18 @@ https://github.com/inbuxa/inbuxa-server/security/advisories.
 Every version PR adds that version's entry here. CI refuses a version this
 file has no entry for (`tools/release/changelog-check.py`).
 
+## [2026.11.26] - 2026-11-26
+
+2026.11.25 with one OAuth fix. The same fix is in 27.1-rc.49.
+
+### Security
+- OAuth: with `requireClientRegistration` off, a registered client's
+  redirect URI wasn't checked against its registration, so the code for a
+  public registered client, such as the web interface's, could be sent to
+  any https address. A registered client's redirect is now always checked;
+  the setting only lets through clients nobody registered. The setting is
+  on by default. (#652)
+
 ## [2026.11.25] - 2026-11-25
 
 2026.11.24.2 with security fixes (two high, four medium, two low, and two
