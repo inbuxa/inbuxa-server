@@ -7,8 +7,8 @@
  */
 
 use super::{
-    DeviceAuthResponse, FormData, MAX_POST_LEN, OAuthCode, PkceCodeChallenge, TokenResponse,
-    token::client_credentials,
+    DeviceAuthResponse, ErrorType, FormData, MAX_POST_LEN, OAuthCode, PkceCodeChallenge,
+    TokenResponse, token::client_credentials,
 };
 use crate::auth::oauth::{
     OAuthStatus, openid::OpenIdHandler, registration::ClientRegistrationHandler,
@@ -25,6 +25,7 @@ use common::{
             registration::{redirect_uri_matches, validate_redirect_uri},
         },
     },
+    manager::first_party,
 };
 use directory::Credentials;
 use http_proto::*;
@@ -263,9 +264,15 @@ impl OAuthApiHandler for Server {
                     && (redirect_uri.starts_with("https://")
                         || validate_redirect_uri(&redirect_uri).is_err())
                 {
-                    return Err(trc::AuthEvent::Error.into_err().details(
-                        "An unregistered client may only redirect to a loopback address or a private-use scheme.",
-                    ));
+                    // inbuxa: #614: the server's own front ends are refused
+                    // here when the variable that registers them is missing;
+                    // say which one
+                    return Err(trc::AuthEvent::Error
+                        .into_err()
+                        .details(first_party::unregistered_client_hint(&client_id).unwrap_or(
+                            "An unregistered client may only redirect to a loopback address or a private-use scheme.",
+                        ))
+                        .ctx(trc::Key::Id, client_id.to_string()));
                 }
 
                 // Validate Resource Indicators (RFC 8707)
@@ -346,18 +353,26 @@ impl OAuthApiHandler for Server {
                     Ok(access_token) => {
                         // Registry-backed clients are validated once the account is known
                         if stateless_client.is_none()
-                            && self
+                            && let Some(error) = self
                                 .validate_client_registration(
                                     &client_id,
                                     Some(redirect_uri.as_str()),
                                     access_token.account_id(),
                                 )
                                 .await?
-                                .is_some()
                         {
+                            // inbuxa: #614: name what to set when it's one of
+                            // the server's own front ends
+                            let hint = match error {
+                                ErrorType::InvalidRequest => {
+                                    first_party::unregistered_client_hint(&client_id)
+                                }
+                                _ => first_party::redirect_mismatch_hint(&client_id),
+                            };
                             return Err(trc::AuthEvent::Error
                                 .into_err()
-                                .details("Invalid client registration."));
+                                .details(hint.unwrap_or("Invalid client registration."))
+                                .ctx(trc::Key::Id, client_id.to_string()));
                         }
 
                         // Generate client code

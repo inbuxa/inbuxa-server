@@ -73,6 +73,48 @@ pub fn is_reserved_client_id(client_id: &str) -> bool {
     .any(|reserved| client_id.trim().eq_ignore_ascii_case(reserved))
 }
 
+/// What to set so the server registers one of its own front ends, for a
+/// sign-in refused because that client isn't registered (#614). `None` for
+/// any other client id.
+pub fn unregistered_client_hint(client_id: &str) -> Option<&'static str> {
+    let id = client_id.trim();
+    if id.eq_ignore_ascii_case(ADMIN_CLIENT_ID) {
+        Some(
+            "The console's OAuth client inbuxa-admin isn't registered. Start the server with INBUXA_ADMIN_URL set to the console's address.",
+        )
+    } else if id.eq_ignore_ascii_case(WEBMAIL_CLIENT_ID) {
+        Some(
+            "The webmail's OAuth client ihasmail-inbuxa isn't registered. Start the server with INBUXA_WEBMAIL_URL and INBUXA_WEBMAIL_CLIENT_SECRET set.",
+        )
+    } else if id.eq_ignore_ascii_case(WEB_INTERFACE_CLIENT_ID)
+        || id.eq_ignore_ascii_case(LEGACY_WEB_INTERFACE_CLIENT_ID)
+    {
+        Some(
+            "This server serves no web interface of its own, so its OAuth client isn't registered. Run the console on its own and start the server with INBUXA_ADMIN_URL set to its address.",
+        )
+    } else {
+        None
+    }
+}
+
+/// What to fix when one of the server's own front ends is registered but
+/// signs in from an address it wasn't registered with (#614). `None` for any
+/// other client id.
+pub fn redirect_mismatch_hint(client_id: &str) -> Option<&'static str> {
+    let id = client_id.trim();
+    if id.eq_ignore_ascii_case(ADMIN_CLIENT_ID) {
+        Some(
+            "The console isn't registered at this address. Set INBUXA_ADMIN_URL to the console's address exactly as the browser opens it (scheme, host and port), then restart the server.",
+        )
+    } else if id.eq_ignore_ascii_case(WEBMAIL_CLIENT_ID) {
+        Some(
+            "The webmail isn't registered at this address. Set INBUXA_WEBMAIL_URL to the webmail's address exactly as the browser opens it (scheme, host and port), then restart the server.",
+        )
+    } else {
+        None
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FirstPartyClient {
     pub client_id: String,
@@ -602,6 +644,36 @@ mod tests {
                 secret: None,
             }]
         );
+    }
+
+    #[test]
+    fn hints_name_the_missing_variable() {
+        let admin = unregistered_client_hint(" Inbuxa-Admin ").unwrap();
+        assert!(admin.contains("INBUXA_ADMIN_URL"));
+        let webmail = unregistered_client_hint(WEBMAIL_CLIENT_ID).unwrap();
+        assert!(webmail.contains("INBUXA_WEBMAIL_URL"));
+        assert!(webmail.contains("INBUXA_WEBMAIL_CLIENT_SECRET"));
+        for id in [WEB_INTERFACE_CLIENT_ID, LEGACY_WEB_INTERFACE_CLIENT_ID] {
+            assert!(
+                unregistered_client_hint(id)
+                    .unwrap()
+                    .contains("INBUXA_ADMIN_URL")
+            );
+        }
+        assert!(unregistered_client_hint("thunderbird").is_none());
+
+        assert!(
+            redirect_mismatch_hint(ADMIN_CLIENT_ID)
+                .unwrap()
+                .contains("INBUXA_ADMIN_URL")
+        );
+        assert!(
+            redirect_mismatch_hint(WEBMAIL_CLIENT_ID)
+                .unwrap()
+                .contains("INBUXA_WEBMAIL_URL")
+        );
+        assert!(redirect_mismatch_hint(WEB_INTERFACE_CLIENT_ID).is_none());
+        assert!(redirect_mismatch_hint("thunderbird").is_none());
     }
 
     #[test]
