@@ -261,11 +261,9 @@ impl ClientRegistrationHandler for Server {
         if !self.client_serves_account(client_id, account_id).await? {
             return Ok(Some(ErrorType::InvalidClient));
         }
-        if !self.core.oauth.require_client_authentication {
-            return Ok(None);
-        }
-
-        // Fetch client registration
+        // Fetch client registration. inbuxa: a registered client's redirect
+        // URI is matched even when registration isn't required; that setting
+        // only lets clients nobody registered through (OAUTH-F1)
         let found_registration = if let Some(client_id) = self
             .registry()
             .primary_key(
@@ -301,6 +299,8 @@ impl ClientRegistrationHandler for Server {
             }
 
             true
+        } else if !self.core.oauth.require_client_authentication {
+            return Ok(None);
         } else {
             false
         };
