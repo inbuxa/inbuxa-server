@@ -406,7 +406,15 @@ pub async fn test(test: &mut TestServer) {
 
     // inbuxa: with registration not required, a client nobody registered
     // gets a code only with PKCE (S256), and only for a loopback or
-    // private-use redirect (RFC 8252)
+    // private-use redirect (RFC 8252). A registered client still gets one
+    // only for its own redirect URIs (OAUTH-F1).
+    let registered_app = admin
+        .registry_create_object(OAuthClient {
+            client_id: "registered-app".to_string(),
+            redirect_uris: vec!["https://app.example.net/cb".to_string()].into(),
+            ..Default::default()
+        })
+        .await;
     for require in [false, true] {
         admin
             .registry_update_setting(
@@ -418,6 +426,31 @@ pub async fn test(test: &mut TestServer) {
             )
             .await;
         admin.reload_settings().await;
+        for (redirect, expected) in [
+            ("https://app.example.net/cb", true),
+            ("https://attacker.example.net/cb", false),
+        ] {
+            let (status, _) = post_login_raw(&LoginRequest::AuthCode {
+                account_name: "user@example.org".to_string(),
+                account_secret: "this is a very strong password".to_string(),
+                mfa_token: None,
+                client_id: "registered-app".to_string(),
+                redirect_uri: redirect.to_string().into(),
+                nonce: None,
+                scope: Some(PROFILE_SCOPE.to_string()),
+                code_challenge: Some(PKCE_CHALLENGE.to_string()),
+                code_challenge_method: Some("S256".to_string()),
+                state: None,
+                resource: vec![],
+                passkey: None,
+            })
+            .await;
+            assert_eq!(
+                status == 200,
+                expected,
+                "registered client, {redirect}, registration required {require}: {status}"
+            );
+        }
         if !require {
             for (redirect, challenge, expected) in [
                 ("com.example.app:/cb", None, false),
@@ -454,6 +487,10 @@ pub async fn test(test: &mut TestServer) {
             }
         }
     }
+
+    admin
+        .registry_destroy(ObjectType::OAuthClient, [registered_app])
+        .await;
 
     // Authenticate with the correct password, PKCE (S256), scope and a valid resource indicator
     let response = http
