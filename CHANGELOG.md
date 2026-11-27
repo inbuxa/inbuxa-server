@@ -15,6 +15,26 @@ https://github.com/inbuxa/inbuxa-server/security/advisories.
 Every version PR adds that version's entry here. CI refuses a version this
 file has no entry for (`tools/release/version.py --changelog`).
 
+## [27.1-rc.50] - 2026-11-27
+
+27.1-rc.49 with two logging fixes. The last release candidate before the
+27.1 feature freeze on 1 December.
+
+### Fixed
+- Sign-in: when the console or the webmail can't sign in because the
+  server never registered it, the log now names the client and the
+  variable to set (`INBUXA_ADMIN_URL`, or `INBUXA_WEBMAIL_URL` and
+  `INBUXA_WEBMAIL_CLIENT_SECRET`), and every such refusal carries the
+  client id. Thanks to Moritz. (#614, #655)
+- HTTP: with `INBUXA_HTTP_USE_FORWARDED` on, health checks to `/healthz/`
+  no longer log a missing X-Forwarded-For warning. Probes and the image's
+  HEALTHCHECK call them directly every few seconds, which on Kubernetes
+  buried everything else in the logs. Every other path still warns. (#656)
+
+### Before you upgrade
+- 27.1-rc.49 to 27.1-rc.50 rolls like any update, with no store layout
+  step.
+
 ## [27.1-rc.49] - 2026-11-26
 
 27.1-rc.48 with one OAuth fix.
