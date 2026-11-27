@@ -840,10 +840,16 @@ async fn handle_session<T: SessionStream>(inner: Arc<Inner>, session: SessionDat
 
                     forwarded_for
                 } else {
-                    trc::event!(
-                        Http(trc::HttpEvent::XForwardedMissing),
-                        SpanId = session.session_id,
-                    );
+                    // inbuxa: health checks come straight from the kubelet or
+                    // the container runtime, never through the proxy, and
+                    // arrive every few seconds: warning for each one buries
+                    // the log
+                    if !req.uri().path().starts_with("/healthz/") {
+                        trc::event!(
+                            Http(trc::HttpEvent::XForwardedMissing),
+                            SpanId = session.session_id,
+                        );
+                    }
                     session.remote_ip
                 };
 
