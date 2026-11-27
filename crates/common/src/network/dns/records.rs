@@ -36,6 +36,10 @@ impl Server {
         let mut records = Vec::new();
         let network = &self.core.network;
         let default_host = network.server_name.as_str();
+        // inbuxa: #657, HTTPS names point where HTTPS answers: the public
+        // URL's host, which on a cluster is the Gateway's, not the mail
+        // Service's. The same name as before on a single machine.
+        let https_host = https_host(&network.http.url_https).unwrap_or(default_host);
         let domain_name = domain.name.as_str();
         // inbuxa: legacy-protocols LP-7, LP-14a
         let legacy_off = self.legacy_off_for(domain_name).await?;
@@ -140,6 +144,13 @@ impl Server {
                         }
                         continue;
                     }
+                    // inbuxa: #657, mail that leaves from other addresses
+                    // than the MX hosts' (a cluster's egress) is allowed by
+                    // those addresses too, for the domain and for the hosts'
+                    // own names (the HELO check)
+                    let outbound = &network.info.outbound_addresses;
+                    let host_policy = spf_policy("a", outbound);
+                    let domain_policy = spf_policy("mx", outbound);
                     let mxs = network
                         .info
                         .mxs
@@ -151,14 +162,14 @@ impl Server {
                         if mx.ends_with(&domain_name_suffix) {
                             records.push(NamedDnsRecord {
                                 name: format!("{mx}."),
-                                record: DnsRecord::TXT("v=spf1 a -all".to_string()),
+                                record: DnsRecord::TXT(host_policy.clone()),
                             });
                         }
                     }
 
                     records.push(NamedDnsRecord {
                         name: format!("{domain_name}."),
-                        record: DnsRecord::TXT("v=spf1 mx -all".to_string()),
+                        record: DnsRecord::TXT(domain_policy),
                     });
                 }
                 DnsRecordType::Dmarc => {
@@ -193,7 +204,7 @@ impl Server {
                     if let Some(policy) = &self.core.smtp.session.mta_sts_policy {
                         records.push(NamedDnsRecord {
                             name: format!("mta-sts.{domain_name}."),
-                            record: DnsRecord::CNAME(format!("{default_host}.")),
+                            record: DnsRecord::CNAME(format!("{https_host}.")),
                         });
 
                         records.push(NamedDnsRecord {
@@ -208,7 +219,7 @@ impl Server {
 
                     records.push(NamedDnsRecord {
                         name: format!("ua-auto-config.{domain_name}."),
-                        record: DnsRecord::CNAME(format!("{default_host}.")),
+                        record: DnsRecord::CNAME(format!("{https_host}.")),
                     });
                     records.push(NamedDnsRecord {
                         name: format!("_ua-auto-config.{domain_name}."),
@@ -220,19 +231,25 @@ impl Server {
                 DnsRecordType::AutoConfigLegacy => {
                     records.push(NamedDnsRecord {
                         name: format!("autoconfig.{domain_name}."),
-                        record: DnsRecord::CNAME(format!("{default_host}.")),
+                        record: DnsRecord::CNAME(format!("{https_host}.")),
                     });
                 }
                 DnsRecordType::AutoDiscover => {
                     records.push(NamedDnsRecord {
                         name: format!("autodiscover.{domain_name}."),
-                        record: DnsRecord::CNAME(format!("{default_host}.")),
+                        record: DnsRecord::CNAME(format!("{https_host}.")),
                     });
                 }
                 DnsRecordType::Srv => {
                     for (protocol, service) in &network.info.services {
-                        let target =
-                            format!("{}.", service.hostname.as_deref().unwrap_or(default_host));
+                        let target = format!(
+                            "{}.",
+                            service.hostname.as_deref().unwrap_or(service_host(
+                                protocol,
+                                default_host,
+                                https_host
+                            ))
+                        );
                         let services = match protocol {
                             ServiceProtocol::Jmap
                             | ServiceProtocol::Caldav
@@ -356,7 +373,11 @@ impl Server {
                     }
 
                     for (protocol, service) in &network.info.services {
-                        let hostname = service.hostname.as_deref().unwrap_or(default_host);
+                        let hostname = service.hostname.as_deref().unwrap_or(service_host(
+                            protocol,
+                            default_host,
+                            https_host,
+                        ));
                         if hostname.ends_with(&domain_name_suffix) || hostname == domain_name {
                             // inbuxa: legacy-protocols LP-7. No TLS pin for a port
                             // the switch has closed. Submission's port stays open
@@ -537,6 +558,54 @@ fn persist_validation_record(
     }
 }
 
+/// inbuxa: #657. The host of an `https://` public URL on the default port,
+/// for HTTPS names to point at; None for another scheme or port, or an
+/// address (a CNAME can't point at one), and the default hostname is used.
+fn https_host(url: &str) -> Option<&str> {
+    let authority = url
+        .strip_prefix("https://")?
+        .split(['/', '?', '#'])
+        .next()?;
+    let host = authority.strip_suffix(":443").unwrap_or(authority);
+    let host = host.trim_end_matches('.');
+    (!host.is_empty()
+        && !host.contains([':', '@', '[', ']'])
+        && host.parse::<std::net::IpAddr>().is_err())
+    .then_some(host)
+}
+
+/// inbuxa: #657. Where a service with no hostname of its own answers: the
+/// HTTPS ones on the public URL's host, the rest on the default hostname.
+fn service_host<'x>(
+    protocol: &ServiceProtocol,
+    default_host: &'x str,
+    https_host: &'x str,
+) -> &'x str {
+    match protocol {
+        ServiceProtocol::Jmap
+        | ServiceProtocol::Caldav
+        | ServiceProtocol::Carddav
+        | ServiceProtocol::Webdav => https_host,
+        ServiceProtocol::Imap
+        | ServiceProtocol::Pop3
+        | ServiceProtocol::Smtp
+        | ServiceProtocol::Managesieve => default_host,
+    }
+}
+
+/// inbuxa: #657. An SPF policy allowing `mechanism` and these addresses.
+fn spf_policy(mechanism: &str, addresses: &[std::net::IpAddr]) -> String {
+    let mut policy = format!("v=spf1 {mechanism}");
+    for address in addresses {
+        match address {
+            std::net::IpAddr::V4(ip) => policy.push_str(&format!(" ip4:{ip}")),
+            std::net::IpAddr::V6(ip) => policy.push_str(&format!(" ip6:{ip}")),
+        }
+    }
+    policy.push_str(" -all");
+    policy
+}
+
 fn provider_domain(url: &Url) -> Option<&str> {
     // inbuxa: test builds name the local Pebble, whose URL has no public
     // suffix; cfg! keeps `url` in use there, so the build has no warning
@@ -544,5 +613,73 @@ fn provider_domain(url: &Url) -> Option<&str> {
         Some("pebble.letsencrypt.org")
     } else {
         url.host_str().and_then(psl::domain_str)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn https_host_from_public_url() {
+        assert_eq!(
+            https_host("https://mail.example.org"),
+            Some("mail.example.org")
+        );
+        assert_eq!(
+            https_host("https://mail.example.org/"),
+            Some("mail.example.org")
+        );
+        assert_eq!(
+            https_host("https://mail.example.org:443/x"),
+            Some("mail.example.org")
+        );
+        assert_eq!(
+            https_host("https://web.example.org."),
+            Some("web.example.org")
+        );
+        // Not somewhere a CNAME can point at port 443
+        assert_eq!(https_host("https://mail.example.org:8443"), None);
+        assert_eq!(https_host("http://mail.example.org"), None);
+        assert_eq!(https_host("https://127.0.0.1"), None);
+        assert_eq!(https_host("https://[2001:db8::1]"), None);
+        assert_eq!(https_host("https://user@mail.example.org"), None);
+        assert_eq!(https_host(""), None);
+    }
+
+    #[test]
+    fn https_services_follow_the_public_url() {
+        for protocol in [
+            ServiceProtocol::Jmap,
+            ServiceProtocol::Caldav,
+            ServiceProtocol::Carddav,
+            ServiceProtocol::Webdav,
+        ] {
+            assert_eq!(service_host(&protocol, "mx", "web"), "web");
+        }
+        for protocol in [
+            ServiceProtocol::Imap,
+            ServiceProtocol::Pop3,
+            ServiceProtocol::Smtp,
+            ServiceProtocol::Managesieve,
+        ] {
+            assert_eq!(service_host(&protocol, "mx", "web"), "mx");
+        }
+    }
+
+    #[test]
+    fn spf_names_the_outbound_addresses() {
+        assert_eq!(spf_policy("mx", &[]), "v=spf1 mx -all");
+        assert_eq!(spf_policy("a", &[]), "v=spf1 a -all");
+        assert_eq!(
+            spf_policy(
+                "mx",
+                &[
+                    "198.51.100.7".parse().unwrap(),
+                    "2001:db8::7".parse().unwrap()
+                ]
+            ),
+            "v=spf1 mx ip4:198.51.100.7 ip6:2001:db8::7 -all"
+        );
     }
 }
