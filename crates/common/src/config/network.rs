@@ -712,24 +712,31 @@ fn default_trusted_proxies() -> Vec<IpAddrOrMask> {
 impl AsnGeoLookupConfig {
     pub async fn parse(bp: &mut Bootstrap) -> Option<Self> {
         match bp.setting_infallible::<Asn>().await {
-            Asn::Resource(asn) => Some(AsnGeoLookupConfig::Resource {
-                expires: asn.expires.into_inner(),
-                timeout: asn.timeout.into_inner(),
-                max_size: asn.max_size as usize,
-                headers: asn
-                    .http_auth
-                    .build_headers(asn.http_headers, None)
-                    .await
-                    .map_err(|err| {
-                        bp.build_error(
-                            ObjectType::Asn.singleton(),
-                            format!("Unable to build HTTP headers: {}", err),
-                        )
-                    })
-                    .ok()?,
-                asn_resources: asn.asn_urls.into_inner(),
-                geo_resources: asn.geo_urls.into_inner(),
-            }),
+            Asn::Resource(asn) => {
+                // inbuxa: D8, empty lists mean the built-in ones
+                let (asn_resources, geo_resources) = crate::manager::defaults::asn_geo_urls(
+                    asn.asn_urls.clone().into_inner(),
+                    asn.geo_urls.clone().into_inner(),
+                );
+                Some(AsnGeoLookupConfig::Resource {
+                    expires: asn.expires.into_inner(),
+                    timeout: asn.timeout.into_inner(),
+                    max_size: asn.max_size as usize,
+                    headers: asn
+                        .http_auth
+                        .build_headers(asn.http_headers, None)
+                        .await
+                        .map_err(|err| {
+                            bp.build_error(
+                                ObjectType::Asn.singleton(),
+                                format!("Unable to build HTTP headers: {}", err),
+                            )
+                        })
+                        .ok()?,
+                    asn_resources,
+                    geo_resources,
+                })
+            }
             Asn::Dns(asn) => Some(AsnGeoLookupConfig::Dns {
                 zone_ipv4: asn.zone_ip_v4,
                 zone_ipv6: asn.zone_ip_v6,

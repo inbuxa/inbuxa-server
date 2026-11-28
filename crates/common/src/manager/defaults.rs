@@ -46,6 +46,21 @@ pub const GEO_IPV4: &str =
 pub const GEO_IPV6: &str =
     "https://github.com/sapics/ip-location-db/releases/download/latest/user-country-ipv6.csv";
 
+/// inbuxa: D8. The ASN and country lists a URL Resource fetches. Lists the
+/// administrator left empty, both of them, mean these defaults, so opting
+/// in is choosing URL Resource and nothing more. One list filled in is
+/// taken as meant: the other stays empty.
+pub fn asn_geo_urls(asn: Vec<String>, geo: Vec<String>) -> (Vec<String>, Vec<String>) {
+    if asn.is_empty() && geo.is_empty() {
+        (
+            vec![ASN_IPV4.into(), ASN_IPV6.into()],
+            vec![GEO_IPV4.into(), GEO_IPV6.into()],
+        )
+    } else {
+        (asn, geo)
+    }
+}
+
 pub trait BootstrapDefaults {
     fn insert_safe_defaults(&mut self) -> impl Future<Output = ()> + Send;
 }
@@ -566,22 +581,11 @@ async fn insert_normal_defaults(bp: &mut Bootstrap) -> trc::Result<()> {
         }
     }
 
-    #[cfg(not(any(feature = "dev_mode", feature = "test_mode")))]
-    if bp.registry.count_object(ObjectType::Asn).await? == 0 {
-        bp.registry
-            .write(RegistryWrite::insert(
-                &Asn::Resource(AsnResource {
-                    asn_urls: Map::new(vec![ASN_IPV4.into(), ASN_IPV6.into()]),
-                    geo_urls: Map::new(vec![GEO_IPV4.into(), GEO_IPV6.into()]),
-                    max_size: 104857600,
-                    expires: Duration::from_millis(24 * 60 * 60 * 1000),
-                    timeout: Duration::from_millis(5 * 60 * 1000),
-                    ..Default::default()
-                })
-                .into(),
-            ))
-            .await?;
-    }
+    // inbuxa: personal-data catalog, default D8: no ASN/GeoIP object is
+    // written, so a new install reads `Asn::Disabled` and downloads nothing
+    // until an administrator opts in. A server that already has the object
+    // (every server set up before this) keeps it. Choosing URL Resource with
+    // no URLs uses the lists below (`asn_geo_urls`).
 
     #[cfg(not(feature = "test_mode"))]
     if bp.registry.count_object(ObjectType::TracingStore).await? == 0 {
@@ -714,6 +718,30 @@ mod tests {
     use super::*;
 
     const DAY: u64 = 24 * 60 * 60 * 1000;
+
+    #[test]
+    fn empty_asn_geo_lists_mean_the_built_in_ones() {
+        let (asn, geo) = asn_geo_urls(vec![], vec![]);
+        assert_eq!(asn, vec![ASN_IPV4.to_string(), ASN_IPV6.to_string()]);
+        assert_eq!(geo, vec![GEO_IPV4.to_string(), GEO_IPV6.to_string()]);
+    }
+
+    #[test]
+    fn asn_geo_lists_the_administrator_gave_are_kept() {
+        let mine = vec!["https://mirror.example/asn.csv".to_string()];
+        let (asn, geo) = asn_geo_urls(mine.clone(), vec![]);
+        assert_eq!(asn, mine);
+        assert!(
+            geo.is_empty(),
+            "one list filled in is meant: the other stays empty"
+        );
+    }
+
+    #[test]
+    fn a_new_install_downloads_no_asn_geo_lists() {
+        // D8: first boot writes no Asn object, so the default is what's read
+        assert_eq!(Asn::default(), Asn::Disabled);
+    }
 
     #[test]
     fn new_installs_get_the_privacy_defaults() {

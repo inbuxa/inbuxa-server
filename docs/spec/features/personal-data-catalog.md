@@ -413,6 +413,13 @@ spam-rules loader, which keeps each blocklist's on/off state. D5 built after the
 switch through later updates. An existing server has no note and keeps
 every blocklist as it is.
 
+**D8 (John, 2026-11-28: "off unless they opt-in").** Upstream's first boot
+wrote an `x:Asn` URL Resource pointing at four GitHub-hosted CSVs, fetched at
+startup and daily. It sends no personal data, but it was the one download a
+new server made on its own. First boot no longer writes it. Unlike D2-D6 this
+is not tied to `is_new_install`: the object was written whenever none
+existed, so every server that has run before already has it and keeps it.
+
 | # | Change | Trade-off |
 |---|---|---|
 | D1 | A **log retention** setting on `x:TracerLog` (delete rotated files older than N days), default 30 days for new installs | Needs code (a new field, so a schema edit); older logs gone for troubleshooting; operators wanting longer set it |
@@ -422,6 +429,7 @@ every blocklist as it is.
 | D5 | **msbl.org EBL off** by default (the list that receives hashed addresses) | One fewer signal on address-based spam; no hashed addresses leave the host |
 | D6 | **Trace retention** 30 → 14 days | Shorter delivery history in **Emails › History** and for support |
 | D7 | Webhooks default to `eventsPolicy = include` with no events, and never receive raw-I/O events unless listed by name | A webhook does nothing until events are chosen; closes finding 1 |
+| D8 | **ASN/GeoIP lists off** by default: first boot writes no `x:Asn` object, so a new install reads `Disabled`. Choosing URL Resource with both URL lists empty fetches the built-in `ip-location-db` lists (`asn_geo_urls`) | No network or country signal for the spam filter or the `Received:` header until an administrator opts in; GitHub no longer sees a new server's address and the `inbuxa/1.0.0` user agent daily |
 
 Separately, **not defaults but gaps** a later spec should close (listed so
 they aren't lost): clearing inbuxa's own records on account deletion
@@ -662,7 +670,8 @@ John's answers, 2026-09-28, to the questions this spec asked:
    (Phase 3), not after data subject requests.
 4. **Shortening audit retention is recorded and surfaced**, not gated on a
    second person: a server may have only one.
-5. **All seven defaults, D1–D7, for new installs.** Built in Phase 3.
+5. **All seven defaults, D1–D7, for new installs.** Built in Phase 3. D8
+   added 2026-11-28.
 6. **Finding 1 is fixed now**, as a bug, separately from this work.
 7. **Snapshots are kept as long as the audit log** (`keepForDays`).
 
