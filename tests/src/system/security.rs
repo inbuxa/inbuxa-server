@@ -492,6 +492,166 @@ pub async fn test(test: &mut TestServer) {
         query.0
     );
 
+    // inbuxa: count spec, CNT-1 to CNT-10: off and undecided until asked; on
+    // makes an install ID the preview carries; off removes it; a bad
+    // endpoint is refused. The endpoint is a closed local port, so the one
+    // /forget turning off sends (CNT-7) never leaves the host.
+    let count_get = || {
+        admin.jmap_request(
+            using,
+            json!([["inbuxa:CountSettings/get", {"accountId": account, "ids": null}, "0"]]),
+        )
+    };
+    let count_set = |update: serde_json::Value| {
+        admin.jmap_request(
+            using,
+            json!([["inbuxa:CountSettings/set", {"accountId": account,
+                "update": {"singleton": update}}, "0"]]),
+        )
+    };
+    let got = count_get().await;
+    let settings = got.0.pointer("/methodResponses/0/1/list/0").cloned();
+    let settings = settings.unwrap_or_else(|| panic!("{}", got.0));
+    assert_eq!(settings["enabled"], json!(false), "{settings}");
+    assert_eq!(settings["decided"], json!(false), "{settings}");
+    assert_eq!(settings["installId"], serde_json::Value::Null);
+    assert_eq!(settings["lastCheckIn"], serde_json::Value::Null);
+    assert_eq!(settings["endpoint"], json!("https://inbuxa.org/count/v1"));
+    assert!(
+        settings["preview"].as_str().is_some_and(
+            |p| p.starts_with(r#"{"id":"00000000-0000-4000-8000-000000000000","version":""#)
+        ),
+        "{settings}"
+    );
+
+    let set = count_set(json!({"endpoint": "https://127.0.0.1:9/count/v1", "enabled": true})).await;
+    assert!(
+        set.0
+            .pointer("/methodResponses/0/1/updated/singleton/installId")
+            .is_some_and(|id| id.is_string()),
+        "{}",
+        set.0
+    );
+    let got = count_get().await;
+    let settings = got
+        .0
+        .pointer("/methodResponses/0/1/list/0")
+        .cloned()
+        .unwrap();
+    let id = settings["installId"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        id.len() == 36 && id.as_bytes()[14] == b'4' && id == id.to_lowercase(),
+        "{settings}"
+    );
+    assert_eq!(settings["enabled"], json!(true));
+    assert_eq!(settings["decided"], json!(true), "enabled decides it");
+    assert_eq!(settings["endpoint"], json!("https://127.0.0.1:9/count/v1"));
+    let preview: serde_json::Value =
+        serde_json::from_str(settings["preview"].as_str().unwrap()).unwrap();
+    assert_eq!(preview["id"], json!(id), "{settings}");
+    assert_eq!(preview.as_object().unwrap().len(), 2, "{settings}");
+
+    for bad in [
+        json!({"endpoint": "http://127.0.0.1:9/count/v1"}),
+        json!({"endpoint": "https://127.0.0.1:9/count?x=1"}),
+        json!({"endpoint": format!("https://example.org/{}", "a".repeat(200))}),
+        json!({"installId": "00000000-0000-4000-8000-000000000000"}),
+        json!({"enabled": "yes"}),
+    ] {
+        let refused = count_set(bad.clone()).await;
+        assert_eq!(
+            refused
+                .0
+                .pointer("/methodResponses/0/1/notUpdated/singleton/type"),
+            Some(&json!("invalidProperties")),
+            "{bad}: {}",
+            refused.0
+        );
+        assert!(
+            refused
+                .0
+                .pointer("/methodResponses/0/1/notUpdated/singleton/description")
+                .is_some_and(|d| d.is_string()),
+            "{}",
+            refused.0
+        );
+    }
+    let got = count_get().await;
+    assert_eq!(
+        got.0.pointer("/methodResponses/0/1/list/0/installId"),
+        Some(&json!(id)),
+        "a refused /set changes nothing"
+    );
+
+    count_set(json!({"enabled": false})).await;
+    let got = count_get().await;
+    let settings = got
+        .0
+        .pointer("/methodResponses/0/1/list/0")
+        .cloned()
+        .unwrap();
+    assert_eq!(settings["enabled"], json!(false));
+    assert_eq!(settings["decided"], json!(true));
+    assert_eq!(settings["installId"], serde_json::Value::Null, "{settings}");
+    assert!(!settings["preview"].as_str().unwrap().contains(&id));
+
+    // On again: a new ID
+    count_set(json!({"enabled": true})).await;
+    let got = count_get().await;
+    let again = got
+        .0
+        .pointer("/methodResponses/0/1/list/0/installId")
+        .and_then(|id| id.as_str())
+        .unwrap_or_default()
+        .to_string();
+    assert!(again.len() == 36 && again != id, "{}", got.0);
+
+    // Back to how a new server has it
+    count_set(json!({"enabled": false, "endpoint": null})).await;
+    count_set(json!({"decided": false})).await;
+    let got = count_get().await;
+    assert_eq!(
+        got.0.pointer("/methodResponses/0/1/list/0/decided"),
+        Some(&json!(false))
+    );
+    assert_eq!(
+        got.0.pointer("/methodResponses/0/1/list/0/endpoint"),
+        Some(&json!("https://inbuxa.org/count/v1"))
+    );
+    // CNT-10: each change is in the audit log, without the install ID
+    let query = admin
+        .jmap_request(
+            using,
+            json!([["inbuxa:AuditEvent/query", {"accountId": account,
+                "filter": {"targetKind": "inbuxa:CountSettings"}}, "0"]]),
+        )
+        .await;
+    let ids = query
+        .0
+        .pointer("/methodResponses/0/1/ids")
+        .and_then(|ids| ids.as_array())
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        ids.len() >= 5,
+        "count settings changes aren't recorded: {}",
+        query.0
+    );
+    let records = admin
+        .jmap_request(
+            using,
+            json!([["inbuxa:AuditEvent/get", {"accountId": account, "ids": ids}, "0"]]),
+        )
+        .await;
+    let text = records.0.to_string();
+    assert!(
+        !text.contains(&id) && !text.contains(&again),
+        "the audit log links install IDs: {text}"
+    );
+
     // Make sure the IP remains unblocked after reload
     admin.registry_create_object(Action::ReloadBlockedIps).await;
     validate_password_with_ip(

@@ -102,6 +102,8 @@ impl JmapAuthorization for AccessToken {
                 GetRequestMethod::AiLimits(_) => Permission::SysSpamLlmGet,
                 // inbuxa: log file retention, with the tracers' permissions
                 GetRequestMethod::LogSettings(_) => Permission::SysTracerGet,
+                // inbuxa: CNT-1, the opt-in count, as log settings are
+                GetRequestMethod::CountSettings(_) => Permission::SysTracerGet,
                 GetRequestMethod::DlpSettings(_) => Permission::SysDlpPolicyGet,
                 // inbuxa: personal-data catalog, the inventory and its history
                 GetRequestMethod::DataInventory(_) | GetRequestMethod::InventorySnapshot(_) => {
@@ -267,6 +269,14 @@ impl JmapAuthorization for AccessToken {
                     ),
                     // inbuxa: log file retention, with the tracers' permissions
                     SetRequestMethod::LogSettings(s) => validate_set(
+                        s,
+                        self,
+                        Permission::SysTracerUpdate,
+                        Permission::SysTracerUpdate,
+                        Permission::SysTracerUpdate,
+                    ),
+                    // inbuxa: CNT-1, the opt-in count, as log settings are
+                    SetRequestMethod::CountSettings(s) => validate_set(
                         s,
                         self,
                         Permission::SysTracerUpdate,
@@ -633,6 +643,7 @@ impl JmapAuthorization for AccessToken {
                 | MethodObject::DeletedAccount
                 | MethodObject::AiLimits
                 | MethodObject::LogSettings
+                | MethodObject::CountSettings // inbuxa: CNT-1
                 | MethodObject::DlpSettings
                 | MethodObject::DataInventory
                 | MethodObject::InventorySnapshot

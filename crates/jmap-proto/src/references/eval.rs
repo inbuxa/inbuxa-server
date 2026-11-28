@@ -64,6 +64,10 @@ impl Response<'_> {
                         GetResponseMethod::LogSettings(response) => {
                             response.eval_jptr(path, &mut results)
                         }
+                        // inbuxa: CNT-1, the opt-in count
+                        GetResponseMethod::CountSettings(response) => {
+                            response.eval_jptr(path, &mut results)
+                        }
                         GetResponseMethod::DlpSettings(response) => {
                             response.eval_jptr(path, &mut results)
                         }

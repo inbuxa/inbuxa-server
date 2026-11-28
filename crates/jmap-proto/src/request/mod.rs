@@ -119,6 +119,8 @@ pub enum GetRequestMethod {
     DeletedAccount(Box<GetRequest<crate::object::inbuxa_deleted_account::DeletedAccount>>),
     AiLimits(Box<GetRequest<crate::object::inbuxa_ai_limits::AiLimits>>),
     LogSettings(Box<GetRequest<crate::object::inbuxa_log_settings::LogSettings>>),
+    // inbuxa: CNT-1, the opt-in count
+    CountSettings(Box<GetRequest<crate::object::inbuxa_count_settings::CountSettings>>),
     DlpSettings(Box<GetRequest<crate::object::inbuxa_dlp_settings::DlpSettings>>),
     DataInventory(Box<GetRequest<crate::object::inbuxa_data_inventory::DataInventory>>),
     InventorySnapshot(Box<GetRequest<crate::object::inbuxa_inventory_snapshot::InventorySnapshot>>),
@@ -183,6 +185,8 @@ pub enum SetRequestMethod<'x> {
     DeletedAccount(Box<SetRequest<'x, crate::object::inbuxa_deleted_account::DeletedAccount>>),
     AiLimits(Box<SetRequest<'x, crate::object::inbuxa_ai_limits::AiLimits>>),
     LogSettings(Box<SetRequest<'x, crate::object::inbuxa_log_settings::LogSettings>>),
+    // inbuxa: CNT-1, the opt-in count
+    CountSettings(Box<SetRequest<'x, crate::object::inbuxa_count_settings::CountSettings>>),
     DlpSettings(Box<SetRequest<'x, crate::object::inbuxa_dlp_settings::DlpSettings>>),
     Explanation(Box<SetRequest<'x, crate::object::inbuxa_explanation::Explanation>>),
     AuditSettings(Box<SetRequest<'x, crate::object::inbuxa_audit::AuditSettings>>),

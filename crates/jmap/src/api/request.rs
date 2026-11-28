@@ -266,6 +266,10 @@ impl RequestHandler for Server {
                                     SetResponseMethod::LogSettings(set_response) => {
                                         set_response.update_created_ids(&mut response);
                                     }
+                                    // inbuxa: CNT-1
+                                    SetResponseMethod::CountSettings(set_response) => {
+                                        set_response.update_created_ids(&mut response);
+                                    }
                                     SetResponseMethod::DlpSettings(set_response) => {
                                         set_response.update_created_ids(&mut response);
                                     }
@@ -517,6 +521,13 @@ impl RequestHandler for Server {
                 GetRequestMethod::LogSettings(mut req) => {
                     resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
                     crate::inbuxa::log_settings::get(self, access_token, *req)
+                        .await?
+                        .into()
+                }
+                // inbuxa: CNT-1, inbuxa:CountSettings/get
+                GetRequestMethod::CountSettings(mut req) => {
+                    resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
+                    crate::inbuxa::count_settings::get(self, access_token, *req)
                         .await?
                         .into()
                 }
@@ -1029,6 +1040,22 @@ impl RequestHandler for Server {
                         None,
                         *req,
                         |req| Box::pin(crate::inbuxa::log_settings::set(self, access_token, req)),
+                    )
+                    .await?
+                    .into()
+                }
+                // inbuxa: CNT-1, CNT-10, inbuxa:CountSettings/set, audited
+                SetRequestMethod::CountSettings(mut req) => {
+                    resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
+                    crate::inbuxa::audit::recorded(
+                        self,
+                        access_token,
+                        session,
+                        &method_name.obj.to_string(),
+                        None,
+                        None,
+                        *req,
+                        |req| Box::pin(crate::inbuxa::count_settings::set(self, access_token, req)),
                     )
                     .await?
                     .into()

@@ -13,6 +13,7 @@ pub mod ai_limits;
 pub mod audit;
 pub mod audit_log;
 pub mod blob_store_change; // inbuxa: a change of blob store
+pub mod count_settings; // inbuxa: the opt-in count
 pub mod data_inventory;
 pub mod deleted_account;
 pub mod deliverability; // inbuxa: the deliverability check

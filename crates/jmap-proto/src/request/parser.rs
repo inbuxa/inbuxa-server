@@ -194,6 +194,14 @@ impl<'de> Visitor<'de> for CallVisitor {
                     return Err(de::Error::invalid_length(1, &self));
                 }
             },
+            // inbuxa: CNT-1, the opt-in count
+            (MethodFunction::Get, MethodObject::CountSettings) => match seq.next_element() {
+                Ok(Some(value)) => RequestMethod::Get(GetRequestMethod::CountSettings(value)),
+                Err(err) => RequestMethod::invalid(err),
+                Ok(None) => {
+                    return Err(de::Error::invalid_length(1, &self));
+                }
+            },
             (MethodFunction::Get, MethodObject::DlpSettings) => match seq.next_element() {
                 Ok(Some(value)) => RequestMethod::Get(GetRequestMethod::DlpSettings(value)),
                 Err(err) => RequestMethod::invalid(err),
@@ -412,6 +420,14 @@ impl<'de> Visitor<'de> for CallVisitor {
             },
             (MethodFunction::Set, MethodObject::LogSettings) => match seq.next_element() {
                 Ok(Some(value)) => RequestMethod::Set(SetRequestMethod::LogSettings(value)),
+                Err(err) => RequestMethod::invalid(err),
+                Ok(None) => {
+                    return Err(de::Error::invalid_length(1, &self));
+                }
+            },
+            // inbuxa: CNT-1, the opt-in count
+            (MethodFunction::Set, MethodObject::CountSettings) => match seq.next_element() {
+                Ok(Some(value)) => RequestMethod::Set(SetRequestMethod::CountSettings(value)),
                 Err(err) => RequestMethod::invalid(err),
                 Ok(None) => {
                     return Err(de::Error::invalid_length(1, &self));

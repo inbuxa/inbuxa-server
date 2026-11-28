@@ -114,6 +114,7 @@ pub const OWNERS: &[(u8, Owner)] = &[
         Owner::Stays("blob store changes and the sharing policy"),
     ),
     (b'X', Owner::Stays("cluster singleton role leases")),
+    (b'Y', Owner::Stays("the opt-in count")),
 ];
 
 /// Step 2 -> 3. Returns how many rows moved.
@@ -507,6 +508,7 @@ mod tests {
         assert!(matches!(claim(b"Ls"), Claim::Stays));
         assert!(matches!(claim(b"Jj"), Claim::Stays));
         assert!(matches!(claim(b"Np"), Claim::Stays));
+        assert!(matches!(claim(b"Yc"), Claim::Stays));
         assert!(matches!(claim(b"Lz"), Claim::Nobody));
         assert!(matches!(claim(b"L"), Claim::Nobody));
         assert!(matches!(claim(b"Zz"), Claim::Nobody));

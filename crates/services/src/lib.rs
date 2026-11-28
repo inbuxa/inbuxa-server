@@ -26,6 +26,7 @@ pub mod broadcast;
 pub mod inbuxa_blob_cleanup; // inbuxa: cleaning up after a blob store change
 pub mod inbuxa_blob_move; // inbuxa: changing the blob store
 pub mod inbuxa_certificate_files; // inbuxa: certificates renewed in their files
+pub mod inbuxa_count; // inbuxa: CNT-2, the opt-in count
 pub mod inbuxa_deliverability; // inbuxa: the deliverability check
 pub mod inbuxa_lock_expiry;
 pub mod inbuxa_log_retention; // inbuxa: personal-data catalog, D1
@@ -82,6 +83,10 @@ impl SpawnServices for IpcReceivers {
 
             // inbuxa: K-C8, certificates renewed in their files (cert-manager)
             inbuxa_certificate_files::spawn_certificate_files(inner.clone());
+
+            // inbuxa: CNT-2, CNT-6, CNT-11: the opt-in count; off, it only
+            // waits; never in recovery mode
+            inbuxa_count::spawn_count(inner.clone());
 
             // inbuxa: personal-data catalog, D1: old log files go, per node
             inbuxa_log_retention::spawn_log_retention(inner.clone());

@@ -50,6 +50,7 @@ pub const INVENTORY_OBJECTS: &[&str] = &[
     "inbuxa:AuditSettings",
     "inbuxa:LogSettings",
     "inbuxa:AiLimits",
+    "inbuxa:CountSettings",
 ];
 
 /// A store or endpoint object's type and host, from its JSON: local types
@@ -286,6 +287,15 @@ impl Server {
             }
         }
         facts.collected.insert("webhooks".into(), hooks_on);
+
+        // CNT-9: the opt-in count, and its collector while on
+        let counted = inbuxa_features::count::get(data).await?;
+        if counted.enabled {
+            endpoint(&mut facts, "opt-in-count", counted.endpoint().to_string());
+        }
+        facts
+            .collected
+            .insert("opt-in-count".into(), counted.enabled);
 
         // AI: the classifier's model, and Explain's
         let models = self.registry().list::<AiModel>().await?;

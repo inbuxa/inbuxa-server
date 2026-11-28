@@ -412,6 +412,19 @@ default = "none"
 file = "inbuxa_log_settings.rs"
 default = "none"
 
+# The opt-in count (count spec). The install ID is random, about the
+# install, and exists only while the count is on.
+[object."inbuxa:CountSettings"]
+file = "inbuxa_count_settings.rs"
+default = "none"
+whose = ["administrator"]
+where = ["data-store"]
+scope = "server"
+retention = "object-life"
+[object."inbuxa:CountSettings".properties]
+installId = ["identifier"]
+preview = ["identifier"]
+
 # The inventory itself: which kinds of data the server holds, where, and the
 # hosts that receive them. Facts about the server, not about people.
 [object."inbuxa:DataInventory"]
@@ -552,6 +565,22 @@ enabled_by = ["x:WebHook.enable"]
 captures = ["x:WebHook.level", "x:WebHook.events", "x:WebHook.eventsPolicy"]
 leaves_host = true
 written_by = ["crates/common/src/telemetry/webhooks/mod.rs"]
+
+# The opt-in count (count spec, CNT-5, CNT-7, CNT-9): off by default. On,
+# the node holding the task scheduler's lease POSTs {endpoint}/checkin once
+# a week with exactly {"id": <random install ID>, "version": <version>};
+# turning it off POSTs {endpoint}/forget with {"id"} once. Nothing else:
+# no host name, address, domain, account or count of anything.
+[source."opt-in-count"]
+categories = ["identifier", "metadata"]
+whose = ["administrator"]
+where = ["external"]
+scope = "server"
+retention = "receiver"
+enabled_by = ["inbuxa:CountSettings.enabled"]
+captures = ["inbuxa:CountSettings.endpoint"]
+leaves_host = true
+written_by = ["crates/services/src/inbuxa_count.rs"]
 
 [source."spam-trainer-state"]
 categories = ["metadata"]

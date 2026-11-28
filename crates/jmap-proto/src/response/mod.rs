@@ -103,6 +103,7 @@ pub enum GetResponseMethod {
     DeletedAccount(GetResponse<crate::object::inbuxa_deleted_account::DeletedAccount>),
     AiLimits(GetResponse<crate::object::inbuxa_ai_limits::AiLimits>),
     LogSettings(GetResponse<crate::object::inbuxa_log_settings::LogSettings>),
+    CountSettings(GetResponse<crate::object::inbuxa_count_settings::CountSettings>), // inbuxa: CNT-1
     DlpSettings(GetResponse<crate::object::inbuxa_dlp_settings::DlpSettings>),
     DataInventory(GetResponse<crate::object::inbuxa_data_inventory::DataInventory>),
     InventorySnapshot(GetResponse<crate::object::inbuxa_inventory_snapshot::InventorySnapshot>),
@@ -166,6 +167,7 @@ pub enum SetResponseMethod {
     DeletedAccount(Box<SetResponse<crate::object::inbuxa_deleted_account::DeletedAccount>>),
     AiLimits(Box<SetResponse<crate::object::inbuxa_ai_limits::AiLimits>>),
     LogSettings(Box<SetResponse<crate::object::inbuxa_log_settings::LogSettings>>),
+    CountSettings(Box<SetResponse<crate::object::inbuxa_count_settings::CountSettings>>), // inbuxa: CNT-1
     DlpSettings(Box<SetResponse<crate::object::inbuxa_dlp_settings::DlpSettings>>),
     AuditSettings(Box<SetResponse<crate::object::inbuxa_audit::AuditSettings>>),
     AuditExport(Box<SetResponse<crate::object::inbuxa_audit::AuditExport>>),
@@ -492,6 +494,23 @@ impl<'x> From<SetResponse<crate::object::inbuxa_ai_limits::AiLimits>> for Respon
 impl<'x> From<SetResponse<crate::object::inbuxa_log_settings::LogSettings>> for ResponseMethod<'x> {
     fn from(value: SetResponse<crate::object::inbuxa_log_settings::LogSettings>) -> Self {
         ResponseMethod::Set(SetResponseMethod::LogSettings(Box::new(value)))
+    }
+}
+
+// inbuxa: CNT-1, the opt-in count
+impl<'x> From<GetResponse<crate::object::inbuxa_count_settings::CountSettings>>
+    for ResponseMethod<'x>
+{
+    fn from(value: GetResponse<crate::object::inbuxa_count_settings::CountSettings>) -> Self {
+        ResponseMethod::Get(GetResponseMethod::CountSettings(value))
+    }
+}
+
+impl<'x> From<SetResponse<crate::object::inbuxa_count_settings::CountSettings>>
+    for ResponseMethod<'x>
+{
+    fn from(value: SetResponse<crate::object::inbuxa_count_settings::CountSettings>) -> Self {
+        ResponseMethod::Set(SetResponseMethod::CountSettings(Box::new(value)))
     }
 }
 

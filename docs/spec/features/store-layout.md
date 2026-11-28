@@ -167,6 +167,7 @@ can't place, before it writes anything. The table is `OWNERS` in
 | `V` | store checks, the layout mark (`Vs`), lease (`Vm`) and step progress (`Vt`) | stays |
 | `W` | blob store changes, the sharing policy | stays |
 | `X` | singleton role leases (`Xs`, `Xm`) and the alerts firing (`Xa`), #437 | stays |
+| `Y` | the opt-in count's settings (`Yc`), count spec | stays |
 
 A key moves without its first byte, so `Le` + node + seq becomes `e` + node
 + seq in `ib_audit`. A feature's settings stay in `_`, where a configuration

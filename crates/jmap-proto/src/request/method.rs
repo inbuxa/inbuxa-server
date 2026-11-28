@@ -50,6 +50,7 @@ pub enum MethodObject {
     // inbuxa: AI call limits
     AiLimits,
     LogSettings,
+    CountSettings, // inbuxa: CNT-1, the opt-in count
     DlpSettings,
     DataInventory,
     InventorySnapshot,
@@ -124,6 +125,7 @@ impl MethodObject {
             MethodObject::DeletedAccount => Capability::Inbuxa,
             MethodObject::AiLimits => Capability::Inbuxa,
             MethodObject::LogSettings => Capability::Inbuxa,
+            MethodObject::CountSettings => Capability::Inbuxa, // inbuxa: CNT-1
             MethodObject::DlpSettings => Capability::Inbuxa,
             MethodObject::DataInventory => Capability::Inbuxa,
             MethodObject::InventorySnapshot => Capability::Inbuxa,
@@ -336,6 +338,9 @@ impl MethodName {
             (MethodFunction::Get, MethodObject::AiLimits) => "inbuxa:AiLimits/get",
             (MethodFunction::Set, MethodObject::AiLimits) => "inbuxa:AiLimits/set",
             (MethodFunction::Get, MethodObject::LogSettings) => "inbuxa:LogSettings/get",
+            // inbuxa: CNT-1, the opt-in count
+            (MethodFunction::Get, MethodObject::CountSettings) => "inbuxa:CountSettings/get",
+            (MethodFunction::Set, MethodObject::CountSettings) => "inbuxa:CountSettings/set",
             (MethodFunction::Get, MethodObject::DlpSettings) => "inbuxa:DlpSettings/get",
             (MethodFunction::Get, MethodObject::DataInventory) => "inbuxa:DataInventory/get",
             (MethodFunction::Get, MethodObject::InventorySnapshot) => {
@@ -551,6 +556,9 @@ impl MethodName {
             "inbuxa:AiLimits/get" => (MethodObject::AiLimits, MethodFunction::Get),
             "inbuxa:AiLimits/set" => (MethodObject::AiLimits, MethodFunction::Set),
             "inbuxa:LogSettings/get" => (MethodObject::LogSettings, MethodFunction::Get),
+            // inbuxa: CNT-1, the opt-in count
+            "inbuxa:CountSettings/get" => (MethodObject::CountSettings, MethodFunction::Get),
+            "inbuxa:CountSettings/set" => (MethodObject::CountSettings, MethodFunction::Set),
             "inbuxa:DlpSettings/get" => (MethodObject::DlpSettings, MethodFunction::Get),
             "inbuxa:DataInventory/get" => (MethodObject::DataInventory, MethodFunction::Get),
             "inbuxa:InventorySnapshot/get" => (MethodObject::InventorySnapshot, MethodFunction::Get),
@@ -668,6 +676,7 @@ impl Display for MethodObject {
             MethodObject::DeletedAccount => "inbuxa:DeletedAccount",
             MethodObject::AiLimits => "inbuxa:AiLimits",
             MethodObject::LogSettings => "inbuxa:LogSettings",
+            MethodObject::CountSettings => "inbuxa:CountSettings", // inbuxa: CNT-1
             MethodObject::DlpSettings => "inbuxa:DlpSettings",
             MethodObject::DataInventory => "inbuxa:DataInventory",
             MethodObject::InventorySnapshot => "inbuxa:InventorySnapshot",

@@ -419,6 +419,7 @@ impl IntermediateChangesResponse {
             | MethodObject::DeletedAccount
             | MethodObject::AiLimits
             | MethodObject::LogSettings
+            | MethodObject::CountSettings // inbuxa: CNT-1
             | MethodObject::DlpSettings
             | MethodObject::DataInventory
             | MethodObject::InventorySnapshot

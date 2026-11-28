@@ -408,6 +408,15 @@ async fn fork_current(server: &Server, object: &str, id: &MaybeInvalid<Id>) -> O
             .await
             .ok()
             .and_then(|settings| serde_json::to_value(settings).ok()),
+        // CNT-10: the install ID isn't recorded, so the log never links
+        // one ID to the next (CNT-3)
+        "inbuxa:CountSettings" => inbuxa_features::count::get(data).await.ok().map(|s| {
+            serde_json::json!({
+                "enabled": s.enabled,
+                "decided": s.decided,
+                "endpoint": s.endpoint(),
+            })
+        }),
         "inbuxa:AiLimits" => limits::get(data)
             .await
             .ok()
