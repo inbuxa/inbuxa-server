@@ -10,11 +10,21 @@
 
 use crate::utils::server::{TestServer, TestServerBuilder};
 use common::{BuildServer, config::mailstore::spamfilter::PyzorConfig, ipc::RegistryChange};
-use registry::schema::{
-    enums::TracingLevel,
-    prelude::{ObjectType, Property},
-    structs::{Action, Expression, MemoryLookupKey, MtaStageAuth, SpamPyzor, Tracer, TracerStdout},
+use registry::{
+    schema::{
+        enums::TracingLevel,
+        prelude::{ObjectType, Property},
+        structs::{
+            Action, Certificate, Expression, MemoryLookupKey, MtaStageAuth, PublicText,
+            PublicTextValue, SecretText, SecretTextValue, SpamPyzor, SystemSettings, Tracer,
+            TracerStdout,
+        },
+    },
+    types::{datetime::UTCDateTime, map::Map},
 };
+use std::sync::Arc;
+use store::registry::write::{RegistryWrite, RegistryWriteResult};
+use types::id::Id;
 
 #[tokio::test(flavor = "multi_thread")]
 pub async fn reload_tests() {
@@ -50,6 +60,7 @@ pub async fn reload_tests() {
     test_unresolvable_pyzor(&test).await;
     test_build_errors(&test).await;
     test_catch_up_reloads_lookups(&test).await;
+    test_default_certificate_follows_settings(&test).await;
 
     if test.is_reset() {
         test.temp_dir.delete();
@@ -236,6 +247,91 @@ async fn test_catch_up_reloads_lookups(test: &TestServer) {
         .assert_destroyed(&[key_id]);
     admin.reload_lookup_stores().await;
     assert!(test.server.get_lookup_store("catch-up").is_none());
+}
+
+// inbuxa: #659: a new default certificate takes effect with the settings
+// write, without a certificate reload
+async fn test_default_certificate_follows_settings(test: &TestServer) {
+    println!("Running a default certificate change...");
+    let admin = test.account("admin@example.org");
+    let first = stored_certificate(test, "first.default-cert.test").await;
+    let second = stored_certificate(test, "second.default-cert.test").await;
+    admin
+        .registry_create_object(Action::ReloadTlsCertificates)
+        .await;
+
+    for (id, name) in [
+        (first, "first.default-cert.test"),
+        (second, "second.default-cert.test"),
+        (first, "first.default-cert.test"),
+    ] {
+        admin
+            .registry_update_setting(
+                SystemSettings {
+                    default_certificate_id: Some(id),
+                    ..Default::default()
+                },
+                &[Property::DefaultCertificateId],
+            )
+            .await;
+        let certificates = test.server.inner.data.tls_certificates.load();
+        let (default, named) = (certificates.get("*"), certificates.get(name));
+        assert!(
+            default.is_some() && named.is_some() && Arc::ptr_eq(default.unwrap(), named.unwrap()),
+            "the default certificate is not {name}"
+        );
+    }
+
+    // A default certificate can't be deleted; with none set, the server
+    // picks one of its own
+    admin
+        .registry_update_setting(
+            SystemSettings {
+                default_certificate_id: None,
+                ..Default::default()
+            },
+            &[Property::DefaultCertificateId],
+        )
+        .await;
+    admin
+        .registry_destroy(ObjectType::Certificate, [first, second])
+        .await
+        .assert_destroyed(&[first, second]);
+    admin
+        .registry_create_object(Action::ReloadTlsCertificates)
+        .await;
+}
+
+/// A self-signed certificate for `name`, stored as ACME stores one.
+async fn stored_certificate(test: &TestServer, name: &str) -> Id {
+    let key = rcgen::KeyPair::generate().unwrap();
+    let mut params = rcgen::CertificateParams::new(vec![name.to_string()]).unwrap();
+    let now = ::time::OffsetDateTime::now_utc();
+    params.not_before = now - ::time::Duration::days(1);
+    params.not_after = now + ::time::Duration::days(30);
+    let chain = params.self_signed(&key).unwrap().pem();
+    let result = test
+        .server
+        .registry()
+        .write(RegistryWrite::insert(
+            &Certificate {
+                certificate: PublicText::Text(PublicTextValue { value: chain }),
+                private_key: SecretText::Text(SecretTextValue {
+                    secret: key.serialize_pem(),
+                }),
+                issuer: "Test".into(),
+                not_valid_after: UTCDateTime::from_timestamp(params.not_after.unix_timestamp()),
+                not_valid_before: UTCDateTime::from_timestamp(params.not_before.unix_timestamp()),
+                subject_alternative_names: Map::new(vec![name.to_string()]),
+            }
+            .into(),
+        ))
+        .await
+        .unwrap();
+    let RegistryWriteResult::Success(id) = result else {
+        panic!("certificate stored: {result:?}");
+    };
+    id
 }
 
 fn running_pyzor(test: &TestServer) -> PyzorConfig {

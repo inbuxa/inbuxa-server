@@ -152,6 +152,25 @@ impl Server {
 
                         // Update core
                         self.inner.shared_core.store(core.into());
+
+                        // inbuxa: #659: the default certificate is picked while
+                        // the certificates are parsed, so changing it in the
+                        // system settings did nothing until a certificate
+                        // reload or a restart. Rebuild them with the settings:
+                        // writes that arrive together share one reload, named
+                        // after the first, so this can't wait for a
+                        // SystemSettings reload in particular.
+                        let mut certificates = AHashMap::new();
+                        parse_certificates(
+                            &mut bootstrap,
+                            &mut certificates,
+                            &mut Default::default(),
+                        )
+                        .await;
+                        self.inner
+                            .data
+                            .tls_certificates
+                            .store(Arc::new(certificates));
                         if defaults_changed {
                             self.invalidate_local_caches(&[CacheInvalidation::AllAccessTokens])
                                 .await;
