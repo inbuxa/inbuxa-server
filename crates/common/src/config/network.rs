@@ -57,6 +57,10 @@ pub struct NetworkInfo {
     pub pacc: Vec<Pacc>,
     pub mxs: Vec<MailExchanger>,
     pub services: VecMap<ServiceProtocol, Service>,
+    /// inbuxa: #657, the public addresses mail leaves from, when they aren't
+    /// the MX hosts' (a cluster's egress). `INBUXA_OUTBOUND_ADDRESSES`; the
+    /// suggested SPF records name these as well as `mx`.
+    pub outbound_addresses: Vec<std::net::IpAddr>,
 }
 
 #[derive(Clone)]
@@ -370,6 +374,22 @@ impl Network {
                 split(&pacc)
             })
             .collect();
+        // inbuxa: #657
+        let mut outbound_addresses = Vec::new();
+        let mut outbound_invalid = Vec::new();
+        if let Ok(value) = types::branding::env_var("OUTBOUND_ADDRESSES") {
+            for entry in value
+                .split(|c: char| c == ',' || c.is_whitespace())
+                .filter(|entry| !entry.is_empty())
+            {
+                match entry.parse::<std::net::IpAddr>() {
+                    Ok(ip) => outbound_addresses.push(ip),
+                    Err(err) => outbound_invalid.push(format!(
+                        "INBUXA_OUTBOUND_ADDRESSES: {entry}: {err}, left out."
+                    )),
+                }
+            }
+        }
         let mut network = Network {
             node_id: bp.node_id() as u64,
             server_name: default_hostname.to_string(),
@@ -385,8 +405,13 @@ impl Network {
                 mxs: system.mail_exchangers.into_iter().collect(),
                 services: system.services,
                 pacc,
+                outbound_addresses,
             },
         };
+
+        for message in outbound_invalid {
+            bp.build_warning(ObjectType::SystemSettings.singleton(), message);
+        }
 
         if let Some(role) = &bp.role {
             match &role.tasks {
